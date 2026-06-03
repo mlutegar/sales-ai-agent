@@ -587,7 +587,42 @@ def rlhf_queue():
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+def seed_db():
+    db = sqlite3.connect(DATABASE)
+    count = db.execute('SELECT COUNT(*) FROM leads').fetchone()[0]
+    if count > 0:
+        db.close()
+        return
+    leads = [
+        ('Rodrigo Mendes',      'Nubank',           'c_level', 'Fintech',               'rodrigo.mendes@nubank.com.br',         'linkedin.com/in/rodrigomendes',    '11999990001'),
+        ('Ana Paula Ferreira',  'Totvs',            'manager', 'Software B2B',           'anapaula@totvs.com.br',                'linkedin.com/in/anapaulaferreira', '11999990002'),
+        ('Carlos Eduardo Lima', 'Ambev',            'c_level', 'Bens de Consumo',        'carlos.lima@ambev.com.br',             'linkedin.com/in/carloslima',       '11999990003'),
+        ('Juliana Rocha',       'iFood',            'manager', 'Marketplace / Logistica','juliana.rocha@ifood.com.br',           'linkedin.com/in/juliana-rocha',    '11999990004'),
+        ('Thiago Barbosa',      'Embraer',          'engineer','Aeroespacial',           'thiago.barbosa@embraer.com.br',        'linkedin.com/in/thiagobarbosa',    '12999990005'),
+        ('Fernanda Castro',     'Magazine Luiza',   'c_level', 'Varejo / E-commerce',    'fernanda.castro@magazineluiza.com.br', 'linkedin.com/in/fernandacastro',   '11999990006'),
+        ('Rafael Souza',        'Stone',            'engineer','Fintech / Pagamentos',   'rafael.souza@stone.com.br',            'linkedin.com/in/rafaelsouza',      '11999990007'),
+        ('Mariana Oliveira',    'Localiza',         'manager', 'Mobilidade / Locacao',   'mariana.oliveira@localiza.com.br',     'linkedin.com/in/marianaoliveira', '31999990008'),
+        ('Bruno Alves',         'Bradesco',         'c_level', 'Banco / Financeiro',     'bruno.alves@bradesco.com.br',          'linkedin.com/in/brunoalves',       '11999990009'),
+        ('Patricia Nunes',      'Raizen',           'engineer','Energia / Agronegocio',  'patricia.nunes@raizen.com.br',         'linkedin.com/in/patricianunes',    '11999990010'),
+        ('Ricardo Nunes',       'Magazine Luiza',   'c_level', 'Varejo / E-commerce',    'ricardo.nunes@magazineluiza.com.br',   'linkedin.com/in/ricardohnunes',    '11999990011'),
+        ('Camila Teixeira',     'Rappi',            'manager', 'Delivery / Marketplace', 'camila.teixeira@rappi.com',            'linkedin.com/in/camilateixeira',   '11999990012'),
+        ('Diego Martins',       'Loggi',            'engineer','Logistica / Tech',       'diego.martins@loggi.com',              'linkedin.com/in/diegomartins',     '11999990013'),
+        ('Luciana Barros',      'Itau Unibanco',    'c_level', 'Banco / Financeiro',     'luciana.barros@itau-unibanco.com.br',  'linkedin.com/in/lucianabarros',    '11999990014'),
+        ('Felipe Cardoso',      'Vtex',             'engineer','E-commerce / SaaS',      'felipe.cardoso@vtex.com',              'linkedin.com/in/felipecardoso',    '11999990015'),
+    ]
+    db.executemany(
+        'INSERT INTO leads (name,company,role,sector,email,linkedin,whatsapp) VALUES (?,?,?,?,?,?,?)',
+        leads
+    )
+    for i, l in enumerate(leads, start=1):
+        db.execute('INSERT INTO consent_logs (lead_id,action,details) VALUES (?,?,?)',
+                   (i, 'added', 'Lead pré-configurado (seed)'))
+    db.commit()
+    db.close()
+
+
 init_db()
+seed_db()
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
