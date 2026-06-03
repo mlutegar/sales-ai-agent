@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sales AI Agent — Protótipo</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+<style>
+  body { background:#f5f7fa; font-size:.93rem; }
+  .navbar { background:#1a1d23; }
+  .navbar-brand { font-weight:700; color:#7c6af7 !important; }
+  .stat-card { border:none; border-radius:12px; }
+  .stat-card .display-6 { font-weight:700; }
+  .badge-channel-linkedin  { background:#0077b5; }
+  .badge-channel-email     { background:#ea4335; }
+  .badge-channel-whatsapp  { background:#25d366; }
+  .msg-box { background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:12px; white-space:pre-wrap; font-size:.88rem; }
+  .score-btn.active { box-shadow:0 0 0 3px #7c6af7; }
+  .sidebar { width:420px; }
+  pre { white-space:pre-wrap; font-size:.82rem; }
+  .sentiment-badge { font-size:.8rem; padding:.35em .7em; }
+  .handon-alert { background:#fff3cd; border:2px solid #f0ad4e; border-radius:8px; padding:12px; }
+  #toast-area { position:fixed; bottom:20px; right:20px; z-index:9999; }
+</style>
+</head>
+<body>
+
+<nav class="navbar navbar-dark px-3 py-2 mb-4">
+  <span class="navbar-brand"><i class="bi bi-robot me-2"></i>Sales AI Agent</span>
+  <span class="text-secondary small" id="api-status"></span>
+</nav>
+
+<!-- Stats -->
+<div class="container-fluid px-4">
+<div class="row g-3 mb-4" id="stats-row">
+  <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-primary" id="s-total">—</div><div class="text-muted small">Leads</div></div></div>
+  <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-danger" id="s-hot">—</div><div class="text-muted small">Hot Leads</div></div></div>
+  <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-success" id="s-meetings">—</div><div class="text-muted small">Reuniões</div></div></div>
+  <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-warning" id="s-pending">—</div><div class="text-muted small">Aguard. Revisão</div></div></div>
+  <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-info" id="s-score">—</div><div class="text-muted small">Score Médio</div></div></div>
+  <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-secondary" id="s-docs">—</div><div class="text-muted small">Docs RAG</div></div></div>
+</div>
+
+<!-- Tabs -->
+<ul class="nav nav-tabs mb-3" id="mainTabs">
+  <li class="nav-item"><a class="nav-link active" href="#" data-tab="leads"><i class="bi bi-people me-1"></i>Leads</a></li>
+  <li class="nav-item"><a class="nav-link" href="#" data-tab="rlhf"><i class="bi bi-stars me-1"></i>RLHF / Curadoria</a></li>
+  <li class="nav-item"><a class="nav-link" href="#" data-tab="rag"><i class="bi bi-file-earmark-text me-1"></i>RAG / Docs</a></li>
+  <li class="nav-item"><a class="nav-link" href="#" data-tab="golden"><i class="bi bi-trophy me-1"></i>Casos de Ouro</a></li>
+  <li class="nav-item"><a class="nav-link" href="#" data-tab="agenda"><i class="bi bi-calendar-check me-1"></i>Agenda</a></li>
+  <li class="nav-item"><a class="nav-link" href="#" data-tab="lgpd"><i class="bi bi-shield-lock me-1"></i>LGPD</a></li>
+</ul>
+
+<!-- ═══ TAB: LEADS ══════════════════════════════════════════════════════════ -->
+<div id="tab-leads">
+  <div class="row g-3">
+    <!-- Add Lead Form -->
+    <div class="col-md-3">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-person-plus me-1"></i>Novo Lead</h6>
+        <div class="mb-2"><input class="form-control form-control-sm" id="l-name" placeholder="Nome *"></div>
+        <div class="mb-2"><input class="form-control form-control-sm" id="l-company" placeholder="Empresa *"></div>
+        <div class="mb-2">
+          <select class="form-select form-select-sm" id="l-role">
+            <option value="c_level">C-Level / Diretor</option>
+            <option value="manager">Gerente / Coordenador</option>
+            <option value="engineer">Engenheiro / TI</option>
+            <option value="other">Outro</option>
+          </select>
+        </div>
+        <div class="mb-2"><input class="form-control form-control-sm" id="l-sector" placeholder="Setor (ex: Fintech)"></div>
+        <div class="mb-2"><input class="form-control form-control-sm" id="l-email" placeholder="E-mail"></div>
+        <div class="mb-2"><input class="form-control form-control-sm" id="l-linkedin" placeholder="LinkedIn URL"></div>
+        <div class="mb-3"><input class="form-control form-control-sm" id="l-whatsapp" placeholder="WhatsApp"></div>
+        <button class="btn btn-primary btn-sm w-100" onclick="createLead()"><i class="bi bi-plus-circle me-1"></i>Adicionar Lead</button>
+      </div>
+    </div>
+
+    <!-- Leads Table -->
+    <div class="col-md-9">
+      <div class="card p-3">
+        <div class="d-flex justify-content-between mb-2">
+          <h6 class="fw-bold mb-0"><i class="bi bi-list-ul me-1"></i>Lista de Leads</h6>
+          <button class="btn btn-outline-secondary btn-sm" onclick="loadLeads()"><i class="bi bi-arrow-clockwise"></i></button>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover table-sm">
+            <thead class="table-light"><tr>
+              <th>Nome</th><th>Empresa</th><th>Cargo</th><th>Setor</th><th>Status</th><th>Score</th><th>Ações</th>
+            </tr></thead>
+            <tbody id="leads-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TAB: RLHF ══════════════════════════════════════════════════════════ -->
+<div id="tab-rlhf" class="d-none">
+  <div class="card p-3">
+    <div class="d-flex justify-content-between mb-3">
+      <h6 class="fw-bold mb-0"><i class="bi bi-stars me-1"></i>Fila de Curadoria — Mensagens aguardando revisão humana</h6>
+      <button class="btn btn-outline-secondary btn-sm" onclick="loadRLHF()"><i class="bi bi-arrow-clockwise"></i></button>
+    </div>
+    <div id="rlhf-list"></div>
+  </div>
+</div>
+
+<!-- ═══ TAB: RAG ══════════════════════════════════════════════════════════ -->
+<div id="tab-rag" class="d-none">
+  <div class="row g-3">
+    <div class="col-md-4">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-upload me-1"></i>Adicionar Documento</h6>
+        <div class="mb-2"><input class="form-control form-control-sm" id="doc-name" placeholder="Nome do documento *"></div>
+        <div class="mb-3"><textarea class="form-control form-control-sm" id="doc-content" rows="8" placeholder="Cole o conteúdo do manual, white paper ou PDF técnico aqui..."></textarea></div>
+        <button class="btn btn-primary btn-sm w-100" onclick="addDoc()"><i class="bi bi-plus-circle me-1"></i>Adicionar</button>
+        <hr>
+        <h6 class="fw-bold mb-2">Documentos carregados</h6>
+        <div id="doc-list"></div>
+      </div>
+    </div>
+    <div class="col-md-8">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-search me-1"></i>Consulta RAG</h6>
+        <div class="mb-2"><textarea class="form-control form-control-sm" id="rag-query" rows="3" placeholder="Pergunta técnica ou tema para busca nos documentos..."></textarea></div>
+        <div class="form-check mb-3">
+          <input class="form-check-input" type="checkbox" id="storytelling-mode">
+          <label class="form-check-label small" for="storytelling-mode">
+            <strong>Modo Storytelling</strong> — converte dados técnicos em benefícios de negócio (ROI, economia)
+          </label>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="queryRAG()"><i class="bi bi-lightning me-1"></i>Consultar</button>
+        <div id="rag-answer" class="mt-3"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TAB: GOLDEN CASES ══════════════════════════════════════════════════ -->
+<div id="tab-golden" class="d-none">
+  <div class="row g-3">
+    <div class="col-md-4">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-trophy me-1"></i>Novo Caso de Ouro</h6>
+        <div class="mb-2"><input class="form-control form-control-sm" id="gc-title" placeholder="Título *"></div>
+        <div class="mb-2"><input class="form-control form-control-sm" id="gc-context" placeholder="Contexto (setor, cargo, produto)"></div>
+        <div class="mb-2"><textarea class="form-control form-control-sm" id="gc-content" rows="6" placeholder="Conversa ou mensagem que gerou resultado real..."></textarea></div>
+        <div class="mb-3">
+          <label class="small fw-bold">Score de sucesso</label>
+          <div class="d-flex gap-2 mt-1" id="gc-score-btns">
+            <button class="btn btn-outline-warning btn-sm score-btn" data-score="3">3★</button>
+            <button class="btn btn-outline-warning btn-sm score-btn" data-score="4">4★</button>
+            <button class="btn btn-warning btn-sm score-btn active" data-score="5">5★</button>
+          </div>
+        </div>
+        <button class="btn btn-warning btn-sm w-100" onclick="addGoldenCase()"><i class="bi bi-star-fill me-1"></i>Salvar Caso</button>
+      </div>
+    </div>
+    <div class="col-md-8">
+      <div class="card p-3">
+        <div class="d-flex justify-content-between mb-2">
+          <h6 class="fw-bold mb-0">Biblioteca de Casos de Ouro</h6>
+          <button class="btn btn-outline-secondary btn-sm" onclick="loadGoldenCases()"><i class="bi bi-arrow-clockwise"></i></button>
+        </div>
+        <div id="golden-list"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TAB: AGENDA ══════════════════════════════════════════════════════════ -->
+<div id="tab-agenda" class="d-none">
+  <div class="row g-3">
+    <div class="col-md-4">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-calendar-plus me-1"></i>Novo Horário Disponível</h6>
+        <div class="mb-2"><input class="form-control form-control-sm" type="datetime-local" id="slot-dt"></div>
+        <div class="mb-2">
+          <select class="form-select form-select-sm" id="slot-dur">
+            <option value="15">15 minutos</option>
+            <option value="30">30 minutos</option>
+            <option value="60">1 hora</option>
+          </select>
+        </div>
+        <div class="mb-3"><input class="form-control form-control-sm" id="slot-link" placeholder="Link da reunião (Meet, Zoom...)"></div>
+        <button class="btn btn-success btn-sm w-100" onclick="addSlot()"><i class="bi bi-plus-circle me-1"></i>Adicionar Slot</button>
+        <hr>
+        <p class="small text-muted">
+          <i class="bi bi-info-circle me-1"></i>
+          Integração com Calendly/Google Calendar requer configuração de API externa — não implementada neste protótipo.
+        </p>
+      </div>
+    </div>
+    <div class="col-md-8">
+      <div class="card p-3">
+        <div class="d-flex justify-content-between mb-2">
+          <h6 class="fw-bold mb-0">Slots de Agenda</h6>
+          <button class="btn btn-outline-secondary btn-sm" onclick="loadSlots()"><i class="bi bi-arrow-clockwise"></i></button>
+        </div>
+        <div id="slots-list"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TAB: LGPD ══════════════════════════════════════════════════════════ -->
+<div id="tab-lgpd" class="d-none">
+  <div class="card p-3">
+    <div class="d-flex justify-content-between mb-3">
+      <h6 class="fw-bold mb-0"><i class="bi bi-shield-lock me-1"></i>Logs de Consentimento LGPD</h6>
+      <button class="btn btn-outline-secondary btn-sm" onclick="loadConsentLogs()"><i class="bi bi-arrow-clockwise"></i></button>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm table-hover">
+        <thead class="table-light"><tr><th>Data</th><th>Lead</th><th>Empresa</th><th>Ação</th><th>Detalhes</th></tr></thead>
+        <tbody id="consent-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+</div><!-- /container -->
+
+<!-- ═══ LEAD DETAIL MODAL ══════════════════════════════════════════════════ -->
+<div class="modal fade" id="leadModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title fw-bold" id="modal-lead-title">Lead</h5>
+        <div class="ms-auto d-flex gap-2 me-3">
+          <button class="btn btn-outline-danger btn-sm" id="btn-optout" onclick="optoutLead()"><i class="bi bi-slash-circle me-1"></i>Opt-out LGPD</button>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3">
+
+          <!-- Left: Research + Sequence -->
+          <div class="col-md-7">
+            <!-- Research -->
+            <div class="card mb-3">
+              <div class="card-header d-flex align-items-center justify-content-between">
+                <span class="fw-bold"><i class="bi bi-search me-1"></i>Pesquisa & Gancho</span>
+                <div class="d-flex gap-2">
+                  <input class="form-control form-control-sm" style="width:200px" id="modal-product" placeholder="Produto sendo vendido">
+                  <button class="btn btn-primary btn-sm" onclick="runResearch()"><i class="bi bi-lightning me-1"></i>Pesquisar</button>
+                </div>
+              </div>
+              <div class="card-body">
+                <div id="research-hook" class="msg-box mb-2" style="min-height:60px">Clique em "Pesquisar" para gerar o gancho personalizado...</div>
+                <div id="research-context" class="d-none">
+                  <button class="btn btn-link btn-sm p-0" onclick="toggleContext()">Ver contexto completo ▼</button>
+                  <pre id="research-context-text" class="d-none mt-2 bg-light p-2 rounded"></pre>
+                </div>
+              </div>
+            </div>
+
+            <!-- Sequence -->
+            <div class="card mb-3">
+              <div class="card-header d-flex align-items-center justify-content-between">
+                <span class="fw-bold"><i class="bi bi-send me-1"></i>Sequência Multicanal</span>
+                <button class="btn btn-primary btn-sm" onclick="generateSequence()"><i class="bi bi-magic me-1"></i>Gerar Sequência</button>
+              </div>
+              <div class="card-body" id="sequence-container">
+                <p class="text-muted small mb-0">Clique em "Gerar Sequência" para criar as mensagens personalizadas para cada canal.</p>
+              </div>
+            </div>
+
+            <!-- Response / Sentiment -->
+            <div class="card">
+              <div class="card-header fw-bold"><i class="bi bi-chat-dots me-1"></i>Registrar Resposta do Prospect</div>
+              <div class="card-body">
+                <textarea class="form-control form-control-sm mb-2" id="prospect-response" rows="3" placeholder="Cole aqui a resposta recebida do prospect..."></textarea>
+                <button class="btn btn-secondary btn-sm" onclick="recordResponse()"><i class="bi bi-bullseye me-1"></i>Analisar Sentimento</button>
+                <div id="sentiment-result" class="mt-2"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Info + Logs -->
+          <div class="col-md-5">
+            <div class="card mb-3">
+              <div class="card-header fw-bold"><i class="bi bi-person-badge me-1"></i>Informações</div>
+              <div class="card-body" id="lead-info"></div>
+            </div>
+
+            <!-- Hand-off Alert (hidden by default) -->
+            <div id="handon-alert" class="handon-alert d-none mb-3">
+              <strong><i class="bi bi-bell-fill text-warning me-1"></i>ALERTA DE HAND-OFF</strong>
+              <p class="mb-0 mt-1 small">Este lead demonstrou <strong>alto interesse</strong>. Recomenda-se transição imediata para atendimento humano.</p>
+            </div>
+
+            <!-- Schedule -->
+            <div class="card mb-3">
+              <div class="card-header fw-bold"><i class="bi bi-calendar-check me-1"></i>Agendar Reunião</div>
+              <div class="card-body">
+                <div id="available-slots-for-lead"></div>
+              </div>
+            </div>
+
+            <!-- Sentiment History -->
+            <div class="card mb-3">
+              <div class="card-header fw-bold"><i class="bi bi-graph-up me-1"></i>Histórico de Sentimentos</div>
+              <div class="card-body" id="sentiment-history"></div>
+            </div>
+
+            <!-- Consent Log -->
+            <div class="card">
+              <div class="card-header fw-bold"><i class="bi bi-journal-text me-1"></i>Log de Consentimento</div>
+              <div class="card-body" id="consent-log-lead"></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast-area"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let currentLeadId = null;
+let currentLeadData = null;
+let gcSelectedScore = 5;
+const leadModal = new bootstrap.Modal(document.getElementById('leadModal'));
+
+// ── Tabs ────────────────────────────────────────────────────────────────────
+document.querySelectorAll('[data-tab]').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    document.querySelectorAll('[data-tab]').forEach(x => x.classList.remove('active'));
+    a.classList.add('active');
+    document.querySelectorAll('[id^="tab-"]').forEach(x => x.classList.add('d-none'));
+    document.getElementById('tab-' + a.dataset.tab).classList.remove('d-none');
+    if (a.dataset.tab === 'rlhf')   loadRLHF();
+    if (a.dataset.tab === 'rag')    loadDocs();
+    if (a.dataset.tab === 'golden') loadGoldenCases();
+    if (a.dataset.tab === 'agenda') loadSlots();
+    if (a.dataset.tab === 'lgpd')   loadConsentLogs();
+  });
+});
+
+// ── Toast ────────────────────────────────────────────────────────────────────
+function toast(msg, type='success') {
+  const el = document.createElement('div');
+  el.className = `toast align-items-center text-bg-${type} border-0 show mb-2`;
+  el.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button type="button" class="btn-close btn-close-white me-2 m-auto" onclick="this.closest('.toast').remove()"></button></div>`;
+  document.getElementById('toast-area').prepend(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+async function api(path, method='GET', body=null) {
+  const opts = { method, headers: {'Content-Type':'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  const data = await res.json();
+  if (!res.ok) { toast(data.error || 'Erro', 'danger'); throw data; }
+  return data;
+}
+
+// ── Stats ────────────────────────────────────────────────────────────────────
+async function loadStats() {
+  const s = await api('/api/stats');
+  document.getElementById('s-total').textContent    = s.total_leads;
+  document.getElementById('s-hot').textContent      = s.hot_leads;
+  document.getElementById('s-meetings').textContent = s.meetings;
+  document.getElementById('s-pending').textContent  = s.pending_review;
+  document.getElementById('s-score').textContent    = s.avg_score || '—';
+  document.getElementById('s-docs').textContent     = s.docs_count;
+}
+
+// ── Leads ────────────────────────────────────────────────────────────────────
+const STATUS_BADGE = {
+  new:              'bg-secondary',
+  researched:       'bg-info text-dark',
+  sequence_created: 'bg-primary',
+  contacted:        'bg-primary',
+  needs_followup:   'bg-warning text-dark',
+  hot_lead:         'bg-danger',
+  rejected:         'bg-dark',
+  meeting_set:      'bg-success',
+  opted_out:        'bg-secondary',
+};
+const STATUS_LABEL = {
+  new:'Novo', researched:'Pesquisado', sequence_created:'Sequência criada',
+  contacted:'Contactado', needs_followup:'Follow-up', hot_lead:'🔥 Hot Lead',
+  rejected:'Rejeitado', meeting_set:'✅ Reunião', opted_out:'Opt-out',
+};
+const ROLE_LABEL = { c_level:'C-Level', manager:'Gerente', engineer:'Engenheiro', other:'Outro' };
+
+async function loadLeads() {
+  const leads = await api('/api/leads');
+  const tbody = document.getElementById('leads-tbody');
+  tbody.innerHTML = leads.map(l => `
+    <tr>
+      <td><strong>${esc(l.name)}</strong></td>
+      <td>${esc(l.company)}</td>
+      <td>${ROLE_LABEL[l.role]||l.role}</td>
+      <td>${esc(l.sector)}</td>
+      <td><span class="badge ${STATUS_BADGE[l.status]||'bg-secondary'}">${STATUS_LABEL[l.status]||l.status}</span>
+          ${l.opted_out ? '<span class="badge bg-dark ms-1">Blacklist</span>' : ''}</td>
+      <td>${l.interest_score > 0 ? `<span class="badge bg-warning text-dark">${l.interest_score}/10</span>` : '—'}</td>
+      <td><button class="btn btn-outline-primary btn-sm" onclick="openLead(${l.id})"><i class="bi bi-arrow-right"></i></button></td>
+    </tr>`).join('');
+}
+
+async function createLead() {
+  const name = document.getElementById('l-name').value.trim();
+  const company = document.getElementById('l-company').value.trim();
+  if (!name || !company) { toast('Nome e empresa são obrigatórios', 'warning'); return; }
+  await api('/api/leads', 'POST', {
+    name, company,
+    role:     document.getElementById('l-role').value,
+    sector:   document.getElementById('l-sector').value.trim(),
+    email:    document.getElementById('l-email').value.trim(),
+    linkedin: document.getElementById('l-linkedin').value.trim(),
+    whatsapp: document.getElementById('l-whatsapp').value.trim(),
+  });
+  toast('Lead adicionado!');
+  ['l-name','l-company','l-sector','l-email','l-linkedin','l-whatsapp'].forEach(id => document.getElementById(id).value='');
+  loadLeads(); loadStats();
+}
+
+async function openLead(id) {
+  currentLeadId = id;
+  const data = await api(`/api/leads/${id}`);
+  currentLeadData = data;
+  const l = data.lead;
+
+  document.getElementById('modal-lead-title').textContent = `${l.name} — ${l.company}`;
+  document.getElementById('btn-optout').disabled = !!l.opted_out;
+
+  // Info panel
+  document.getElementById('lead-info').innerHTML = `
+    <dl class="row mb-0 small">
+      <dt class="col-5">Cargo</dt><dd class="col-7">${ROLE_LABEL[l.role]||l.role}</dd>
+      <dt class="col-5">Setor</dt><dd class="col-7">${esc(l.sector)||'—'}</dd>
+      <dt class="col-5">E-mail</dt><dd class="col-7">${esc(l.email)||'—'}</dd>
+      <dt class="col-5">LinkedIn</dt><dd class="col-7">${esc(l.linkedin)||'—'}</dd>
+      <dt class="col-5">WhatsApp</dt><dd class="col-7">${esc(l.whatsapp)||'—'}</dd>
+      <dt class="col-5">Status</dt><dd class="col-7"><span class="badge ${STATUS_BADGE[l.status]||'bg-secondary'}">${STATUS_LABEL[l.status]||l.status}</span></dd>
+      <dt class="col-5">Interest</dt><dd class="col-7">${l.interest_score}/10</dd>
+      <dt class="col-5">Adicionado</dt><dd class="col-7">${l.created_at}</dd>
+    </dl>`;
+
+  // Hook
+  const hookEl = document.getElementById('research-hook');
+  if (l.research_hook) {
+    hookEl.textContent = l.research_hook;
+    if (l.research_context) {
+      document.getElementById('research-context').classList.remove('d-none');
+      try { document.getElementById('research-context-text').textContent = JSON.stringify(JSON.parse(l.research_context), null, 2); }
+      catch { document.getElementById('research-context-text').textContent = l.research_context; }
+    }
+  } else {
+    hookEl.textContent = 'Clique em "Pesquisar" para gerar o gancho personalizado...';
+    document.getElementById('research-context').classList.add('d-none');
+  }
+
+  // Sequence
+  renderSequence(data.messages);
+
+  // Sentiment history
+  renderSentimentHistory(data.sentiments);
+
+  // Consent log
+  document.getElementById('consent-log-lead').innerHTML = data.consent_logs.length
+    ? data.consent_logs.map(c => `<div class="small mb-1"><span class="text-muted">${c.created_at}</span> — <strong>${c.action}</strong>: ${esc(c.details)}</div>`).join('')
+    : '<p class="text-muted small mb-0">Nenhum log.</p>';
+
+  // Available slots
+  renderAvailableSlotsForLead();
+
+  document.getElementById('handon-alert').classList.add('d-none');
+  document.getElementById('sentiment-result').innerHTML = '';
+  document.getElementById('prospect-response').value = '';
+
+  leadModal.show();
+}
+
+function renderSequence(messages) {
+  const el = document.getElementById('sequence-container');
+  if (!messages || messages.length === 0) {
+    el.innerHTML = '<p class="text-muted small mb-0">Clique em "Gerar Sequência" para criar as mensagens personalizadas.</p>';
+    return;
+  }
+  const channelIcon = {linkedin:'<i class="bi bi-linkedin text-primary"></i>', email:'<i class="bi bi-envelope text-danger"></i>', whatsapp:'<i class="bi bi-whatsapp text-success"></i>'};
+  const statusBadge = {pending:'bg-secondary',approved:'bg-success',sent:'bg-primary',paused:'bg-warning text-dark',cancelled:'bg-dark'};
+
+  el.innerHTML = messages.map(m => `
+    <div class="border rounded mb-2 p-2">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <span>${channelIcon[m.channel]||''} <strong>Dia ${m.day}</strong> — ${m.channel}</span>
+        <div class="d-flex gap-1 align-items-center">
+          <span class="badge ${statusBadge[m.status]||'bg-secondary'}">${m.status}</span>
+          ${m.approved ? '<span class="badge bg-success">✓ Aprovado</span>' : ''}
+          ${m.score ? `<span class="badge bg-warning text-dark">${m.score}★</span>` : ''}
+        </div>
+      </div>
+      <div class="msg-box mb-2" id="msg-text-${m.id}">${esc(m.content)}</div>
+      ${m.human_correction ? `<div class="small text-muted mb-2"><i class="bi bi-pencil me-1"></i>Corrigido pelo humano</div>` : ''}
+      <div class="d-flex flex-wrap gap-1">
+        ${!m.approved ? `<button class="btn btn-success btn-sm" onclick="approveMsg(${m.id})"><i class="bi bi-check2 me-1"></i>Aprovar</button>` : ''}
+        ${m.approved && m.status !== 'sent' ? `<button class="btn btn-primary btn-sm" onclick="sendMsg(${m.id})"><i class="bi bi-send me-1"></i>Marcar Enviado</button>` : ''}
+        <button class="btn btn-outline-secondary btn-sm" onclick="toggleEdit(${m.id})"><i class="bi bi-pencil me-1"></i>Editar</button>
+        <div class="d-flex gap-1">
+          ${[1,2,3,4,5].map(n => `<button class="btn btn-sm ${m.score==n?'btn-warning':'btn-outline-warning'}" onclick="scoreMsg(${m.id},${n})">${n}★</button>`).join('')}
+        </div>
+      </div>
+      <div id="edit-area-${m.id}" class="d-none mt-2">
+        <textarea class="form-control form-control-sm mb-1" rows="4" id="edit-text-${m.id}">${esc(m.content)}</textarea>
+        <button class="btn btn-sm btn-success" onclick="saveCorrection(${m.id})">Salvar Correção</button>
+        <button class="btn btn-sm btn-link" onclick="toggleEdit(${m.id})">Cancelar</button>
+      </div>
+    </div>`).join('');
+}
+
+function renderSentimentHistory(sents) {
+  const el = document.getElementById('sentiment-history');
+  const colors = {interested:'success', technical_question:'info', negative:'danger', out_of_scope:'secondary'};
+  const labels = {interested:'Interessado', technical_question:'Dúvida Técnica', negative:'Negativa', out_of_scope:'Fora de Escopo'};
+  el.innerHTML = sents.length
+    ? sents.map(s => `<div class="mb-2 small"><span class="badge bg-${colors[s.sentiment]||'secondary'} sentiment-badge">${labels[s.sentiment]||s.sentiment}</span> <span class="badge bg-warning text-dark">${s.interest_score}/10</span><br><span class="text-muted">${esc(s.reasoning)}</span></div>`).join('')
+    : '<p class="text-muted small mb-0">Nenhuma resposta registrada.</p>';
+}
+
+// ── Lead actions ─────────────────────────────────────────────────────────────
+async function runResearch() {
+  const product = document.getElementById('modal-product').value.trim() || 'solução de automação de vendas com IA';
+  document.getElementById('research-hook').textContent = '⏳ Pesquisando...';
+  const data = await api(`/api/leads/${currentLeadId}/research`, 'POST', {product_value: product});
+  document.getElementById('research-hook').textContent = data.hook;
+  document.getElementById('research-context').classList.remove('d-none');
+  try { document.getElementById('research-context-text').textContent = JSON.stringify(JSON.parse(data.context), null, 2); }
+  catch { document.getElementById('research-context-text').textContent = data.context; }
+  toast('Pesquisa concluída!');
+}
+
+function toggleContext() {
+  const el = document.getElementById('research-context-text');
+  el.classList.toggle('d-none');
+}
+
+async function generateSequence() {
+  const product = document.getElementById('modal-product').value.trim() || 'solução de automação de vendas com IA';
+  document.getElementById('sequence-container').innerHTML = '<p class="text-muted small">⏳ Gerando sequência com IA...</p>';
+  const data = await api(`/api/leads/${currentLeadId}/sequence`, 'POST', {product_value: product});
+  renderSequence(data.sequence);
+  toast('Sequência gerada!');
+  loadStats();
+}
+
+async function approveMsg(id) {
+  await api(`/api/messages/${id}/approve`, 'POST');
+  await refreshCurrentLead();
+  toast('Mensagem aprovada!');
+  loadStats();
+}
+
+async function scoreMsg(id, score) {
+  await api(`/api/messages/${id}/score`, 'POST', {score});
+  await refreshCurrentLead();
+  toast(`Score ${score}★ salvo`);
+}
+
+async function sendMsg(id) {
+  const data = await api(`/api/messages/${id}/send`, 'POST');
+  toast(`Marcada como enviada (delay simulado: ${data.simulated_delay}). ${data.note}`);
+  await refreshCurrentLead();
+}
+
+function toggleEdit(id) {
+  document.getElementById(`edit-area-${id}`).classList.toggle('d-none');
+}
+
+async function saveCorrection(id) {
+  const text = document.getElementById(`edit-text-${id}`).value;
+  await api(`/api/messages/${id}/correct`, 'POST', {correction: text});
+  toast('Correção salva — será usada para aprendizado');
+  toggleEdit(id);
+  await refreshCurrentLead();
+}
+
+async function recordResponse() {
+  const text = document.getElementById('prospect-response').value.trim();
+  if (!text) { toast('Digite a resposta do prospect', 'warning'); return; }
+  const data = await api(`/api/leads/${currentLeadId}/response`, 'POST', {response_text: text});
+  const colors = {interested:'success', technical_question:'info', negative:'danger', out_of_scope:'secondary'};
+  const labels = {interested:'Interessado ✓', technical_question:'Dúvida Técnica', negative:'Negativa ✗', out_of_scope:'Fora de Escopo'};
+  document.getElementById('sentiment-result').innerHTML = `
+    <div class="mt-2 p-2 border rounded">
+      <span class="badge bg-${colors[data.sentiment]} mb-1">${labels[data.sentiment]}</span>
+      <span class="badge bg-warning text-dark ms-1">${data.interest_score}/10</span>
+      <p class="mb-1 small mt-1">${esc(data.reasoning)}</p>
+      ${data.handon_required ? '<div class="alert alert-warning py-1 mb-0 small"><strong>⚡ HAND-OFF:</strong> Lead quente — transição para humano recomendada!</div>' : ''}
+      <p class="text-muted small mb-0">Sequência pausada: sim</p>
+    </div>`;
+  if (data.handon_required) document.getElementById('handon-alert').classList.remove('d-none');
+  await refreshCurrentLead();
+}
+
+async function optoutLead() {
+  if (!confirm(`Confirmar opt-out LGPD para este lead? A ação não pode ser desfeita.`)) return;
+  await api(`/api/leads/${currentLeadId}/optout`, 'POST');
+  toast('Lead adicionado à blacklist LGPD', 'warning');
+  document.getElementById('btn-optout').disabled = true;
+  await refreshCurrentLead();
+  loadLeads();
+}
+
+async function refreshCurrentLead() {
+  const data = await api(`/api/leads/${currentLeadId}`);
+  currentLeadData = data;
+  renderSequence(data.messages);
+  renderSentimentHistory(data.sentiments);
+}
+
+// ── RLHF ────────────────────────────────────────────────────────────────────
+async function loadRLHF() {
+  const msgs = await api('/api/rlhf/queue');
+  const el = document.getElementById('rlhf-list');
+  if (!msgs.length) {
+    el.innerHTML = '<p class="text-muted">Nenhuma mensagem aguardando revisão.</p>';
+    return;
+  }
+  const channelIcon = {linkedin:'<i class="bi bi-linkedin text-primary"></i>', email:'<i class="bi bi-envelope text-danger"></i>', whatsapp:'<i class="bi bi-whatsapp text-success"></i>'};
+  el.innerHTML = msgs.map(m => `
+    <div class="border rounded mb-3 p-3">
+      <div class="d-flex justify-content-between mb-2">
+        <span>${channelIcon[m.channel]||''} <strong>${esc(m.lead_name)}</strong> (${esc(m.lead_company)}) — ${m.lead_role} — Dia ${m.day}</span>
+        <div class="d-flex gap-1">
+          ${[1,2,3,4,5].map(n => `<button class="btn btn-sm ${m.score==n?'btn-warning':'btn-outline-warning'} score-btn" onclick="scoreMsgRLHF(${m.id},${n},this)">${n}★</button>`).join('')}
+        </div>
+      </div>
+      <div class="msg-box mb-2">${esc(m.content)}</div>
+      <div id="rlhf-edit-${m.id}" class="d-none mb-2">
+        <textarea class="form-control form-control-sm mb-1" rows="4" id="rlhf-text-${m.id}">${esc(m.content)}</textarea>
+        <button class="btn btn-sm btn-success" onclick="saveRLHFCorrection(${m.id})">Salvar Correção</button>
+        <button class="btn btn-sm btn-link" onclick="document.getElementById('rlhf-edit-${m.id}').classList.add('d-none')">Cancelar</button>
+      </div>
+      <div class="d-flex gap-2 mt-1">
+        <button class="btn btn-success btn-sm" onclick="approveMsgRLHF(${m.id})"><i class="bi bi-check2 me-1"></i>Aprovar</button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="document.getElementById('rlhf-edit-${m.id}').classList.toggle('d-none')"><i class="bi bi-pencil me-1"></i>Editar & Corrigir</button>
+      </div>
+    </div>`).join('');
+}
+
+async function scoreMsgRLHF(id, score, btn) {
+  await api(`/api/messages/${id}/score`, 'POST', {score});
+  btn.closest('.d-flex').querySelectorAll('.score-btn').forEach(b => b.classList.replace('btn-warning','btn-outline-warning'));
+  btn.classList.replace('btn-outline-warning','btn-warning');
+  toast(`Score ${score}★`);
+}
+
+async function approveMsgRLHF(id) {
+  await api(`/api/messages/${id}/approve`, 'POST');
+  toast('Aprovada!');
+  loadRLHF(); loadStats();
+}
+
+async function saveRLHFCorrection(id) {
+  const text = document.getElementById(`rlhf-text-${id}`).value;
+  await api(`/api/messages/${id}/correct`, 'POST', {correction: text});
+  toast('Correção salva para aprendizado');
+  loadRLHF();
+}
+
+// ── RAG ─────────────────────────────────────────────────────────────────────
+async function loadDocs() {
+  const docs = await api('/api/documents');
+  document.getElementById('doc-list').innerHTML = docs.length
+    ? docs.map(d => `<div class="d-flex justify-content-between align-items-center mb-1 small"><span><i class="bi bi-file-earmark-text me-1"></i>${esc(d.name)} <span class="text-muted">(${Math.round(d.size/1000)}kb)</span></span><button class="btn btn-link text-danger btn-sm p-0" onclick="delDoc(${d.id})"><i class="bi bi-trash"></i></button></div>`).join('')
+    : '<p class="text-muted small mb-0">Nenhum documento.</p>';
+}
+
+async function addDoc() {
+  const name = document.getElementById('doc-name').value.trim();
+  const content = document.getElementById('doc-content').value.trim();
+  if (!name || !content) { toast('Nome e conteúdo são obrigatórios', 'warning'); return; }
+  await api('/api/documents', 'POST', {name, content});
+  document.getElementById('doc-name').value = '';
+  document.getElementById('doc-content').value = '';
+  toast('Documento adicionado!');
+  loadDocs(); loadStats();
+}
+
+async function delDoc(id) {
+  await api(`/api/documents/${id}`, 'DELETE');
+  toast('Documento removido', 'warning');
+  loadDocs(); loadStats();
+}
+
+async function queryRAG() {
+  const query = document.getElementById('rag-query').value.trim();
+  if (!query) { toast('Digite uma pergunta', 'warning'); return; }
+  const storytelling = document.getElementById('storytelling-mode').checked;
+  document.getElementById('rag-answer').innerHTML = '<p class="text-muted small">⏳ Consultando documentos...</p>';
+  const data = await api('/api/rag/query', 'POST', {query, storytelling});
+  document.getElementById('rag-answer').innerHTML = `
+    <div class="card mt-2">
+      <div class="card-header small text-muted">Docs usados: ${data.docs_used.join(', ')}</div>
+      <div class="card-body"><pre>${esc(data.answer)}</pre></div>
+    </div>`;
+}
+
+// ── Golden Cases ─────────────────────────────────────────────────────────────
+document.querySelectorAll('#gc-score-btns .score-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    gcSelectedScore = parseInt(btn.dataset.score);
+    document.querySelectorAll('#gc-score-btns .score-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+
+async function loadGoldenCases() {
+  const cases = await api('/api/golden-cases');
+  document.getElementById('golden-list').innerHTML = cases.length
+    ? cases.map(c => `
+        <div class="border rounded p-2 mb-2">
+          <div class="d-flex justify-content-between">
+            <strong>${esc(c.title)}</strong>
+            <div class="d-flex gap-1">
+              <span class="badge bg-warning text-dark">${c.score}★</span>
+              <button class="btn btn-link text-danger btn-sm p-0" onclick="delGoldenCase(${c.id})"><i class="bi bi-trash"></i></button>
+            </div>
+          </div>
+          ${c.context ? `<div class="text-muted small">${esc(c.context)}</div>` : ''}
+          <div class="msg-box mt-1 small">${esc(c.content)}</div>
+        </div>`).join('')
+    : '<p class="text-muted">Nenhum caso cadastrado.</p>';
+}
+
+async function addGoldenCase() {
+  const title = document.getElementById('gc-title').value.trim();
+  const content = document.getElementById('gc-content').value.trim();
+  if (!title || !content) { toast('Título e conteúdo são obrigatórios', 'warning'); return; }
+  await api('/api/golden-cases', 'POST', {
+    title, content,
+    context: document.getElementById('gc-context').value.trim(),
+    score: gcSelectedScore,
+  });
+  ['gc-title','gc-context','gc-content'].forEach(id => document.getElementById(id).value='');
+  toast('Caso de ouro salvo!');
+  loadGoldenCases(); loadStats();
+}
+
+async function delGoldenCase(id) {
+  await api(`/api/golden-cases/${id}`, 'DELETE');
+  toast('Removido', 'warning');
+  loadGoldenCases(); loadStats();
+}
+
+// ── Agenda ────────────────────────────────────────────────────────────────────
+async function loadSlots() {
+  const slots = await api('/api/schedule/slots');
+  document.getElementById('slots-list').innerHTML = slots.length
+    ? `<table class="table table-sm table-hover"><thead class="table-light"><tr><th>Data/Hora</th><th>Duração</th><th>Status</th><th>Lead</th><th>Link</th><th></th></tr></thead><tbody>
+       ${slots.map(s => `<tr>
+         <td>${s.date_time}</td>
+         <td>${s.duration_min} min</td>
+         <td>${s.booked ? '<span class="badge bg-success">Agendado</span>' : '<span class="badge bg-secondary">Disponível</span>'}</td>
+         <td>${s.lead_name ? `${esc(s.lead_name)} (${esc(s.lead_company)})` : '—'}</td>
+         <td>${s.meeting_link ? `<a href="${esc(s.meeting_link)}" target="_blank" class="small">Abrir</a>` : '—'}</td>
+         <td><button class="btn btn-outline-danger btn-sm" onclick="delSlot(${s.id})"><i class="bi bi-trash"></i></button></td>
+       </tr>`).join('')}
+       </tbody></table>`
+    : '<p class="text-muted">Nenhum slot cadastrado.</p>';
+}
+
+async function addSlot() {
+  const dt = document.getElementById('slot-dt').value;
+  if (!dt) { toast('Selecione data e hora', 'warning'); return; }
+  await api('/api/schedule/slots', 'POST', {
+    date_time: dt,
+    duration_min: parseInt(document.getElementById('slot-dur').value),
+    meeting_link: document.getElementById('slot-link').value.trim(),
+  });
+  toast('Slot adicionado!');
+  loadSlots();
+}
+
+async function delSlot(id) {
+  await api(`/api/schedule/slots/${id}`, 'DELETE');
+  toast('Slot removido', 'warning');
+  loadSlots();
+}
+
+async function renderAvailableSlotsForLead() {
+  const slots = await api('/api/schedule/slots');
+  const available = slots.filter(s => !s.booked);
+  const el = document.getElementById('available-slots-for-lead');
+  if (!available.length) {
+    el.innerHTML = '<p class="text-muted small mb-0">Nenhum slot disponível. Adicione na aba Agenda.</p>';
+    return;
+  }
+  el.innerHTML = available.map(s => `
+    <div class="d-flex justify-content-between align-items-center mb-1">
+      <span class="small">${s.date_time} (${s.duration_min}min)</span>
+      <button class="btn btn-success btn-sm" onclick="bookSlot(${s.id})"><i class="bi bi-calendar-check me-1"></i>Agendar</button>
+    </div>`).join('');
+}
+
+async function bookSlot(slotId) {
+  const data = await api(`/api/schedule/slots/${slotId}/book`, 'POST', {lead_id: currentLeadId});
+  toast(`Reunião agendada para ${data.date_time}!`);
+  await refreshCurrentLead();
+  renderAvailableSlotsForLead();
+  loadLeads();
+}
+
+// ── LGPD ─────────────────────────────────────────────────────────────────────
+async function loadConsentLogs() {
+  const logs = await api('/api/consent-logs');
+  const actionBadge = {added:'bg-secondary', contacted:'bg-primary', meeting_booked:'bg-success', opted_out:'bg-danger'};
+  document.getElementById('consent-tbody').innerHTML = logs.map(l => `
+    <tr>
+      <td class="small">${l.created_at}</td>
+      <td>${esc(l.name||'—')}</td>
+      <td>${esc(l.company||'—')}</td>
+      <td><span class="badge ${actionBadge[l.action]||'bg-secondary'}">${l.action}</span></td>
+      <td class="small">${esc(l.details)}</td>
+    </tr>`).join('');
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+loadStats();
+loadLeads();
+
+// Check API key
+fetch('/api/stats').then(r => {
+  document.getElementById('api-status').textContent = r.ok ? '✓ API online' : '';
+});
+</script>
+</body>
+</html>
