@@ -617,6 +617,158 @@ def seed_db():
     for i, l in enumerate(leads, start=1):
         db.execute('INSERT INTO consent_logs (lead_id,action,details) VALUES (?,?,?)',
                    (i, 'added', 'Lead pré-configurado (seed)'))
+    docs = [
+        (
+            'Manual do Produto — Sales AI Agent v2.1',
+            '''VISÃO GERAL
+O Sales AI Agent é uma plataforma de prospecção autônoma B2B que combina inteligência artificial generativa com automação multicanal para aumentar a taxa de conversão de leads em reuniões qualificadas.
+
+MÓDULOS PRINCIPAIS
+1. Motor de Pesquisa Contextual
+   - Análise automática do perfil da empresa-alvo (setor, porte, momento de mercado)
+   - Identificação de ganchos de abordagem: expansões recentes, contratações, publicações do executivo
+   - Tempo médio de pesquisa: 8 segundos por lead
+   - Precisão do gancho validada em 87% dos casos pelos usuários humanos
+
+2. Geração de Mensagens Personalizadas
+   - Adaptação automática por cargo: C-Level (foco em ROI), Gerentes (foco em eficiência), Engenheiros (foco técnico)
+   - Modelos de linguagem treinados com +10.000 conversas de vendas B2B de alto desempenho
+   - Taxa de resposta média: 34% (vs. 8% de templates genéricos)
+
+3. Sequenciamento Multicanal
+   - Cadência padrão: LinkedIn (Dia 1) → E-mail (Dia 3) → WhatsApp (Dia 5)
+   - Pausa automática em todos os canais ao receber qualquer resposta
+   - Integração nativa com LinkedIn Sales Navigator, Gmail e WhatsApp Business API
+
+4. Módulo RAG (Retrieval-Augmented Generation)
+   - Suporte a PDF, DOCX e TXT (até 50MB por arquivo)
+   - Latência de resposta: < 2 segundos para consultas técnicas
+   - Precisão técnica validada: 94% de acurácia em perguntas sobre manuais carregados
+
+5. Painel RLHF (Reinforcement Learning from Human Feedback)
+   - Interface de curadoria com aprovação/rejeição de mensagens
+   - Sistema de scoring 1-5 estrelas
+   - O modelo se adapta ao estilo do usuário após 50 correções
+
+REQUISITOS TÉCNICOS
+- API: REST JSON, autenticação via Bearer Token
+- Uptime: 99.7% (SLA contratual)
+- Ambientes: Cloud (AWS/GCP) ou On-Premise
+- Conformidade: LGPD, GDPR, SOC 2 Type II
+
+INTEGRAÇÕES DISPONÍVEIS
+- CRM: Salesforce, HubSpot, Pipedrive, RD Station
+- Calendário: Google Calendar, Outlook, Calendly
+- Comunicação: Slack, Microsoft Teams (alertas de hand-off)
+- Enriquecimento: Apollo.io, LinkedIn Sales Navigator, Clearbit'''
+        ),
+        (
+            'White Paper — ROI e Casos de Uso (2025)',
+            '''IMPACTO FINANCEIRO — DADOS DE CLIENTES REAIS (2024-2025)
+
+RESUMO EXECUTIVO
+Empresas que implementaram o Sales AI Agent reportaram, em média:
+- Redução de 73% no tempo de prospecção manual
+- Aumento de 4,2x no volume de leads abordados por SDR
+- Crescimento de 28% na taxa de conversão lead → reunião
+- Redução de 61% no custo por reunião qualificada (CPL)
+
+CASO 1 — FINTECH (500 funcionários)
+Contexto: Equipe de 8 SDRs prospecta empresas de médio porte para solução de crédito B2B
+Antes: 40 abordagens/SDR/semana, taxa de resposta 9%, custo por reunião R$ 380
+Depois: 180 abordagens/SDR/semana, taxa de resposta 31%, custo por reunião R$ 94
+ROI em 6 meses: 340%
+
+CASO 2 — SOFTWARE B2B / ERP (200 funcionários)
+Contexto: Prospecção de gestores de TI e diretores financeiros em empresas do setor industrial
+Desafio: Mensagens genéricas com taxa de abertura de email < 12%
+Solução: Mensagens hiperpersonalizadas com gancho contextual por empresa
+Resultado: Taxa de abertura subiu para 48%, reuniões agendadas aumentaram 3,1x em 90 dias
+
+CASO 3 — LOGÍSTICA / SaaS (80 funcionários)
+Contexto: Startup prospectando gerentes de operações em e-commerces
+Antes: 1 reunião qualificada a cada 3 dias por SDR
+Depois: 1 reunião qualificada por dia por SDR
+Impacto no pipeline: +R$ 2,4M em oportunidades em 4 meses
+
+MÉTRICAS DE REFERÊNCIA DO MERCADO
+- SDR humano sem ferramenta: 60-80 abordagens/semana
+- SDR com Sales AI Agent: 300-500 abordagens/semana
+- Tempo médio para primeira resposta positiva: 4,2 dias (vs. 11,3 dias sem automação)
+- Taxa de agendamento de demos: 18% dos interessados (benchmark setor: 11%)
+
+ANÁLISE DE LATÊNCIA E PERFORMANCE TÉCNICA
+- Tempo de geração de mensagem personalizada: 3-8 segundos
+- Latência de classificação de sentimento: < 1 segundo
+- Disponibilidade do sistema: 99.7% nos últimos 12 meses
+- Processamento simultâneo: até 10.000 leads em paralelo'''
+        ),
+        (
+            'Especificações Técnicas — API e Integrações',
+            '''DOCUMENTAÇÃO TÉCNICA — SALES AI AGENT API v2.1
+
+AUTENTICAÇÃO
+Todas as requisições exigem Bearer Token no header:
+Authorization: Bearer {seu_token_aqui}
+Tokens expiram em 24h. Renovação via /auth/refresh.
+
+ENDPOINTS PRINCIPAIS
+
+POST /api/leads
+Cria novo lead com verificação automática de duplicidade e blacklist LGPD.
+Body: { name, company, role, email, linkedin, whatsapp, sector }
+Response: { id, status: "created" | "duplicate" | "blacklisted" }
+
+POST /api/leads/{id}/research
+Executa pesquisa contextual e gera gancho personalizado.
+Tempo de processamento: 5-15 segundos
+Response: { hook, research_context, pain_points, value_proposition }
+
+POST /api/leads/{id}/sequence
+Gera sequência multicanal completa (LinkedIn + Email + WhatsApp).
+Parâmetros opcionais: product_value (string), tone_override (formal|casual|technical)
+Response: { sequence: [{ channel, day, content, id }] }
+
+POST /api/rag/query
+Consulta documentos carregados via RAG.
+Body: { query, storytelling: boolean }
+storytelling=true converte resposta técnica em benefícios de negócio
+Latência: < 2 segundos
+
+POST /api/leads/{id}/response
+Registra resposta do prospect, classifica sentimento e pausa sequência.
+Sentimentos: interested | technical_question | negative | out_of_scope
+Response: { sentiment, reasoning, interest_score (1-10), handon_required: boolean }
+
+WEBHOOKS (disponíveis no plano Professional+)
+O sistema dispara webhooks para:
+- lead.interested: quando interesse_score >= 7
+- meeting.booked: quando reunião é confirmada
+- sequence.completed: quando toda cadência é executada sem resposta
+- optout.received: quando lead solicita remoção (LGPD)
+
+LIMITES DE RATE
+- Free: 100 req/hora
+- Professional: 2.000 req/hora
+- Enterprise: sem limite (dedicado)
+
+SEGURANÇA E COMPLIANCE
+- Todos os dados trafegam via TLS 1.3
+- Dados armazenados com AES-256
+- Logs de acesso retidos por 90 dias
+- Certificação SOC 2 Type II (válida até Dez/2025)
+- Conformidade LGPD: opt-out processado em < 24h, dados deletados em 30 dias após solicitação
+- GDPR: Data Processing Agreement (DPA) disponível para clientes europeus
+
+SIMULAÇÃO DE COMPORTAMENTO HUMANO
+Para proteger contas de LinkedIn e WhatsApp:
+- Delays variáveis entre mensagens: 2-8 minutos (LinkedIn), 1-4 minutos (WhatsApp)
+- Variação na velocidade de digitação: 40-120 WPM simulados
+- Horários de envio restritos: 8h-19h no fuso do destinatário
+- Limite diário por conta: 80 conexões LinkedIn, 150 mensagens WhatsApp'''
+        ),
+    ]
+    db.executemany('INSERT INTO documents (name, content) VALUES (?,?)', docs)
     db.commit()
     db.close()
 
