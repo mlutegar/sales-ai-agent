@@ -699,7 +699,10 @@
       <div class="modal-body" id="bulk-result-body"></div>
       <div class="modal-footer">
         <button class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
-        <button class="btn btn-primary" onclick="loadCompanies(); document.getElementById('bulkResultModal') && bootstrap.Modal.getInstance(document.getElementById('bulkResultModal')).hide()">
+        <button class="btn btn-outline-success" onclick="exportBulkResultCSV()">
+          <i class="bi bi-download me-1"></i>Exportar CSV
+        </button>
+        <button class="btn btn-primary" onclick="loadCompanies(); bootstrap.Modal.getInstance(document.getElementById('bulkResultModal'))?.hide()">
           <i class="bi bi-arrow-clockwise me-1"></i>Recarregar Lista
         </button>
       </div>
@@ -827,7 +830,10 @@
             <div class="card mb-3">
               <div class="card-header d-flex align-items-center justify-content-between">
                 <span class="fw-bold"><i class="bi bi-people me-1"></i>Contatos</span>
-                <button class="btn btn-outline-primary btn-sm" onclick="toggleAddContactForm()"><i class="bi bi-person-plus me-1"></i>Adicionar</button>
+                <div class="d-flex gap-2">
+                  <button class="btn btn-outline-secondary btn-sm" onclick="findNewContactsForCompany()" title="Buscar novo contato na internet"><i class="bi bi-search me-1"></i>Buscar Contato</button>
+                  <button class="btn btn-outline-primary btn-sm" onclick="toggleAddContactForm()"><i class="bi bi-person-plus me-1"></i>Adicionar</button>
+                </div>
               </div>
               <div class="card-body">
                 <div id="add-contact-form" class="d-none mb-3 p-2 border rounded bg-light">
@@ -1738,76 +1744,132 @@ async function generateBulkSequences() {
   }
 }
 
+let lastBulkResults = [];
+
 function renderBulkResult(data) {
   const body = document.getElementById('bulk-result-body');
   const results = data.results || [];
-  const errors = data.errors || [];
-  const channelIcon = { linkedin: 'linkedin', email: 'envelope', whatsapp: 'whatsapp' };
-  const channelLabel = { linkedin: 'LinkedIn', email: 'E-mail', whatsapp: 'WhatsApp' };
+  const errors  = data.errors  || [];
+  lastBulkResults = results;
 
-  let html = `<div class="alert alert-success"><i class="bi bi-check-circle me-1"></i>
-    <strong>${results.length} sequência${results.length !== 1 ? 's' : ''} gerada${results.length !== 1 ? 's' : ''} com sucesso!</strong>
-    ${errors.length ? ` <span class="text-warning ms-2">${errors.length} erro(s).</span>` : ''}
-  </div>
-  <div class="accordion" id="bulk-result-accordion">`;
+  const channelIcon  = { linkedin: 'linkedin', email: 'envelope', whatsapp: 'whatsapp' };
+  const channelLabel = { linkedin: 'LinkedIn',  email: 'E-mail',   whatsapp: 'WhatsApp'  };
 
-  results.forEach((r, idx) => {
+  // Melhoria 6: tabs de filtro por produto
+  const produtos = [...new Set(results.map(r => r.product_value).filter(Boolean))];
+  let filterHtml = '';
+  if (produtos.length > 1) {
+    filterHtml =
+      '<div class="d-flex gap-2 flex-wrap mb-3 pb-2 border-bottom">' +
+      '<button class="btn btn-success btn-sm" onclick="filterBulkResult(null,this)">Todos (' + results.length + ')</button>' +
+      produtos.map(function(p) {
+        return '<button class="btn btn-outline-secondary btn-sm" onclick="filterBulkResult(' + JSON.stringify(p) + ',this)">' +
+          esc(p) + ' (' + results.filter(function(r){ return r.product_value === p; }).length + ')' +
+          '</button>';
+      }).join('') +
+      '</div>';
+  }
+
+  let html = filterHtml +
+    '<div class="alert alert-success py-2"><i class="bi bi-check-circle me-1"></i>' +
+    '<strong>' + results.length + ' sequencia(s) gerada(s) com sucesso!</strong>' +
+    (errors.length ? ' <span class="text-warning ms-2">' + errors.length + ' erro(s).</span>' : '') +
+    '</div>' +
+    '<div class="accordion" id="bulk-result-accordion">';
+
+  results.forEach(function(r, idx) {
     const collapseId = 'bra-' + idx;
     const seq = r.sequence || [];
     const prodBadge = r.product_value
       ? '<span class="badge bg-success bg-opacity-10 text-success fw-normal"><i class="bi bi-box-seam me-1"></i>' + esc(r.product_value) + '</span>'
       : '';
     const painBadge = r.selected_pain_point
-      ? '<span class="badge bg-danger bg-opacity-10 text-danger fw-normal">&#127919; ' + esc(r.selected_pain_point.substring(0, 30)) + '</span>'
+      ? '<span class="badge bg-danger bg-opacity-10 text-danger fw-normal">&#127919; ' + esc(r.selected_pain_point.substring(0, 30)) + (r.selected_pain_point.length > 30 ? '...' : '') + '</span>'
       : '';
-    html += `
-    <div class="accordion-item mb-2 border rounded overflow-hidden">
-      <h2 class="accordion-header">
-        <button class="accordion-button ${idx > 0 ? 'collapsed' : ''}" type="button"
-          data-bs-toggle="collapse" data-bs-target="#${collapseId}" style="background:#f8f9fa">
-          <div class="d-flex align-items-center gap-2 w-100 me-3 flex-wrap">
-            <i class="bi bi-building text-primary"></i>
-            <strong>${esc(r.company_name)}</strong>
-            <span class="text-muted small">&#8212; ${esc(r.contact_name)}</span>
-            ` + prodBadge + ` ` + painBadge + `
-            <span class="badge bg-secondary fw-normal ms-auto">${seq.length} msg</span>
-          </div>
-        </button>
-      </h2>
-      <div id="${collapseId}" class="accordion-collapse collapse ${idx === 0 ? 'show' : ''}">
-        <div class="accordion-body pt-2 pb-3 px-3">
-          ${seq.map(msg => {
-            const icon = channelIcon[msg.channel] || 'chat';
-            const label = channelLabel[msg.channel] || msg.channel;
-            return `
-            <div class="mb-3">
-              <div class="d-flex align-items-center gap-2 mb-1">
-                <i class="bi bi-${icon} text-primary"></i>
-                <span class="fw-semibold small">Dia ${msg.day} &#8212; ${label}</span>
-                <button class="btn btn-outline-secondary btn-sm py-0 ms-auto" style="font-size:.7rem"
-                  onclick="(function(b){var pre=b.closest('.mb-3').querySelector('pre');navigator.clipboard.writeText(pre.textContent).then(function(){toast('Copiado!','success')});})(this)">
-                  <i class="bi bi-clipboard me-1"></i>Copiar
-                </button>
-              </div>
-              <pre class="border rounded p-2 bg-light mb-0" style="white-space:pre-wrap;font-size:.8rem;font-family:inherit">${esc(msg.content)}</pre>
-            </div>`;
-          }).join('')}
-        </div>
-      </div>
-    </div>`;
+    html +=
+      '<div class="accordion-item mb-2 border rounded overflow-hidden bra-item" data-product="' + esc(r.product_value || '') + '">' +
+        '<h2 class="accordion-header">' +
+          '<button class="accordion-button ' + (idx > 0 ? 'collapsed' : '') + '" type="button"' +
+            ' data-bs-toggle="collapse" data-bs-target="#' + collapseId + '" style="background:#f8f9fa">' +
+            '<div class="d-flex align-items-center gap-2 w-100 me-3 flex-wrap">' +
+              '<i class="bi bi-building text-primary"></i>' +
+              '<strong>' + esc(r.company_name) + '</strong>' +
+              '<span class="text-muted small">&mdash; ' + esc(r.contact_name) + '</span>' +
+              ' ' + prodBadge + ' ' + painBadge +
+              '<span class="badge bg-secondary fw-normal ms-auto">' + seq.length + ' msg</span>' +
+            '</div>' +
+          '</button>' +
+        '</h2>' +
+        '<div id="' + collapseId + '" class="accordion-collapse collapse ' + (idx === 0 ? 'show' : '') + '">' +
+          '<div class="accordion-body pt-2 pb-3 px-3">' +
+            seq.map(function(msg) {
+              const icon  = channelIcon[msg.channel]  || 'chat';
+              const label = channelLabel[msg.channel] || msg.channel;
+              return (
+                '<div class="mb-3">' +
+                  '<div class="d-flex align-items-center gap-2 mb-1">' +
+                    '<i class="bi bi-' + icon + ' text-primary"></i>' +
+                    '<span class="fw-semibold small">Dia ' + msg.day + ' &mdash; ' + label + '</span>' +
+                    '<button class="btn btn-outline-secondary btn-sm py-0 ms-auto" style="font-size:.7rem"' +
+                      ' onclick="(function(b){var pre=b.closest(\'.mb-3\').querySelector(\'pre\');navigator.clipboard.writeText(pre.textContent).then(function(){toast(\'Copiado!\',\'success\')});})(this)">' +
+                      '<i class="bi bi-clipboard me-1"></i>Copiar' +
+                    '</button>' +
+                  '</div>' +
+                  '<pre class="border rounded p-2 bg-light mb-0" style="white-space:pre-wrap;font-size:.8rem;font-family:inherit">' + esc(msg.content) + '</pre>' +
+                '</div>'
+              );
+            }).join('') +
+          '</div>' +
+        '</div>' +
+      '</div>';
   });
 
   html += '</div>';
 
   if (errors.length) {
-    html += `<div class="border border-warning rounded p-3 mt-3">
-      <p class="fw-semibold mb-2 text-warning"><i class="bi bi-exclamation-triangle me-1"></i>Erros:</p>
-      ${errors.map(e => `<p class="small mb-1">&#10060; Empresa #${e.company_id}: ${esc(e.error)}</p>`).join('')}
-    </div>`;
+    html += '<div class="border border-warning rounded p-3 mt-3">' +
+      '<p class="fw-semibold mb-2 text-warning"><i class="bi bi-exclamation-triangle me-1"></i>Erros (' + errors.length + '):</p>' +
+      errors.map(function(e) {
+        return '<div class="d-flex align-items-center gap-2 mb-2">' +
+          '<span class="small flex-grow-1">&#10060; <strong>' + esc(e.company_name || ('Empresa #' + e.company_id)) + '</strong>: ' + esc(e.error) + '</span>' +
+          (e.error !== 'Empresa na blacklist'
+            ? '<button class="btn btn-outline-warning btn-sm py-0 flex-shrink-0" onclick="retryBulkLead(' + e.company_id + ')"><i class="bi bi-arrow-clockwise me-1"></i>Tentar novamente</button>'
+            : '') +
+        '</div>';
+      }).join('') +
+      '</div>';
   }
 
   body.innerHTML = html;
 }
+
+// Melhoria 6: filtrar accordion por produto
+function filterBulkResult(product, btn) {
+  document.querySelectorAll('.bra-item').forEach(function(el) {
+    el.style.display = (!product || el.dataset.product === product) ? '' : 'none';
+  });
+  document.querySelectorAll('[onclick^="filterBulkResult"]').forEach(function(b) {
+    b.classList.remove('btn-success', 'btn-outline-secondary');
+    b.classList.add(b === btn ? 'btn-success' : 'btn-outline-secondary');
+  });
+}
+
+// Melhoria 8: exportar resultado do lote para CSV
+function exportBulkResultCSV() {
+  if (!lastBulkResults.length) { toast('Nenhum resultado para exportar', 'warning'); return; }
+  const header = ['Empresa', 'Contato', 'Produto', 'Dor', 'Canal', 'Dia', 'Mensagem'];
+  const rows = lastBulkResults.flatMap(function(r) {
+    return (r.sequence || []).map(function(msg) {
+      return [
+        r.company_name || '', r.contact_name || '', r.product_value || '',
+        r.selected_pain_point || '', msg.channel || '', msg.day || '', msg.content || ''
+      ];
+    });
+  });
+  downloadCSV('mensagens-lote.csv', [header].concat(rows));
+  toast('CSV exportado com sucesso!', 'success');
+}
+
 
 // ── Bulk Direct Modal ─────────────────────────────────────────────────────────
 let bulkDirectModal = null;
@@ -1822,11 +1884,15 @@ function openBulkDirectModal() {
   // Monta mapa com dados das empresas (usa allCompanies já carregado)
   ids.forEach(id => {
     const c = allCompanies.find(x => x.id === id);
+    const firstContact = (c?.contacts_summary || '').split('||')[0].trim();
     bulkDirectLeads[id] = {
       id,
-      name: c?.name || `Empresa #${id}`,
+      name: c?.name || ('Empresa #' + id),
       sector: c?.sector || '',
+      contact_count: c?.contact_count || 0,
+      primary_contact: firstContact,
       product: '',
+      pain_point: '',
       selected: true,
     };
   });
@@ -1844,21 +1910,38 @@ function renderBulkDirectList() {
   const leads = Object.values(bulkDirectLeads);
   if (!leads.length) { list.innerHTML = '<p class="text-muted small">Nenhum lead selecionado.</p>'; return; }
 
-  list.innerHTML = leads.map(l => `
-    <div class="d-flex align-items-center gap-3 border rounded p-2 mb-2" id="bdd-row-${l.id}">
-      <input type="checkbox" class="form-check-input flex-shrink-0" id="bdd-cb-${l.id}"
-        ${l.selected ? 'checked' : ''}
-        onchange="toggleBulkDirectLead(${l.id}, this.checked)">
-      <label class="fw-semibold flex-shrink-0 mb-0" for="bdd-cb-${l.id}" style="min-width:160px;cursor:pointer">
-        ${esc(l.name)}
-        ${l.sector ? `<span class="text-muted fw-normal small ms-1">— ${esc(l.sector)}</span>` : ''}
-      </label>
-      <input type="text" class="form-control form-control-sm"
-        id="bdd-prod-${l.id}"
-        placeholder="Produto para este lead..."
-        value="${esc(l.product)}"
-        oninput="bulkDirectLeads[${l.id}].product = this.value">
-    </div>`).join('');
+  list.innerHTML = leads.map(l => {
+    const noContact = l.contact_count === 0;
+    const contactInfo = noContact
+      ? '<span class="badge bg-danger bg-opacity-10 text-danger"><i class="bi bi-exclamation-triangle me-1"></i>Sem contato</span>'
+      : (l.primary_contact ? '<span class="text-muted small"><i class="bi bi-person me-1"></i>' + esc(l.primary_contact) + '</span>' : '');
+    return (
+      '<div class="border rounded p-2 mb-2' + (noContact ? ' border-danger border-opacity-50 bg-danger bg-opacity-10' : '') + '" id="bdd-row-' + l.id + '">' +
+        '<div class="d-flex align-items-center gap-2">' +
+          '<input type="checkbox" class="form-check-input flex-shrink-0" id="bdd-cb-' + l.id + '"' +
+            (l.selected ? ' checked' : '') +
+            ' onchange="toggleBulkDirectLead(' + l.id + ', this.checked)">' +
+          '<div class="flex-shrink-0" style="min-width:190px">' +
+            '<label class="fw-semibold mb-0 d-block" for="bdd-cb-' + l.id + '" style="cursor:pointer">' +
+              esc(l.name) + (l.sector ? ' <span class="text-muted fw-normal small">— ' + esc(l.sector) + '</span>' : '') +
+            '</label>' +
+            '<div>' + contactInfo + '</div>' +
+          '</div>' +
+          '<input type="text" class="form-control form-control-sm" id="bdd-prod-' + l.id + '"' +
+            ' placeholder="Produto para este lead..." value="' + esc(l.product) + '"' +
+            ' oninput="bulkDirectLeads[' + l.id + '].product = this.value">' +
+          '<button class="btn btn-link btn-sm text-muted py-0 flex-shrink-0" style="font-size:.75rem;white-space:nowrap"' +
+            ' onclick="toggleBddPain(' + l.id + ')" title="Adicionar dor ou contexto especifico">' +
+            '<i class="bi bi-plus-circle me-1"></i>+ Dor</button>' +
+        '</div>' +
+        '<div class="d-none mt-2 ms-4 ps-3" id="bdd-pain-row-' + l.id + '">' +
+          '<input type="text" class="form-control form-control-sm" id="bdd-pain-' + l.id + '"' +
+            ' placeholder="Contexto ou dor especifica deste lead (opcional)..." value="' + esc(l.pain_point || '') + '"' +
+            ' oninput="bulkDirectLeads[' + l.id + '].pain_point = this.value">' +
+        '</div>' +
+      '</div>'
+    );
+  }).join('');
 
   updateBulkDirectCount();
 }
@@ -1893,41 +1976,124 @@ function updateBulkDirectCount() {
   document.getElementById('bulk-direct-count').textContent = n;
 }
 
+function toggleBddPain(id) {
+  const row = document.getElementById('bdd-pain-row-' + id);
+  if (!row) return;
+  const wasHidden = row.classList.toggle('d-none');
+  if (!wasHidden) { const inp = document.getElementById('bdd-pain-' + id); if(inp) inp.focus(); }
+}
+
+let lastBulkTargets = [];
+
 async function generateBulkDirect() {
-  const targets = Object.values(bulkDirectLeads)
-    .filter(l => l.selected)
-    .map(l => ({
-      company_id: l.id,
-      product_value: l.product.trim() || document.getElementById('bulk-direct-product-global').value.trim() || 'solução de automação de vendas com IA',
-    }));
+  const globalProduct = document.getElementById('bulk-direct-product-global').value.trim();
+  const allLeads = Object.values(bulkDirectLeads).filter(l => l.selected);
 
-  if (!targets.length) { toast('Selecione ao menos um lead', 'warning'); return; }
+  if (!allLeads.length) { toast('Selecione ao menos um lead', 'warning'); return; }
 
-  // Valida que todos têm produto
-  const semProduto = targets.filter(t => !t.product_value || t.product_value === 'solução de automação de vendas com IA' && !document.getElementById('bulk-direct-product-global').value.trim());
-  // Aviso suave mas não bloqueia
-  if (targets.some(t => !t.product_value.trim())) {
-    if (!confirm('Alguns leads não têm produto definido — será usado o padrão "solução de automação de vendas com IA". Continuar?')) return;
+  // Melhoria 2: validar leads sem contato
+  const semContato = allLeads.filter(l => l.contact_count === 0);
+  if (semContato.length) {
+    const nomes = semContato.map(l => '\n  - ' + l.name).join('');
+    if (!confirm(semContato.length + ' lead(s) sem contato serao ignorados:' + nomes + '\n\nContinuar com os demais?')) return;
   }
+  const leadsValidos = allLeads.filter(l => l.contact_count > 0);
+  if (!leadsValidos.length) { toast('Nenhum lead com contato cadastrado', 'warning'); return; }
+
+  const targets = leadsValidos.map(l => ({
+    company_id: l.id,
+    product_value: (l.product || '').trim() || globalProduct || 'solucao de automacao de vendas com IA',
+    pain_point: (l.pain_point || '').trim(),
+  }));
+  lastBulkTargets = targets;
 
   const btn = document.getElementById('btn-bulk-direct-gen');
-  setLoading(btn, true);
-  btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Gerando ${targets.length} sequência(s)...`;
+  btn.disabled = true;
 
+  // Melhoria 1: SSE para progresso por lead
+  let usedSSE = false;
   try {
-    const data = await api('/api/companies/bulk-sequence', 'POST', { targets });
-    bulkDirectModal.hide();
-    clearBulkSelection();
-    renderBulkResult(data);
-    if (!bulkResultModal) bulkResultModal = new bootstrap.Modal(document.getElementById('bulkResultModal'));
-    bulkResultModal.show();
-    loadStats();
-  } catch (e) {
-    toast('Erro ao gerar mensagens em lote', 'danger');
-  } finally {
-    setLoading(btn, false);
-    btn.innerHTML = '<i class="bi bi-magic me-1"></i>Gerar Mensagens';
+    const resp = await fetch('/api/companies/bulk-sequence-stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets }),
+    });
+    if (resp.ok && (resp.headers.get('content-type') || '').includes('text/event-stream')) {
+      usedSSE = true;
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finalData = null;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const ev = JSON.parse(line.slice(6));
+            if (ev.type === 'progress') {
+              btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Gerando ' + ev.done + '/' + ev.total + ' &mdash; ' + esc(ev.company_name) + '...';
+            } else if (ev.type === 'done') {
+              finalData = ev;
+            }
+          } catch (_) {}
+        }
+      }
+      if (finalData) {
+        bulkDirectModal.hide();
+        clearBulkSelection();
+        renderBulkResult(finalData);
+        if (!bulkResultModal) bulkResultModal = new bootstrap.Modal(document.getElementById('bulkResultModal'));
+        bulkResultModal.show();
+        loadStats();
+      }
+    }
+  } catch (_) {}
+
+  if (!usedSSE) {
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Gerando ' + targets.length + ' sequencia(s)...';
+    try {
+      const data = await api('/api/companies/bulk-sequence', 'POST', { targets });
+      bulkDirectModal.hide();
+      clearBulkSelection();
+      renderBulkResult(data);
+      if (!bulkResultModal) bulkResultModal = new bootstrap.Modal(document.getElementById('bulkResultModal'));
+      bulkResultModal.show();
+      loadStats();
+    } catch (e) {
+      toast('Erro ao gerar mensagens em lote', 'danger');
+    }
   }
+
+  btn.disabled = false;
+  btn.innerHTML = '<i class="bi bi-magic me-1"></i>Gerar Mensagens';
+}
+
+// Melhoria 3: retry de lead que falhou
+function retryBulkLead(companyId) {
+  const target = lastBulkTargets.find(t => t.company_id === companyId);
+  const inst = bootstrap.Modal.getInstance(document.getElementById('bulkResultModal'));
+  if (inst) inst.hide();
+  bulkDirectLeads = {};
+  const c = allCompanies.find(x => x.id === companyId);
+  const firstContact = (c && c.contacts_summary ? c.contacts_summary.split('||')[0] : '').trim();
+  bulkDirectLeads[companyId] = {
+    id: companyId,
+    name: c ? c.name : ('Empresa #' + companyId),
+    sector: c ? (c.sector || '') : '',
+    contact_count: c ? (c.contact_count || 0) : 0,
+    primary_contact: firstContact,
+    product: target ? target.product_value : '',
+    pain_point: target ? target.pain_point : '',
+    selected: true,
+  };
+  document.getElementById('bulk-direct-product-global').value = target ? target.product_value : '';
+  renderBulkDirectList();
+  if (!bulkDirectModal) bulkDirectModal = new bootstrap.Modal(document.getElementById('bulkDirectModal'));
+  bulkDirectModal.show();
 }
 
 async function bulkStatus(status, event) {
@@ -2429,7 +2595,7 @@ function renderContactsPanel(contacts) {
     return;
   }
   el.innerHTML = contacts.map(ct => `
-    <div class="contact-card" id="contact-card-${ct.id}">
+    <div class="contact-card" id="contact-card-${ct.id}" data-contact-id="${ct.id}" data-primary="${ct.is_primary ? 1 : 0}">
       <div class="d-flex justify-content-between align-items-start">
         <div>
           <strong>${esc(ct.name)}</strong>
@@ -3654,6 +3820,156 @@ async function loadInteractionsForCompany(companyId) {
     </div>
   </div>
 </div>
+
+<!-- ═══ Modal: Buscar Novo Contato da Empresa ═══════════════════════════════ -->
+<div class="modal fade" id="findNewContactsModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title fw-bold"><i class="bi bi-search me-1 text-primary"></i>Buscar Novo Contato — <span id="fnc-company-name"></span></h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <!-- Loading -->
+        <div id="fnc-loading" class="text-center py-4">
+          <div class="spinner-border text-primary mb-2" role="status"></div>
+          <div class="text-muted small">Buscando novos contatos para esta empresa...</div>
+        </div>
+        <!-- Sugestões -->
+        <div id="fnc-suggestions" class="d-none">
+          <p class="text-muted small mb-3"><i class="bi bi-info-circle me-1"></i>Sugestões de contatos para prospecção. Clique em <strong>Adicionar ao CRM</strong> para importar.</p>
+          <div id="fnc-cards" class="d-flex flex-column gap-3"></div>
+        </div>
+        <!-- Erro -->
+        <div id="fnc-error" class="d-none alert alert-warning">
+          <i class="bi bi-exclamation-triangle me-1"></i>Não foi possível buscar sugestões. Tente novamente.
+        </div>
+      </div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Fechar</button>
+        <button type="button" class="btn btn-outline-primary btn-sm" onclick="findNewContactsForCompany(true)"><i class="bi bi-arrow-repeat me-1"></i>Buscar Novamente</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── Buscar Novo Contato da Empresa ─────────────────────────────────────────
+async function findNewContactsForCompany(retry = false) {
+  if (!currentCompanyId) return;
+
+  // Abre o modal e mostra loading
+  const modal = new bootstrap.Modal(document.getElementById('findNewContactsModal'));
+  if (!retry) modal.show();
+
+  document.getElementById('fnc-loading').classList.remove('d-none');
+  document.getElementById('fnc-suggestions').classList.add('d-none');
+  document.getElementById('fnc-error').classList.add('d-none');
+
+  // Nome da empresa no título
+  const companyNameEl = document.getElementById('fnc-company-name');
+  if (companyNameEl) companyNameEl.textContent = document.getElementById('modal-company-title')?.textContent || '';
+
+  // Pega contato de referência (primário ou primeiro da lista)
+  let refContactId = null;
+  const primaryBtn = document.querySelector('#contacts-list [data-primary="1"]');
+  if (primaryBtn) {
+    refContactId = primaryBtn.dataset.contactId;
+  } else {
+    const firstContact = document.querySelector('#contacts-list [data-contact-id]');
+    if (firstContact) refContactId = firstContact.dataset.contactId;
+  }
+
+  try {
+    const body = refContactId ? { reference_contact_id: parseInt(refContactId) } : {};
+    const res = await fetch(`/api/companies/${currentCompanyId}/find-new-contacts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+
+    document.getElementById('fnc-loading').classList.add('d-none');
+
+    if (!res.ok || !data.suggestions || data.suggestions.length === 0) {
+      document.getElementById('fnc-error').classList.remove('d-none');
+      return;
+    }
+
+    // Armazena sugestões num mapa global para evitar problemas de escape no onclick
+    window._fncSuggestions = {};
+    const cards = document.getElementById('fnc-cards');
+    cards.innerHTML = '';
+    data.suggestions.forEach((s, i) => {
+      // Tenta mapear cargo para role
+      const roleLower = (s.role || '').toLowerCase();
+      let roleKey = 'other';
+      if (roleLower.includes('ceo') || roleLower.includes('cto') || roleLower.includes('coo') || roleLower.includes('diretor') || roleLower.includes('vp ') || roleLower.includes('chief')) roleKey = 'c_level';
+      else if (roleLower.includes('gerente') || roleLower.includes('coordenador') || roleLower.includes('manager') || roleLower.includes('head')) roleKey = 'manager';
+      else if (roleLower.includes('engineer') || roleLower.includes('engenheiro') || roleLower.includes('developer') || roleLower.includes('tech') || roleLower.includes('analista')) roleKey = 'engineer';
+      window._fncSuggestions[i] = { ...s, _roleKey: roleKey };
+
+      cards.innerHTML += `
+        <div class="border rounded p-3 bg-light">
+          <div class="d-flex justify-content-between align-items-start">
+            <div>
+              <div class="fw-bold">${s.name || '—'}</div>
+              <div class="text-muted small">${s.role || '—'}</div>
+              ${s.email ? `<div class="small mt-1"><i class="bi bi-envelope me-1 text-secondary"></i>${s.email}</div>` : ''}
+              ${s.linkedin ? `<div class="small"><i class="bi bi-linkedin me-1 text-secondary"></i><a href="${s.linkedin}" target="_blank" class="text-decoration-none">${s.linkedin}</a></div>` : ''}
+            </div>
+            <button class="btn btn-sm btn-success ms-3 flex-shrink-0" onclick="addSuggestedContact(${i}, this)">
+              <i class="bi bi-person-plus me-1"></i>Adicionar ao CRM
+            </button>
+          </div>
+          ${s.rationale ? `<div class="mt-2 small text-secondary border-top pt-2"><i class="bi bi-lightbulb me-1"></i>${s.rationale}</div>` : ''}
+        </div>`;
+    });
+
+    document.getElementById('fnc-suggestions').classList.remove('d-none');
+
+  } catch (err) {
+    document.getElementById('fnc-loading').classList.add('d-none');
+    document.getElementById('fnc-error').classList.remove('d-none');
+    console.error('findNewContactsForCompany error:', err);
+  }
+}
+
+async function addSuggestedContact(idx, btn) {
+  if (!currentCompanyId) return;
+  const s = (window._fncSuggestions || {})[idx];
+  if (!s) return;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Adicionando...';
+
+  try {
+    const res = await fetch(`/api/companies/${currentCompanyId}/contacts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: s.name || '',
+        role: s._roleKey || 'other',
+        email: s.email || '',
+        linkedin: s.linkedin || '',
+        whatsapp: ''
+      })
+    });
+    const data = await res.json();
+    if (res.ok && data.id) {
+      btn.innerHTML = '<i class="bi bi-check2 me-1"></i>Adicionado!';
+      btn.classList.replace('btn-success', 'btn-outline-success');
+      // Atualiza lista de contatos em background
+      if (typeof refreshCurrentCompany === 'function') refreshCurrentCompany();
+    } else {
+      throw new Error('Erro ao adicionar');
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-person-plus me-1"></i>Adicionar ao CRM';
+    alert('Erro ao adicionar contato. Tente novamente.');
+  }
+}
+</script>
 
 </body>
 </html>
