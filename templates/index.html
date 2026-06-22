@@ -22,29 +22,47 @@
   .sentiment-badge { font-size:.8rem; padding:.35em .7em; }
   .handon-alert { background:#fff3cd; border:2px solid #f0ad4e; border-radius:8px; padding:12px; }
   #toast-area { position:fixed; bottom:20px; right:20px; z-index:9999; }
+  .contact-card { background:#f8f9fa; border:1px solid #dee2e6; border-radius:8px; padding:10px; margin-bottom:8px; }
+  .contact-card .badge-primary-tag { background:#7c6af7; color:#fff; font-size:.7rem; padding:.2em .5em; border-radius:4px; }
+  .expand-row td { padding:0 !important; }
+  .expand-inner { background:#f8f9fa; padding:12px 16px; border-top:1px solid #dee2e6; }
+  .funnel-card { border-radius:10px; padding:16px 12px; text-align:center; color:#fff; min-width:90px; }
+  .funnel-card .funnel-num { font-size:2rem; font-weight:700; line-height:1; }
+  .funnel-card .funnel-label { font-size:.72rem; margin-top:4px; opacity:.92; }
+  .timeline-item { display:flex; gap:10px; padding:8px 0; border-bottom:1px solid #f0f0f0; }
+  .timeline-item:last-child { border-bottom:none; }
+  .timeline-icon { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex-shrink:0; font-size:.85rem; }
 </style>
 </head>
 <body>
 
 <nav class="navbar navbar-dark px-3 py-2 mb-4">
   <span class="navbar-brand"><i class="bi bi-robot me-2"></i>Sales AI Agent</span>
-  <span class="text-secondary small" id="api-status"></span>
+  <div class="d-flex align-items-center gap-3">
+    <span class="text-secondary small" id="api-status"></span>
+    <span class="text-light small"><i class="bi bi-person-circle me-1"></i><span id="nav-username">—</span></span>
+    <a href="/logout" class="btn btn-outline-secondary btn-sm"><i class="bi bi-box-arrow-right me-1"></i>Sair</a>
+  </div>
 </nav>
 
 <!-- Stats -->
 <div class="container-fluid px-4">
 <div class="row g-3 mb-4" id="stats-row">
-  <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-primary" id="s-total">—</div><div class="text-muted small">Leads</div></div></div>
+  <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-primary" id="s-total">—</div><div class="text-muted small">Empresas</div></div></div>
+  <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-info" id="s-contacts">—</div><div class="text-muted small">Contatos</div></div></div>
   <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-danger" id="s-hot">—</div><div class="text-muted small">Hot Leads</div></div></div>
   <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-success" id="s-meetings">—</div><div class="text-muted small">Reuniões</div></div></div>
   <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-warning" id="s-pending">—</div><div class="text-muted small">Aguard. Revisão</div></div></div>
   <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-info" id="s-score">—</div><div class="text-muted small">Score Médio</div></div></div>
   <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-secondary" id="s-docs">—</div><div class="text-muted small">Docs RAG</div></div></div>
+  <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-success" id="s-pipeline">—</div><div class="text-muted small">Pipeline R$</div></div></div>
 </div>
 
 <!-- Tabs -->
 <ul class="nav nav-tabs mb-3" id="mainTabs">
-  <li class="nav-item"><a class="nav-link active" href="#" data-tab="leads"><i class="bi bi-people me-1"></i>Leads</a></li>
+  <li class="nav-item"><a class="nav-link active" href="#" data-tab="companies"><i class="bi bi-building me-1"></i>Empresas</a></li>
+  <li class="nav-item"><a class="nav-link" href="#" data-tab="opportunities"><i class="bi bi-funnel me-1"></i>Oportunidades</a></li>
+  <li class="nav-item"><a class="nav-link" href="#" data-tab="dashboard"><i class="bi bi-bar-chart-line me-1"></i>Dashboard</a></li>
   <li class="nav-item"><a class="nav-link" href="#" data-tab="rlhf"><i class="bi bi-stars me-1"></i>RLHF / Curadoria</a></li>
   <li class="nav-item"><a class="nav-link" href="#" data-tab="rag"><i class="bi bi-file-earmark-text me-1"></i>RAG / Docs</a></li>
   <li class="nav-item"><a class="nav-link" href="#" data-tab="golden"><i class="bi bi-trophy me-1"></i>Casos de Ouro</a></li>
@@ -52,44 +70,132 @@
   <li class="nav-item"><a class="nav-link" href="#" data-tab="lgpd"><i class="bi bi-shield-lock me-1"></i>LGPD</a></li>
 </ul>
 
-<!-- ═══ TAB: LEADS ══════════════════════════════════════════════════════════ -->
-<div id="tab-leads">
+<!-- ═══ TAB: EMPRESAS ════════════════════════════════════════════════════════ -->
+<div id="tab-companies">
   <div class="row g-3">
-    <!-- Add Lead Form -->
+    <!-- Add Company + Contact Form -->
     <div class="col-md-3">
       <div class="card p-3">
-        <h6 class="fw-bold mb-3"><i class="bi bi-person-plus me-1"></i>Novo Lead</h6>
-        <div class="mb-2"><input class="form-control form-control-sm" id="l-name" placeholder="Nome *"></div>
-        <div class="mb-2"><input class="form-control form-control-sm" id="l-company" placeholder="Empresa *"></div>
+        <h6 class="fw-bold mb-3"><i class="bi bi-building-add me-1"></i>Nova Empresa</h6>
+        <div class="mb-2"><input class="form-control form-control-sm" id="c-name" placeholder="Nome da empresa *"></div>
+        <div class="mb-3"><input class="form-control form-control-sm" id="c-sector" placeholder="Setor (ex: Fintech)"></div>
+        <h6 class="fw-bold mb-2 mt-1"><i class="bi bi-person-plus me-1"></i>Primeiro Contato</h6>
+        <div class="mb-2"><input class="form-control form-control-sm" id="ct-name" placeholder="Nome do contato *"></div>
         <div class="mb-2">
-          <select class="form-select form-select-sm" id="l-role">
+          <select class="form-select form-select-sm" id="ct-role">
             <option value="c_level">C-Level / Diretor</option>
             <option value="manager">Gerente / Coordenador</option>
             <option value="engineer">Engenheiro / TI</option>
-            <option value="other">Outro</option>
+            <option value="other" selected>Outro</option>
           </select>
         </div>
-        <div class="mb-2"><input class="form-control form-control-sm" id="l-sector" placeholder="Setor (ex: Fintech)"></div>
-        <div class="mb-2"><input class="form-control form-control-sm" id="l-email" placeholder="E-mail"></div>
-        <div class="mb-2"><input class="form-control form-control-sm" id="l-linkedin" placeholder="LinkedIn URL"></div>
-        <div class="mb-3"><input class="form-control form-control-sm" id="l-whatsapp" placeholder="WhatsApp"></div>
-        <button class="btn btn-primary btn-sm w-100" onclick="createLead()"><i class="bi bi-plus-circle me-1"></i>Adicionar Lead</button>
+        <div class="mb-2"><input class="form-control form-control-sm" id="ct-email" placeholder="E-mail"></div>
+        <div class="mb-2"><input class="form-control form-control-sm" id="ct-linkedin" placeholder="LinkedIn URL"></div>
+        <div class="mb-3"><input class="form-control form-control-sm" id="ct-whatsapp" placeholder="WhatsApp"></div>
+        <button class="btn btn-primary btn-sm w-100" onclick="createCompanyAndContact()"><i class="bi bi-plus-circle me-1"></i>Adicionar</button>
+
+        <hr>
+        <h6 class="fw-bold mb-2"><i class="bi bi-file-earmark-spreadsheet me-1"></i>Importar CSV</h6>
+        <p class="small text-muted mb-2">Colunas: empresa, setor, contato, cargo, email, whatsapp</p>
+        <input type="file" id="csv-file" accept=".csv" class="form-control form-control-sm mb-2">
+        <button class="btn btn-outline-primary btn-sm w-100" id="btn-import-csv" onclick="importCSV()">Importar</button>
+        <div id="csv-result" class="mt-2"></div>
       </div>
     </div>
 
-    <!-- Leads Table -->
+    <!-- Companies Table -->
     <div class="col-md-9">
       <div class="card p-3">
         <div class="d-flex justify-content-between mb-2">
-          <h6 class="fw-bold mb-0"><i class="bi bi-list-ul me-1"></i>Lista de Leads</h6>
-          <button class="btn btn-outline-secondary btn-sm" onclick="loadLeads()"><i class="bi bi-arrow-clockwise"></i></button>
+          <h6 class="fw-bold mb-0"><i class="bi bi-list-ul me-1"></i>Lista de Empresas</h6>
+          <button class="btn btn-outline-secondary btn-sm" onclick="loadCompanies()"><i class="bi bi-arrow-clockwise"></i></button>
+        </div>
+
+        <!-- Filtros (Melhoria 2) -->
+        <div class="d-flex gap-2 mb-2 flex-wrap">
+          <input id="filter-search" class="form-control form-control-sm" style="max-width:220px" placeholder="🔍 Buscar empresa...">
+          <select id="filter-status" class="form-select form-select-sm" style="max-width:160px">
+            <option value="">Todos os status</option>
+            <option value="new">Novo</option>
+            <option value="researched">Pesquisado</option>
+            <option value="sequence_created">Sequência criada</option>
+            <option value="contacted">Contactado</option>
+            <option value="hot_lead">🔥 Hot Lead</option>
+            <option value="meeting_set">✅ Reunião</option>
+            <option value="opted_out">Opt-out</option>
+          </select>
+          <select id="filter-sector" class="form-select form-select-sm" style="max-width:160px">
+            <option value="">Todos os setores</option>
+          </select>
+          <button class="btn btn-outline-secondary btn-sm" onclick="clearFilters()">✕ Limpar</button>
+          <span class="text-muted small align-self-center" id="filter-count"></span>
+        </div>
+
+        <div class="table-responsive">
+          <table class="table table-hover table-sm">
+            <thead class="table-light"><tr>
+              <th style="width:30px"></th>
+              <th>Empresa</th><th>Setor</th><th>Contatos</th><th>Status</th><th>Score</th><th>Ações</th>
+            </tr></thead>
+            <tbody id="companies-tbody"></tbody>
+          </table>
+        </div>
+
+        <!-- Paginação (Melhoria 12) -->
+        <div class="d-flex justify-content-between align-items-center mt-2" id="pagination-bar">
+          <span class="text-muted small" id="page-info"></span>
+          <nav><ul class="pagination pagination-sm mb-0" id="pagination-list"></ul></nav>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TAB: OPORTUNIDADES ═══════════════════════════════════════════════════ -->
+<div id="tab-opportunities" class="d-none">
+  <div class="row g-3">
+    <div class="col-md-3">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-funnel me-1"></i>Nova Oportunidade</h6>
+        <div class="mb-2">
+          <select class="form-select form-select-sm" id="opp-company">
+            <option value="">Selecione empresa *</option>
+          </select>
+        </div>
+        <div class="mb-2"><input class="form-control form-control-sm" id="opp-name" placeholder="Nome da oportunidade *"></div>
+        <div class="mb-2">
+          <select class="form-select form-select-sm" id="opp-stage">
+            <option value="prospecting">Prospecção</option>
+            <option value="qualified">Qualificado</option>
+            <option value="proposal">Proposta</option>
+            <option value="negotiation">Negociação</option>
+            <option value="won">Ganho</option>
+            <option value="lost">Perdido</option>
+          </select>
+        </div>
+        <div class="mb-2"><input class="form-control form-control-sm" id="opp-value" type="number" min="0" step="0.01" placeholder="Valor R$"></div>
+        <div class="mb-3"><textarea class="form-control form-control-sm" id="opp-notes" rows="3" placeholder="Notas..."></textarea></div>
+        <button class="btn btn-primary btn-sm w-100" onclick="createOpportunity()"><i class="bi bi-plus-circle me-1"></i>Adicionar</button>
+      </div>
+    </div>
+    <div class="col-md-9">
+      <div class="card p-3">
+        <div class="d-flex justify-content-between mb-2">
+          <h6 class="fw-bold mb-0"><i class="bi bi-funnel me-1"></i>Pipeline de Oportunidades</h6>
+          <button class="btn btn-outline-secondary btn-sm" onclick="loadOpportunities()"><i class="bi bi-arrow-clockwise"></i></button>
         </div>
         <div class="table-responsive">
           <table class="table table-hover table-sm">
             <thead class="table-light"><tr>
-              <th>Nome</th><th>Empresa</th><th>Cargo</th><th>Setor</th><th>Status</th><th>Score</th><th>Ações</th>
+              <th>Empresa</th><th>Oportunidade</th><th>Estágio</th><th>Valor</th><th>Data</th><th>Ações</th>
             </tr></thead>
-            <tbody id="leads-tbody"></tbody>
+            <tbody id="opp-tbody"></tbody>
+            <tfoot>
+              <tr class="table-light fw-bold">
+                <td colspan="3">Total do Pipeline (excl. perdidos)</td>
+                <td id="opp-pipeline-total" colspan="3">R$ 0,00</td>
+              </tr>
+            </tfoot>
           </table>
         </div>
       </div>
@@ -97,7 +203,39 @@
   </div>
 </div>
 
-<!-- ═══ TAB: RLHF ══════════════════════════════════════════════════════════ -->
+<!-- ═══ TAB: DASHBOARD ════════════════════════════════════════════════════════ -->
+<div id="tab-dashboard" class="d-none">
+  <div class="row g-3">
+    <!-- Funil de status -->
+    <div class="col-12">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-filter me-1"></i>Funil de Status</h6>
+        <div class="d-flex gap-2 flex-wrap" id="dashboard-funnel"></div>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-pie-chart me-1"></i>Distribuição por Setor</h6>
+        <div id="dashboard-sectors"></div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="card p-3 text-center">
+        <h6 class="fw-bold mb-3"><i class="bi bi-star me-1"></i>Score Médio de Interesse</h6>
+        <div class="display-3 fw-bold text-warning" id="dashboard-avg-score">—</div>
+        <div class="text-muted small">de 10</div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-trophy me-1"></i>Top 5 por Interesse</h6>
+        <div id="dashboard-top5"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TAB: RLHF ════════════════════════════════════════════════════════════ -->
 <div id="tab-rlhf" class="d-none">
   <div class="card p-3">
     <div class="d-flex justify-content-between mb-3">
@@ -108,7 +246,7 @@
   </div>
 </div>
 
-<!-- ═══ TAB: RAG ══════════════════════════════════════════════════════════ -->
+<!-- ═══ TAB: RAG ═════════════════════════════════════════════════════════════ -->
 <div id="tab-rag" class="d-none">
   <div class="row g-3">
     <div class="col-md-4">
@@ -132,14 +270,14 @@
             <strong>Modo Storytelling</strong> — converte dados técnicos em benefícios de negócio (ROI, economia)
           </label>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="queryRAG()"><i class="bi bi-lightning me-1"></i>Consultar</button>
+        <button class="btn btn-primary btn-sm" id="btn-rag-query" onclick="queryRAG()"><i class="bi bi-lightning me-1"></i>Consultar</button>
         <div id="rag-answer" class="mt-3"></div>
       </div>
     </div>
   </div>
 </div>
 
-<!-- ═══ TAB: GOLDEN CASES ══════════════════════════════════════════════════ -->
+<!-- ═══ TAB: GOLDEN CASES ════════════════════════════════════════════════════ -->
 <div id="tab-golden" class="d-none">
   <div class="row g-3">
     <div class="col-md-4">
@@ -206,7 +344,7 @@
   </div>
 </div>
 
-<!-- ═══ TAB: LGPD ══════════════════════════════════════════════════════════ -->
+<!-- ═══ TAB: LGPD ════════════════════════════════════════════════════════════ -->
 <div id="tab-lgpd" class="d-none">
   <div class="card p-3">
     <div class="d-flex justify-content-between mb-3">
@@ -215,7 +353,7 @@
     </div>
     <div class="table-responsive">
       <table class="table table-sm table-hover">
-        <thead class="table-light"><tr><th>Data</th><th>Lead</th><th>Empresa</th><th>Ação</th><th>Detalhes</th></tr></thead>
+        <thead class="table-light"><tr><th>Data</th><th>Empresa</th><th>Contato</th><th>Ação</th><th>Detalhes</th></tr></thead>
         <tbody id="consent-tbody"></tbody>
       </table>
     </div>
@@ -224,21 +362,35 @@
 
 </div><!-- /container -->
 
-<!-- ═══ LEAD DETAIL MODAL ══════════════════════════════════════════════════ -->
-<div class="modal fade" id="leadModal" tabindex="-1">
+<!-- ═══ COMPANY DETAIL MODAL ════════════════════════════════════════════════ -->
+<div class="modal fade" id="companyModal" tabindex="-1">
   <div class="modal-dialog modal-xl modal-dialog-scrollable">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title fw-bold" id="modal-lead-title">Lead</h5>
+        <div>
+          <!-- Edição inline do nome (Melhoria 14) -->
+          <div class="d-flex align-items-center gap-2 mb-0">
+            <h5 class="modal-title fw-bold mb-0" id="modal-company-title" id="company-name-display"></h5>
+            <button class="btn btn-link btn-sm p-0" onclick="editCompanyInline()" title="Editar empresa"><i class="bi bi-pencil"></i></button>
+          </div>
+          <div id="company-edit-form" class="d-none mt-1">
+            <input class="form-control form-control-sm mb-1" id="edit-company-name" placeholder="Nome da empresa">
+            <input class="form-control form-control-sm mb-1" id="edit-company-sector" placeholder="Setor">
+            <div class="d-flex gap-1">
+              <button class="btn btn-success btn-sm" onclick="saveCompanyEdit()">Salvar</button>
+              <button class="btn btn-link btn-sm" onclick="cancelCompanyEdit()">Cancelar</button>
+            </div>
+          </div>
+        </div>
         <div class="ms-auto d-flex gap-2 me-3">
-          <button class="btn btn-outline-danger btn-sm" id="btn-optout" onclick="optoutLead()"><i class="bi bi-slash-circle me-1"></i>Opt-out LGPD</button>
+          <button class="btn btn-outline-danger btn-sm" id="btn-optout" onclick="optoutCompany()"><i class="bi bi-slash-circle me-1"></i>Opt-out LGPD</button>
         </div>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
         <div class="row g-3">
 
-          <!-- Left: Research + Sequence -->
+          <!-- Left: Research + Sequence + Response -->
           <div class="col-md-7">
             <!-- Research -->
             <div class="card mb-3">
@@ -246,7 +398,7 @@
                 <span class="fw-bold"><i class="bi bi-search me-1"></i>Pesquisa & Gancho</span>
                 <div class="d-flex gap-2">
                   <input class="form-control form-control-sm" style="width:200px" id="modal-product" placeholder="Produto sendo vendido">
-                  <button class="btn btn-primary btn-sm" onclick="runResearch()"><i class="bi bi-lightning me-1"></i>Pesquisar</button>
+                  <button class="btn btn-primary btn-sm" id="btn-research" onclick="runResearch()"><i class="bi bi-lightning me-1"></i>Pesquisar</button>
                 </div>
               </div>
               <div class="card-body">
@@ -260,12 +412,17 @@
 
             <!-- Sequence -->
             <div class="card mb-3">
-              <div class="card-header d-flex align-items-center justify-content-between">
+              <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-2">
                 <span class="fw-bold"><i class="bi bi-send me-1"></i>Sequência Multicanal</span>
-                <button class="btn btn-primary btn-sm" onclick="generateSequence()"><i class="bi bi-magic me-1"></i>Gerar Sequência</button>
+                <div class="d-flex gap-2 align-items-center">
+                  <select class="form-select form-select-sm" id="modal-contact-select" style="min-width:160px">
+                    <option value="">Selecione contato...</option>
+                  </select>
+                  <button class="btn btn-primary btn-sm" id="btn-sequence" onclick="generateSequence()"><i class="bi bi-magic me-1"></i>Gerar</button>
+                </div>
               </div>
               <div class="card-body" id="sequence-container">
-                <p class="text-muted small mb-0">Clique em "Gerar Sequência" para criar as mensagens personalizadas para cada canal.</p>
+                <p class="text-muted small mb-0">Selecione um contato e clique em "Gerar" para criar as mensagens personalizadas.</p>
               </div>
             </div>
 
@@ -273,31 +430,67 @@
             <div class="card">
               <div class="card-header fw-bold"><i class="bi bi-chat-dots me-1"></i>Registrar Resposta do Prospect</div>
               <div class="card-body">
+                <div class="mb-2">
+                  <label class="form-label small fw-bold">De qual contato veio a resposta?</label>
+                  <select class="form-select form-select-sm mb-2" id="response-contact-select">
+                    <option value="">Selecione contato...</option>
+                  </select>
+                </div>
                 <textarea class="form-control form-control-sm mb-2" id="prospect-response" rows="3" placeholder="Cole aqui a resposta recebida do prospect..."></textarea>
-                <button class="btn btn-secondary btn-sm" onclick="recordResponse()"><i class="bi bi-bullseye me-1"></i>Analisar Sentimento</button>
+                <button class="btn btn-secondary btn-sm" id="btn-sentiment" onclick="recordResponse()"><i class="bi bi-bullseye me-1"></i>Analisar Sentimento</button>
                 <div id="sentiment-result" class="mt-2"></div>
               </div>
             </div>
           </div>
 
-          <!-- Right: Info + Logs -->
+          <!-- Right: Contacts + Info + Timeline + Logs -->
           <div class="col-md-5">
+            <!-- Contacts -->
             <div class="card mb-3">
-              <div class="card-header fw-bold"><i class="bi bi-person-badge me-1"></i>Informações</div>
-              <div class="card-body" id="lead-info"></div>
+              <div class="card-header d-flex align-items-center justify-content-between">
+                <span class="fw-bold"><i class="bi bi-people me-1"></i>Contatos</span>
+                <button class="btn btn-outline-primary btn-sm" onclick="toggleAddContactForm()"><i class="bi bi-person-plus me-1"></i>Adicionar</button>
+              </div>
+              <div class="card-body">
+                <div id="add-contact-form" class="d-none mb-3 p-2 border rounded bg-light">
+                  <div class="mb-2"><input class="form-control form-control-sm" id="new-ct-name" placeholder="Nome *"></div>
+                  <div class="mb-2">
+                    <select class="form-select form-select-sm" id="new-ct-role">
+                      <option value="c_level">C-Level / Diretor</option>
+                      <option value="manager">Gerente / Coordenador</option>
+                      <option value="engineer">Engenheiro / TI</option>
+                      <option value="other" selected>Outro</option>
+                    </select>
+                  </div>
+                  <div class="mb-2"><input class="form-control form-control-sm" id="new-ct-email" placeholder="E-mail"></div>
+                  <div class="mb-2"><input class="form-control form-control-sm" id="new-ct-linkedin" placeholder="LinkedIn URL"></div>
+                  <div class="mb-2"><input class="form-control form-control-sm" id="new-ct-whatsapp" placeholder="WhatsApp"></div>
+                  <div class="d-flex gap-2">
+                    <button class="btn btn-primary btn-sm" onclick="addContactToCompany()">Salvar</button>
+                    <button class="btn btn-link btn-sm" onclick="toggleAddContactForm()">Cancelar</button>
+                  </div>
+                </div>
+                <div id="contacts-list"></div>
+              </div>
             </div>
 
-            <!-- Hand-off Alert (hidden by default) -->
+            <!-- Info -->
+            <div class="card mb-3">
+              <div class="card-header fw-bold"><i class="bi bi-building me-1"></i>Informações</div>
+              <div class="card-body" id="company-info"></div>
+            </div>
+
+            <!-- Hand-off Alert -->
             <div id="handon-alert" class="handon-alert d-none mb-3">
               <strong><i class="bi bi-bell-fill text-warning me-1"></i>ALERTA DE HAND-OFF</strong>
-              <p class="mb-0 mt-1 small">Este lead demonstrou <strong>alto interesse</strong>. Recomenda-se transição imediata para atendimento humano.</p>
+              <p class="mb-0 mt-1 small">Esta empresa demonstrou <strong>alto interesse</strong>. Recomenda-se transição imediata para atendimento humano.</p>
             </div>
 
             <!-- Schedule -->
             <div class="card mb-3">
               <div class="card-header fw-bold"><i class="bi bi-calendar-check me-1"></i>Agendar Reunião</div>
               <div class="card-body">
-                <div id="available-slots-for-lead"></div>
+                <div id="available-slots-for-company"></div>
               </div>
             </div>
 
@@ -307,10 +500,16 @@
               <div class="card-body" id="sentiment-history"></div>
             </div>
 
+            <!-- Timeline (Melhoria 7) -->
+            <div class="card mb-3">
+              <div class="card-header fw-bold"><i class="bi bi-clock-history me-1"></i>Linha do Tempo</div>
+              <div class="card-body p-2" id="company-timeline" style="max-height:300px;overflow-y:auto"></div>
+            </div>
+
             <!-- Consent Log -->
             <div class="card">
               <div class="card-header fw-bold"><i class="bi bi-journal-text me-1"></i>Log de Consentimento</div>
-              <div class="card-body" id="consent-log-lead"></div>
+              <div class="card-body" id="consent-log-company"></div>
             </div>
           </div>
 
@@ -326,10 +525,13 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
-let currentLeadId = null;
-let currentLeadData = null;
+let currentCompanyId = null;
+let currentCompanyData = null;
 let gcSelectedScore = 5;
-const leadModal = new bootstrap.Modal(document.getElementById('leadModal'));
+let allCompanies = [];
+let currentPage = 1;
+const pageSize = 15;
+const companyModal = new bootstrap.Modal(document.getElementById('companyModal'));
 
 // ── Tabs ────────────────────────────────────────────────────────────────────
 document.querySelectorAll('[data-tab]').forEach(a => {
@@ -339,11 +541,14 @@ document.querySelectorAll('[data-tab]').forEach(a => {
     a.classList.add('active');
     document.querySelectorAll('[id^="tab-"]').forEach(x => x.classList.add('d-none'));
     document.getElementById('tab-' + a.dataset.tab).classList.remove('d-none');
-    if (a.dataset.tab === 'rlhf')   loadRLHF();
-    if (a.dataset.tab === 'rag')    loadDocs();
-    if (a.dataset.tab === 'golden') loadGoldenCases();
-    if (a.dataset.tab === 'agenda') loadSlots();
-    if (a.dataset.tab === 'lgpd')   loadConsentLogs();
+    if (a.dataset.tab === 'rlhf')          loadRLHF();
+    if (a.dataset.tab === 'rag')           loadDocs();
+    if (a.dataset.tab === 'golden')        loadGoldenCases();
+    if (a.dataset.tab === 'agenda')        loadSlots();
+    if (a.dataset.tab === 'lgpd')          loadConsentLogs();
+    if (a.dataset.tab === 'companies')     loadCompanies();
+    if (a.dataset.tab === 'opportunities') loadOpportunities();
+    if (a.dataset.tab === 'dashboard')     loadDashboard();
   });
 });
 
@@ -356,27 +561,70 @@ function toast(msg, type='success') {
   setTimeout(() => el.remove(), 4000);
 }
 
+// ── API helper com tratamento de erros melhorado (Melhoria 10) ───────────────
 async function api(path, method='GET', body=null) {
   const opts = { method, headers: {'Content-Type':'application/json'} };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(path, opts);
-  const data = await res.json();
-  if (!res.ok) { toast(data.error || 'Erro', 'danger'); throw data; }
+
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (networkErr) {
+    toast('Sem conexão com o servidor. Verifique se o backend está rodando.', 'danger');
+    throw networkErr;
+  }
+
+  if (res.status === 401) {
+    toast('Sessão expirada. Redirecionando para login...', 'warning');
+    setTimeout(() => window.location.href = '/login', 1500);
+    throw new Error('Unauthorized');
+  }
+
+  if (res.status >= 500) {
+    toast('Erro interno do servidor. Tente novamente.', 'danger');
+    throw new Error('Server error');
+  }
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    toast(data.error || `Erro ${res.status}`, 'danger');
+    throw data;
+  }
   return data;
+}
+
+// ── Loading state helper (Melhoria 11) ───────────────────────────────────────
+function setLoading(btnEl, loading) {
+  if (!btnEl) return;
+  if (loading) {
+    btnEl.dataset.originalHtml = btnEl.innerHTML;
+    btnEl.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Aguarde...';
+    btnEl.disabled = true;
+  } else {
+    btnEl.innerHTML = btnEl.dataset.originalHtml || btnEl.innerHTML;
+    btnEl.disabled = false;
+  }
 }
 
 // ── Stats ────────────────────────────────────────────────────────────────────
 async function loadStats() {
   const s = await api('/api/stats');
-  document.getElementById('s-total').textContent    = s.total_leads;
+  document.getElementById('s-total').textContent    = s.total_companies;
+  document.getElementById('s-contacts').textContent = s.total_contacts;
   document.getElementById('s-hot').textContent      = s.hot_leads;
   document.getElementById('s-meetings').textContent = s.meetings;
   document.getElementById('s-pending').textContent  = s.pending_review;
   document.getElementById('s-score').textContent    = s.avg_score || '—';
   document.getElementById('s-docs').textContent     = s.docs_count;
+  document.getElementById('s-pipeline').textContent = formatCurrency(s.pipeline_value || 0);
 }
 
-// ── Leads ────────────────────────────────────────────────────────────────────
+function formatCurrency(v) {
+  return Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+// ── Companies ─────────────────────────────────────────────────────────────────
 const STATUS_BADGE = {
   new:              'bg-secondary',
   researched:       'bg-info text-dark',
@@ -390,74 +638,400 @@ const STATUS_BADGE = {
 };
 const STATUS_LABEL = {
   new:'Novo', researched:'Pesquisado', sequence_created:'Sequência criada',
-  contacted:'Contactado', needs_followup:'Follow-up', hot_lead:'🔥 Hot Lead',
-  rejected:'Rejeitado', meeting_set:'✅ Reunião', opted_out:'Opt-out',
+  contacted:'Contactado', needs_followup:'Follow-up', hot_lead:'Hot Lead',
+  rejected:'Rejeitado', meeting_set:'Reunião', opted_out:'Opt-out',
 };
 const ROLE_LABEL = { c_level:'C-Level', manager:'Gerente', engineer:'Engenheiro', other:'Outro' };
 
-async function loadLeads() {
-  const leads = await api('/api/leads');
-  const tbody = document.getElementById('leads-tbody');
-  tbody.innerHTML = leads.map(l => `
-    <tr>
-      <td><strong>${esc(l.name)}</strong></td>
-      <td>${esc(l.company)}</td>
-      <td>${ROLE_LABEL[l.role]||l.role}</td>
-      <td>${esc(l.sector)}</td>
-      <td><span class="badge ${STATUS_BADGE[l.status]||'bg-secondary'}">${STATUS_LABEL[l.status]||l.status}</span>
-          ${l.opted_out ? '<span class="badge bg-dark ms-1">Blacklist</span>' : ''}</td>
-      <td>${l.interest_score > 0 ? `<span class="badge bg-warning text-dark">${l.interest_score}/10</span>` : '—'}</td>
-      <td><button class="btn btn-outline-primary btn-sm" onclick="openLead(${l.id})"><i class="bi bi-arrow-right"></i></button></td>
-    </tr>`).join('');
+// Mapa para controlar linhas expandidas
+const expandedRows = new Set();
+
+async function loadCompanies() {
+  allCompanies = await api('/api/companies');
+  populateSectorFilter();
+  currentPage = 1;
+  filterCompanies();
+
+  // Popular select de oportunidades com empresas
+  const oppSel = document.getElementById('opp-company');
+  if (oppSel) {
+    oppSel.innerHTML = '<option value="">Selecione empresa *</option>' +
+      allCompanies.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  }
 }
 
-async function createLead() {
-  const name = document.getElementById('l-name').value.trim();
-  const company = document.getElementById('l-company').value.trim();
-  if (!name || !company) { toast('Nome e empresa são obrigatórios', 'warning'); return; }
-  await api('/api/leads', 'POST', {
-    name, company,
-    role:     document.getElementById('l-role').value,
-    sector:   document.getElementById('l-sector').value.trim(),
-    email:    document.getElementById('l-email').value.trim(),
-    linkedin: document.getElementById('l-linkedin').value.trim(),
-    whatsapp: document.getElementById('l-whatsapp').value.trim(),
+function populateSectorFilter() {
+  const sectors = [...new Set(allCompanies.map(c => c.sector).filter(Boolean))].sort();
+  const sel = document.getElementById('filter-sector');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">Todos os setores</option>' +
+    sectors.map(s => `<option value="${s}" ${s===current?'selected':''}>${esc(s)}</option>`).join('');
+}
+
+function filterCompanies() {
+  const search = document.getElementById('filter-search').value.toLowerCase().trim();
+  const status = document.getElementById('filter-status').value;
+  const sector = document.getElementById('filter-sector').value;
+
+  let filtered = allCompanies.filter(c => {
+    if (search && !c.name.toLowerCase().includes(search) && !(c.sector||'').toLowerCase().includes(search)) return false;
+    if (status && c.status !== status) return false;
+    if (sector && c.sector !== sector) return false;
+    return true;
   });
-  toast('Lead adicionado!');
-  ['l-name','l-company','l-sector','l-email','l-linkedin','l-whatsapp'].forEach(id => document.getElementById(id).value='');
-  loadLeads(); loadStats();
+
+  document.getElementById('filter-count').textContent = `Mostrando ${filtered.length} de ${allCompanies.length} empresas`;
+  currentPage = 1;
+  renderCompaniesPage(filtered);
 }
 
-async function openLead(id) {
-  currentLeadId = id;
-  const data = await api(`/api/leads/${id}`);
-  currentLeadData = data;
-  const l = data.lead;
+function clearFilters() {
+  document.getElementById('filter-search').value = '';
+  document.getElementById('filter-status').value = '';
+  document.getElementById('filter-sector').value = '';
+  filterCompanies();
+}
 
-  document.getElementById('modal-lead-title').textContent = `${l.name} — ${l.company}`;
-  document.getElementById('btn-optout').disabled = !!l.opted_out;
+// Event listeners de filtro
+document.getElementById('filter-search').addEventListener('input', filterCompanies);
+document.getElementById('filter-status').addEventListener('change', filterCompanies);
+document.getElementById('filter-sector').addEventListener('change', filterCompanies);
+
+function renderCompaniesPage(filtered) {
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  if (currentPage > totalPages) currentPage = totalPages;
+
+  const pageItems = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const tbody = document.getElementById('companies-tbody');
+  tbody.innerHTML = '';
+
+  pageItems.forEach(c => {
+    const mainRow = document.createElement('tr');
+    mainRow.id = `row-company-${c.id}`;
+    mainRow.innerHTML = `
+      <td>
+        <button class="btn btn-link btn-sm p-0" onclick="toggleCompanyExpand(${c.id})" id="expand-btn-${c.id}">
+          <i class="bi bi-chevron-right" id="expand-icon-${c.id}"></i>
+        </button>
+      </td>
+      <td><strong>${esc(c.name)}</strong></td>
+      <td>${esc(c.sector) || '—'}</td>
+      <td><span class="badge bg-secondary">${c.contact_count || 0}</span></td>
+      <td>
+        <span class="badge ${STATUS_BADGE[c.status]||'bg-secondary'}">${STATUS_LABEL[c.status]||c.status}</span>
+        ${c.opted_out ? '<span class="badge bg-dark ms-1">Blacklist</span>' : ''}
+      </td>
+      <td>${c.interest_score > 0 ? `<span class="badge bg-warning text-dark">${c.interest_score}/10</span>` : '—'}</td>
+      <td><button class="btn btn-outline-primary btn-sm" onclick="openCompany(${c.id})"><i class="bi bi-arrow-right"></i></button></td>`;
+
+    const expandRow = document.createElement('tr');
+    expandRow.id = `expand-row-${c.id}`;
+    expandRow.className = 'expand-row d-none';
+    expandRow.innerHTML = `<td colspan="7"><div class="expand-inner" id="expand-inner-${c.id}"></div></td>`;
+
+    tbody.appendChild(mainRow);
+    tbody.appendChild(expandRow);
+  });
+
+  // Paginação
+  const start = filtered.length === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const end = Math.min(currentPage * pageSize, filtered.length);
+  document.getElementById('page-info').textContent = filtered.length > 0
+    ? `Mostrando ${start}–${end} de ${filtered.length} empresas`
+    : 'Nenhuma empresa encontrada';
+
+  const paginationList = document.getElementById('pagination-list');
+  paginationList.innerHTML = '';
+
+  if (totalPages <= 1) return;
+
+  const prevLi = document.createElement('li');
+  prevLi.className = `page-item ${currentPage === 1 ? 'disabled' : ''}`;
+  prevLi.innerHTML = `<a class="page-link" href="#" onclick="changePage(${currentPage-1}, event)">Anterior</a>`;
+  paginationList.appendChild(prevLi);
+
+  for (let i = 1; i <= totalPages; i++) {
+    if (totalPages > 7 && Math.abs(i - currentPage) > 2 && i !== 1 && i !== totalPages) {
+      if (i === 2 || i === totalPages - 1) {
+        const ellipsis = document.createElement('li');
+        ellipsis.className = 'page-item disabled';
+        ellipsis.innerHTML = '<span class="page-link">...</span>';
+        paginationList.appendChild(ellipsis);
+      }
+      continue;
+    }
+    const li = document.createElement('li');
+    li.className = `page-item ${i === currentPage ? 'active' : ''}`;
+    li.innerHTML = `<a class="page-link" href="#" onclick="changePage(${i}, event)">${i}</a>`;
+    paginationList.appendChild(li);
+  }
+
+  const nextLi = document.createElement('li');
+  nextLi.className = `page-item ${currentPage === totalPages ? 'disabled' : ''}`;
+  nextLi.innerHTML = `<a class="page-link" href="#" onclick="changePage(${currentPage+1}, event)">Próximo</a>`;
+  paginationList.appendChild(nextLi);
+}
+
+function changePage(page, event) {
+  if (event) event.preventDefault();
+  const search = document.getElementById('filter-search').value.toLowerCase().trim();
+  const status = document.getElementById('filter-status').value;
+  const sector = document.getElementById('filter-sector').value;
+  const filtered = allCompanies.filter(c => {
+    if (search && !c.name.toLowerCase().includes(search) && !(c.sector||'').toLowerCase().includes(search)) return false;
+    if (status && c.status !== status) return false;
+    if (sector && c.sector !== sector) return false;
+    return true;
+  });
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  if (page < 1 || page > totalPages) return;
+  currentPage = page;
+  renderCompaniesPage(filtered);
+}
+
+async function toggleCompanyExpand(companyId) {
+  const expandRow = document.getElementById(`expand-row-${companyId}`);
+  const expandIcon = document.getElementById(`expand-icon-${companyId}`);
+  const inner = document.getElementById(`expand-inner-${companyId}`);
+
+  if (expandedRows.has(companyId)) {
+    expandedRows.delete(companyId);
+    expandRow.classList.add('d-none');
+    expandIcon.className = 'bi bi-chevron-right';
+    return;
+  }
+
+  expandedRows.add(companyId);
+  expandRow.classList.remove('d-none');
+  expandIcon.className = 'bi bi-chevron-down';
+
+  const data = await api(`/api/companies/${companyId}`);
+  const contacts = data.contacts;
+
+  let contactsHtml = contacts.length
+    ? `<table class="table table-sm mb-2">
+        <thead><tr><th>Nome</th><th>Cargo</th><th>E-mail</th><th>WhatsApp</th><th></th></tr></thead>
+        <tbody>
+          ${contacts.map(ct => `
+            <tr>
+              <td>${esc(ct.name)} ${ct.is_primary ? '<span class="badge" style="background:#7c6af7;font-size:.65rem">Principal</span>' : ''}</td>
+              <td>${ROLE_LABEL[ct.role]||ct.role}</td>
+              <td>${ct.email ? `<a href="mailto:${esc(ct.email)}">${esc(ct.email)}</a>` : '—'}</td>
+              <td>${esc(ct.whatsapp)||'—'}</td>
+              <td>
+                <button class="btn btn-outline-danger btn-sm py-0" onclick="removeContact(${companyId}, ${ct.id})">
+                  <i class="bi bi-trash"></i>
+                </button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+       </table>`
+    : '<p class="text-muted small mb-2">Nenhum contato cadastrado.</p>';
+
+  inner.innerHTML = `
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <strong class="small"><i class="bi bi-people me-1"></i>Contatos de ${esc(data.company.name)}</strong>
+    </div>
+    ${contactsHtml}
+    <div id="inline-add-contact-${companyId}" class="d-none border rounded p-2 bg-white mt-2">
+      <div class="row g-2">
+        <div class="col-md-3"><input class="form-control form-control-sm" id="iac-name-${companyId}" placeholder="Nome *"></div>
+        <div class="col-md-2">
+          <select class="form-select form-select-sm" id="iac-role-${companyId}">
+            <option value="c_level">C-Level</option>
+            <option value="manager">Gerente</option>
+            <option value="engineer">Engenheiro</option>
+            <option value="other" selected>Outro</option>
+          </select>
+        </div>
+        <div class="col-md-3"><input class="form-control form-control-sm" id="iac-email-${companyId}" placeholder="E-mail"></div>
+        <div class="col-md-2"><input class="form-control form-control-sm" id="iac-wa-${companyId}" placeholder="WhatsApp"></div>
+        <div class="col-md-2 d-flex gap-1">
+          <button class="btn btn-primary btn-sm" onclick="saveInlineContact(${companyId})">Salvar</button>
+          <button class="btn btn-link btn-sm" onclick="document.getElementById('inline-add-contact-${companyId}').classList.add('d-none')">X</button>
+        </div>
+      </div>
+    </div>
+    <button class="btn btn-outline-primary btn-sm mt-2" onclick="document.getElementById('inline-add-contact-${companyId}').classList.toggle('d-none')">
+      <i class="bi bi-person-plus me-1"></i>+ Contato
+    </button>`;
+}
+
+async function removeContact(companyId, contactId) {
+  if (!confirm('Remover este contato?')) return;
+  await api(`/api/companies/${companyId}/contacts/${contactId}`, 'DELETE');
+  toast('Contato removido', 'warning');
+  expandedRows.delete(companyId);
+  toggleCompanyExpand(companyId);
+  loadStats();
+}
+
+async function saveInlineContact(companyId) {
+  const name = document.getElementById(`iac-name-${companyId}`).value.trim();
+  if (!name) { toast('Nome é obrigatório', 'warning'); return; }
+  await api(`/api/companies/${companyId}/contacts`, 'POST', {
+    name,
+    role: document.getElementById(`iac-role-${companyId}`).value,
+    email: document.getElementById(`iac-email-${companyId}`).value.trim(),
+    whatsapp: document.getElementById(`iac-wa-${companyId}`).value.trim(),
+  });
+  toast('Contato adicionado!');
+  expandedRows.delete(companyId);
+  toggleCompanyExpand(companyId);
+  loadStats();
+}
+
+async function createCompanyAndContact() {
+  const companyName = document.getElementById('c-name').value.trim();
+  const contactName = document.getElementById('ct-name').value.trim();
+  if (!companyName) { toast('Nome da empresa é obrigatório', 'warning'); return; }
+  if (!contactName) { toast('Nome do contato é obrigatório', 'warning'); return; }
+
+  const comp = await api('/api/companies', 'POST', {
+    name: companyName,
+    sector: document.getElementById('c-sector').value.trim(),
+  });
+
+  await api(`/api/companies/${comp.id}/contacts`, 'POST', {
+    name: contactName,
+    role: document.getElementById('ct-role').value,
+    email: document.getElementById('ct-email').value.trim(),
+    linkedin: document.getElementById('ct-linkedin').value.trim(),
+    whatsapp: document.getElementById('ct-whatsapp').value.trim(),
+  });
+
+  toast('Empresa e contato adicionados!');
+  ['c-name','c-sector','ct-name','ct-email','ct-linkedin','ct-whatsapp'].forEach(id => document.getElementById(id).value='');
+  document.getElementById('ct-role').value = 'other';
+  loadCompanies(); loadStats();
+}
+
+// ── Importar CSV (Melhoria 6) ─────────────────────────────────────────────────
+async function importCSV() {
+  const fileInput = document.getElementById('csv-file');
+  const btn = document.getElementById('btn-import-csv');
+  const resultEl = document.getElementById('csv-result');
+
+  if (!fileInput.files.length) { toast('Selecione um arquivo CSV', 'warning'); return; }
+
+  const roleMap = { c_level:'c_level', manager:'manager', engineer:'engineer', other:'other',
+    'c-level':'c_level', diretor:'c_level', director:'c_level',
+    gerente:'manager', coordenador:'manager',
+    engenheiro:'engineer', ti:'engineer', tech:'engineer' };
+
+  const mapRole = r => roleMap[(r||'').toLowerCase().trim()] || 'other';
+
+  const text = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result);
+    reader.onerror = reject;
+    reader.readAsText(fileInput.files[0], 'UTF-8');
+  });
+
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) { toast('CSV vazio ou sem dados além do cabeçalho', 'warning'); return; }
+
+  // Detectar separador
+  const sep = lines[0].includes(';') ? ';' : ',';
+  const headers = lines[0].split(sep).map(h => h.trim().toLowerCase().replace(/["""]/g,''));
+
+  const colIdx = {
+    empresa: headers.findIndex(h => h === 'empresa' || h === 'company'),
+    setor: headers.findIndex(h => h === 'setor' || h === 'sector'),
+    contato: headers.findIndex(h => h === 'contato' || h === 'contact' || h === 'nome' || h === 'name'),
+    cargo: headers.findIndex(h => h === 'cargo' || h === 'role' || h === 'função'),
+    email: headers.findIndex(h => h === 'email' || h === 'e-mail'),
+    whatsapp: headers.findIndex(h => h === 'whatsapp' || h === 'telefone' || h === 'phone'),
+  };
+
+  const dataLines = lines.slice(1).filter(l => l.trim());
+  const total = dataLines.length;
+  let imported = 0, errors = 0;
+
+  setLoading(btn, true);
+  resultEl.innerHTML = `<div class="text-muted small">Importando 0/${total}...</div>`;
+
+  for (let i = 0; i < dataLines.length; i++) {
+    const cols = dataLines[i].split(sep).map(c => c.trim().replace(/^[""]|[""]$/g, ''));
+    const empresa = colIdx.empresa >= 0 ? cols[colIdx.empresa] : '';
+    const setor   = colIdx.setor >= 0 ? cols[colIdx.setor] : '';
+    const contato = colIdx.contato >= 0 ? cols[colIdx.contato] : '';
+    const cargo   = colIdx.cargo >= 0 ? cols[colIdx.cargo] : 'other';
+    const email   = colIdx.email >= 0 ? cols[colIdx.email] : '';
+    const wa      = colIdx.whatsapp >= 0 ? cols[colIdx.whatsapp] : '';
+
+    if (!empresa) { errors++; continue; }
+
+    resultEl.innerHTML = `<div class="text-muted small">Importando ${i+1}/${total}...</div>`;
+
+    try {
+      let compId;
+      try {
+        const r = await api('/api/companies', 'POST', { name: empresa, sector: setor });
+        compId = r.id;
+      } catch (e) {
+        if (e && e.existing_id) {
+          compId = e.existing_id;
+        } else {
+          errors++;
+          continue;
+        }
+      }
+
+      if (contato && compId) {
+        await api(`/api/companies/${compId}/contacts`, 'POST', {
+          name: contato,
+          role: mapRole(cargo),
+          email: email,
+          whatsapp: wa,
+        }).catch(() => {});
+      }
+      imported++;
+    } catch {
+      errors++;
+    }
+  }
+
+  setLoading(btn, false);
+  resultEl.innerHTML = `<div class="small text-${errors > 0 ? 'warning' : 'success'}">
+    Concluído: ${imported} empresa(s) importada(s)${errors > 0 ? `, ${errors} erro(s)` : ''}.
+  </div>`;
+  fileInput.value = '';
+  loadCompanies(); loadStats();
+}
+
+async function openCompany(id) {
+  currentCompanyId = id;
+  const data = await api(`/api/companies/${id}`);
+  currentCompanyData = data;
+  const c = data.company;
+
+  document.getElementById('modal-company-title').textContent = `${esc(c.name)}${c.sector ? ' — ' + esc(c.sector) : ''}`;
+  document.getElementById('btn-optout').disabled = !!c.opted_out;
 
   // Info panel
-  document.getElementById('lead-info').innerHTML = `
+  document.getElementById('company-info').innerHTML = `
     <dl class="row mb-0 small">
-      <dt class="col-5">Cargo</dt><dd class="col-7">${ROLE_LABEL[l.role]||l.role}</dd>
-      <dt class="col-5">Setor</dt><dd class="col-7">${esc(l.sector)||'—'}</dd>
-      <dt class="col-5">E-mail</dt><dd class="col-7">${esc(l.email)||'—'}</dd>
-      <dt class="col-5">LinkedIn</dt><dd class="col-7">${esc(l.linkedin)||'—'}</dd>
-      <dt class="col-5">WhatsApp</dt><dd class="col-7">${esc(l.whatsapp)||'—'}</dd>
-      <dt class="col-5">Status</dt><dd class="col-7"><span class="badge ${STATUS_BADGE[l.status]||'bg-secondary'}">${STATUS_LABEL[l.status]||l.status}</span></dd>
-      <dt class="col-5">Interest</dt><dd class="col-7">${l.interest_score}/10</dd>
-      <dt class="col-5">Adicionado</dt><dd class="col-7">${l.created_at}</dd>
+      <dt class="col-5">Setor</dt><dd class="col-7">${esc(c.sector)||'—'}</dd>
+      <dt class="col-5">Status</dt><dd class="col-7"><span class="badge ${STATUS_BADGE[c.status]||'bg-secondary'}">${STATUS_LABEL[c.status]||c.status}</span></dd>
+      <dt class="col-5">Interest</dt><dd class="col-7">${c.interest_score}/10</dd>
+      <dt class="col-5">Adicionado</dt><dd class="col-7">${c.created_at}</dd>
     </dl>`;
+
+  // Contacts panel
+  renderContactsPanel(data.contacts);
+
+  // Populate contact selects
+  populateContactSelects(data.contacts);
 
   // Hook
   const hookEl = document.getElementById('research-hook');
-  if (l.research_hook) {
-    hookEl.textContent = l.research_hook;
-    if (l.research_context) {
+  if (c.research_hook) {
+    hookEl.textContent = c.research_hook;
+    if (c.research_context) {
       document.getElementById('research-context').classList.remove('d-none');
-      try { document.getElementById('research-context-text').textContent = JSON.stringify(JSON.parse(l.research_context), null, 2); }
-      catch { document.getElementById('research-context-text').textContent = l.research_context; }
+      try { document.getElementById('research-context-text').textContent = JSON.stringify(JSON.parse(c.research_context), null, 2); }
+      catch { document.getElementById('research-context-text').textContent = c.research_context; }
     }
   } else {
     hookEl.textContent = 'Clique em "Pesquisar" para gerar o gancho personalizado...';
@@ -471,24 +1045,171 @@ async function openLead(id) {
   renderSentimentHistory(data.sentiments);
 
   // Consent log
-  document.getElementById('consent-log-lead').innerHTML = data.consent_logs.length
-    ? data.consent_logs.map(c => `<div class="small mb-1"><span class="text-muted">${c.created_at}</span> — <strong>${c.action}</strong>: ${esc(c.details)}</div>`).join('')
+  document.getElementById('consent-log-company').innerHTML = data.consent_logs.length
+    ? data.consent_logs.map(cl => `<div class="small mb-1"><span class="text-muted">${cl.created_at}</span> — <strong>${cl.action}</strong>${cl.contact_name ? ' (' + esc(cl.contact_name) + ')' : ''}: ${esc(cl.details)}</div>`).join('')
     : '<p class="text-muted small mb-0">Nenhum log.</p>';
 
+  // Timeline
+  loadTimeline(id);
+
   // Available slots
-  renderAvailableSlotsForLead();
+  renderAvailableSlotsForCompany();
 
   document.getElementById('handon-alert').classList.add('d-none');
   document.getElementById('sentiment-result').innerHTML = '';
   document.getElementById('prospect-response').value = '';
+  document.getElementById('add-contact-form').classList.add('d-none');
 
-  leadModal.show();
+  // Resetar edição inline
+  cancelCompanyEdit();
+
+  companyModal.show();
 }
 
+// ── Edição inline da empresa (Melhoria 14) ────────────────────────────────────
+function editCompanyInline() {
+  document.getElementById('modal-company-title').classList.add('d-none');
+  document.getElementById('company-edit-form').classList.remove('d-none');
+  document.getElementById('edit-company-name').value = currentCompanyData.company.name;
+  document.getElementById('edit-company-sector').value = currentCompanyData.company.sector;
+}
+
+async function saveCompanyEdit() {
+  const name = document.getElementById('edit-company-name').value.trim();
+  const sector = document.getElementById('edit-company-sector').value.trim();
+  if (!name) { toast('Nome é obrigatório', 'warning'); return; }
+  await api(`/api/companies/${currentCompanyId}`, 'PATCH', { name, sector });
+  toast('Empresa atualizada!');
+  cancelCompanyEdit();
+  await refreshCurrentCompany();
+  loadCompanies();
+}
+
+function cancelCompanyEdit() {
+  document.getElementById('modal-company-title').classList.remove('d-none');
+  document.getElementById('company-edit-form').classList.add('d-none');
+}
+
+// ── Timeline (Melhoria 7) ─────────────────────────────────────────────────────
+async function loadTimeline(companyId) {
+  const el = document.getElementById('company-timeline');
+  el.innerHTML = '<p class="text-muted small p-2">Carregando...</p>';
+  try {
+    const events = await api(`/api/companies/${companyId}/timeline`);
+    if (!events.length) {
+      el.innerHTML = '<p class="text-muted small p-2 mb-0">Nenhum evento registrado.</p>';
+      return;
+    }
+
+    const channelIcon = {
+      linkedin: '<i class="bi bi-linkedin text-white"></i>',
+      email:    '<i class="bi bi-envelope text-white"></i>',
+      whatsapp: '<i class="bi bi-whatsapp text-white"></i>',
+    };
+    const channelBg = { linkedin: '#0077b5', email: '#ea4335', whatsapp: '#25d366' };
+
+    el.innerHTML = events.map(ev => {
+      let icon = '', bgColor = '#6c757d', title = '', detail = '';
+
+      if (ev.type === 'consent') {
+        icon = '<i class="bi bi-journal-check text-white"></i>';
+        bgColor = '#0d6efd';
+        title = `<strong>${esc(ev.action)}</strong>`;
+        detail = esc(ev.details || '');
+      } else if (ev.type === 'message') {
+        icon = channelIcon[ev.channel] || '<i class="bi bi-chat text-white"></i>';
+        bgColor = channelBg[ev.channel] || '#6c757d';
+        title = `<strong>${ev.channel}</strong> — Dia ${ev.day}${ev.contact_name ? ' para ' + esc(ev.contact_name) : ''}`;
+        detail = `<span class="badge bg-secondary">${ev.status}</span>`;
+      } else if (ev.type === 'sentiment') {
+        const sColors = {interested:'#198754', technical_question:'#0dcaf0', negative:'#dc3545', out_of_scope:'#6c757d'};
+        bgColor = sColors[ev.sentiment] || '#6c757d';
+        icon = ev.sentiment === 'interested' ? '<i class="bi bi-emoji-smile text-white"></i>' : '<i class="bi bi-emoji-frown text-white"></i>';
+        title = `<strong>${ev.sentiment}</strong>${ev.contact_name ? ' — ' + esc(ev.contact_name) : ''}`;
+        detail = `Score: ${ev.interest_score}/10 — ${esc(ev.reasoning||'')}`;
+      } else if (ev.type === 'slot') {
+        bgColor = '#198754';
+        icon = '<i class="bi bi-calendar-check text-white"></i>';
+        title = '<strong>Reunião agendada</strong>';
+        detail = esc(ev.date_time);
+      }
+
+      return `<div class="timeline-item">
+        <div class="timeline-icon" style="background:${bgColor}">${icon}</div>
+        <div class="flex-grow-1">
+          <div class="small">${title}</div>
+          ${detail ? `<div class="text-muted" style="font-size:.78rem">${detail}</div>` : ''}
+          <div class="text-muted" style="font-size:.72rem">${ev.created_at||''}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch {
+    el.innerHTML = '<p class="text-muted small p-2 mb-0">Erro ao carregar timeline.</p>';
+  }
+}
+
+function renderContactsPanel(contacts) {
+  const el = document.getElementById('contacts-list');
+  if (!contacts || !contacts.length) {
+    el.innerHTML = '<p class="text-muted small mb-0">Nenhum contato. Adicione um acima.</p>';
+    return;
+  }
+  el.innerHTML = contacts.map(ct => `
+    <div class="contact-card">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <strong>${esc(ct.name)}</strong>
+          ${ct.is_primary ? '<span class="badge-primary-tag ms-1">Principal</span>' : ''}
+          <div class="text-muted small">${ROLE_LABEL[ct.role]||ct.role}</div>
+          ${ct.email ? `<div class="small"><i class="bi bi-envelope me-1"></i><a href="mailto:${esc(ct.email)}">${esc(ct.email)}</a></div>` : ''}
+          ${ct.whatsapp ? `<div class="small"><i class="bi bi-whatsapp me-1 text-success"></i>${esc(ct.whatsapp)}</div>` : ''}
+          ${ct.linkedin ? `<div class="small"><i class="bi bi-linkedin me-1 text-primary"></i><a href="${esc(ct.linkedin)}" target="_blank">LinkedIn</a></div>` : ''}
+        </div>
+        <button class="btn btn-outline-danger btn-sm py-0" onclick="removeContactFromModal(${ct.id})"><i class="bi bi-trash"></i></button>
+      </div>
+    </div>`).join('');
+}
+
+function populateContactSelects(contacts) {
+  const opts = contacts.map(ct => `<option value="${ct.id}">${esc(ct.name)} (${ROLE_LABEL[ct.role]||ct.role})</option>`).join('');
+  document.getElementById('modal-contact-select').innerHTML = '<option value="">Selecione contato...</option>' + opts;
+  document.getElementById('response-contact-select').innerHTML = '<option value="">Selecione contato...</option>' + opts;
+}
+
+function toggleAddContactForm() {
+  document.getElementById('add-contact-form').classList.toggle('d-none');
+}
+
+async function addContactToCompany() {
+  const name = document.getElementById('new-ct-name').value.trim();
+  if (!name) { toast('Nome é obrigatório', 'warning'); return; }
+  await api(`/api/companies/${currentCompanyId}/contacts`, 'POST', {
+    name,
+    role: document.getElementById('new-ct-role').value,
+    email: document.getElementById('new-ct-email').value.trim(),
+    linkedin: document.getElementById('new-ct-linkedin').value.trim(),
+    whatsapp: document.getElementById('new-ct-whatsapp').value.trim(),
+  });
+  toast('Contato adicionado!');
+  ['new-ct-name','new-ct-email','new-ct-linkedin','new-ct-whatsapp'].forEach(id => document.getElementById(id).value='');
+  document.getElementById('add-contact-form').classList.add('d-none');
+  await refreshCurrentCompany();
+  loadStats();
+}
+
+async function removeContactFromModal(contactId) {
+  if (!confirm('Remover este contato?')) return;
+  await api(`/api/companies/${currentCompanyId}/contacts/${contactId}`, 'DELETE');
+  toast('Contato removido', 'warning');
+  await refreshCurrentCompany();
+  loadStats();
+}
+
+// ── Sequência — com badge "Para: [contato]" (Melhoria 3) ─────────────────────
 function renderSequence(messages) {
   const el = document.getElementById('sequence-container');
   if (!messages || messages.length === 0) {
-    el.innerHTML = '<p class="text-muted small mb-0">Clique em "Gerar Sequência" para criar as mensagens personalizadas.</p>';
+    el.innerHTML = '<p class="text-muted small mb-0">Selecione um contato e clique em "Gerar" para criar as mensagens personalizadas.</p>';
     return;
   }
   const channelIcon = {linkedin:'<i class="bi bi-linkedin text-primary"></i>', email:'<i class="bi bi-envelope text-danger"></i>', whatsapp:'<i class="bi bi-whatsapp text-success"></i>'};
@@ -496,11 +1217,14 @@ function renderSequence(messages) {
 
   el.innerHTML = messages.map(m => `
     <div class="border rounded mb-2 p-2">
-      <div class="d-flex align-items-center justify-content-between mb-2">
-        <span>${channelIcon[m.channel]||''} <strong>Dia ${m.day}</strong> — ${m.channel}</span>
+      <div class="d-flex align-items-center justify-content-between mb-2 flex-wrap gap-1">
+        <span>
+          ${m.contact_name ? `<span class="badge bg-secondary me-1"><i class="bi bi-person-fill me-1"></i>${esc(m.contact_name)}</span>` : ''}
+          ${channelIcon[m.channel]||''} <strong>Dia ${m.day}</strong> — ${m.channel}
+        </span>
         <div class="d-flex gap-1 align-items-center">
           <span class="badge ${statusBadge[m.status]||'bg-secondary'}">${m.status}</span>
-          ${m.approved ? '<span class="badge bg-success">✓ Aprovado</span>' : ''}
+          ${m.approved ? '<span class="badge bg-success">Aprovado</span>' : ''}
           ${m.score ? `<span class="badge bg-warning text-dark">${m.score}★</span>` : ''}
         </div>
       </div>
@@ -527,53 +1251,71 @@ function renderSentimentHistory(sents) {
   const colors = {interested:'success', technical_question:'info', negative:'danger', out_of_scope:'secondary'};
   const labels = {interested:'Interessado', technical_question:'Dúvida Técnica', negative:'Negativa', out_of_scope:'Fora de Escopo'};
   el.innerHTML = sents.length
-    ? sents.map(s => `<div class="mb-2 small"><span class="badge bg-${colors[s.sentiment]||'secondary'} sentiment-badge">${labels[s.sentiment]||s.sentiment}</span> <span class="badge bg-warning text-dark">${s.interest_score}/10</span><br><span class="text-muted">${esc(s.reasoning)}</span></div>`).join('')
+    ? sents.map(s => `<div class="mb-2 small">
+        <span class="badge bg-${colors[s.sentiment]||'secondary'} sentiment-badge">${labels[s.sentiment]||s.sentiment}</span>
+        <span class="badge bg-warning text-dark">${s.interest_score}/10</span>
+        ${s.contact_name ? `<span class="text-muted ms-1">${esc(s.contact_name)}</span>` : ''}
+        <br><span class="text-muted">${esc(s.reasoning)}</span>
+      </div>`).join('')
     : '<p class="text-muted small mb-0">Nenhuma resposta registrada.</p>';
 }
 
-// ── Lead actions ─────────────────────────────────────────────────────────────
+// ── Company actions ───────────────────────────────────────────────────────────
 async function runResearch() {
+  const btn = document.getElementById('btn-research');
   const product = document.getElementById('modal-product').value.trim() || 'solução de automação de vendas com IA';
-  document.getElementById('research-hook').textContent = '⏳ Pesquisando...';
-  const data = await api(`/api/leads/${currentLeadId}/research`, 'POST', {product_value: product});
-  document.getElementById('research-hook').textContent = data.hook;
-  document.getElementById('research-context').classList.remove('d-none');
-  try { document.getElementById('research-context-text').textContent = JSON.stringify(JSON.parse(data.context), null, 2); }
-  catch { document.getElementById('research-context-text').textContent = data.context; }
-  toast('Pesquisa concluída!');
+  setLoading(btn, true);
+  document.getElementById('research-hook').textContent = 'Pesquisando...';
+  try {
+    const data = await api(`/api/companies/${currentCompanyId}/research`, 'POST', {product_value: product});
+    document.getElementById('research-hook').textContent = data.hook;
+    document.getElementById('research-context').classList.remove('d-none');
+    try { document.getElementById('research-context-text').textContent = JSON.stringify(JSON.parse(data.context), null, 2); }
+    catch { document.getElementById('research-context-text').textContent = data.context; }
+    toast('Pesquisa concluída!');
+  } finally {
+    setLoading(btn, false);
+  }
 }
 
 function toggleContext() {
-  const el = document.getElementById('research-context-text');
-  el.classList.toggle('d-none');
+  document.getElementById('research-context-text').classList.toggle('d-none');
 }
 
 async function generateSequence() {
+  const btn = document.getElementById('btn-sequence');
+  const contactId = document.getElementById('modal-contact-select').value;
+  if (!contactId) { toast('Selecione um contato primeiro', 'warning'); return; }
   const product = document.getElementById('modal-product').value.trim() || 'solução de automação de vendas com IA';
-  document.getElementById('sequence-container').innerHTML = '<p class="text-muted small">⏳ Gerando sequência com IA...</p>';
-  const data = await api(`/api/leads/${currentLeadId}/sequence`, 'POST', {product_value: product});
-  renderSequence(data.sequence);
-  toast('Sequência gerada!');
-  loadStats();
+  setLoading(btn, true);
+  document.getElementById('sequence-container').innerHTML = '<p class="text-muted small">Gerando sequência com IA...</p>';
+  try {
+    const data = await api(`/api/companies/${currentCompanyId}/sequence`, 'POST', {contact_id: parseInt(contactId), product_value: product});
+    renderSequence(data.sequence);
+    toast('Sequência gerada!');
+    loadStats();
+  } finally {
+    setLoading(btn, false);
+  }
 }
 
 async function approveMsg(id) {
   await api(`/api/messages/${id}/approve`, 'POST');
-  await refreshCurrentLead();
+  await refreshCurrentCompany();
   toast('Mensagem aprovada!');
   loadStats();
 }
 
 async function scoreMsg(id, score) {
   await api(`/api/messages/${id}/score`, 'POST', {score});
-  await refreshCurrentLead();
+  await refreshCurrentCompany();
   toast(`Score ${score}★ salvo`);
 }
 
 async function sendMsg(id) {
   const data = await api(`/api/messages/${id}/send`, 'POST');
   toast(`Marcada como enviada (delay simulado: ${data.simulated_delay}). ${data.note}`);
-  await refreshCurrentLead();
+  await refreshCurrentCompany();
 }
 
 function toggleEdit(id) {
@@ -585,41 +1327,211 @@ async function saveCorrection(id) {
   await api(`/api/messages/${id}/correct`, 'POST', {correction: text});
   toast('Correção salva — será usada para aprendizado');
   toggleEdit(id);
-  await refreshCurrentLead();
+  await refreshCurrentCompany();
 }
 
 async function recordResponse() {
+  const btn = document.getElementById('btn-sentiment');
   const text = document.getElementById('prospect-response').value.trim();
   if (!text) { toast('Digite a resposta do prospect', 'warning'); return; }
-  const data = await api(`/api/leads/${currentLeadId}/response`, 'POST', {response_text: text});
-  const colors = {interested:'success', technical_question:'info', negative:'danger', out_of_scope:'secondary'};
-  const labels = {interested:'Interessado ✓', technical_question:'Dúvida Técnica', negative:'Negativa ✗', out_of_scope:'Fora de Escopo'};
-  document.getElementById('sentiment-result').innerHTML = `
-    <div class="mt-2 p-2 border rounded">
-      <span class="badge bg-${colors[data.sentiment]} mb-1">${labels[data.sentiment]}</span>
-      <span class="badge bg-warning text-dark ms-1">${data.interest_score}/10</span>
-      <p class="mb-1 small mt-1">${esc(data.reasoning)}</p>
-      ${data.handon_required ? '<div class="alert alert-warning py-1 mb-0 small"><strong>⚡ HAND-OFF:</strong> Lead quente — transição para humano recomendada!</div>' : ''}
-      <p class="text-muted small mb-0">Sequência pausada: sim</p>
-    </div>`;
-  if (data.handon_required) document.getElementById('handon-alert').classList.remove('d-none');
-  await refreshCurrentLead();
+  const contactId = document.getElementById('response-contact-select').value;
+  setLoading(btn, true);
+  try {
+    const data = await api(`/api/companies/${currentCompanyId}/response`, 'POST', {
+      response_text: text,
+      contact_id: contactId ? parseInt(contactId) : null,
+    });
+    const colors = {interested:'success', technical_question:'info', negative:'danger', out_of_scope:'secondary'};
+    const labels = {interested:'Interessado', technical_question:'Dúvida Técnica', negative:'Negativa', out_of_scope:'Fora de Escopo'};
+    document.getElementById('sentiment-result').innerHTML = `
+      <div class="mt-2 p-2 border rounded">
+        <span class="badge bg-${colors[data.sentiment]} mb-1">${labels[data.sentiment]}</span>
+        <span class="badge bg-warning text-dark ms-1">${data.interest_score}/10</span>
+        <p class="mb-1 small mt-1">${esc(data.reasoning)}</p>
+        ${data.handon_required ? '<div class="alert alert-warning py-1 mb-0 small"><strong>HAND-OFF:</strong> Empresa quente — transição para humano recomendada!</div>' : ''}
+        <p class="text-muted small mb-0">Sequência pausada: sim</p>
+      </div>`;
+    if (data.handon_required) document.getElementById('handon-alert').classList.remove('d-none');
+    await refreshCurrentCompany();
+  } finally {
+    setLoading(btn, false);
+  }
 }
 
-async function optoutLead() {
-  if (!confirm(`Confirmar opt-out LGPD para este lead? A ação não pode ser desfeita.`)) return;
-  await api(`/api/leads/${currentLeadId}/optout`, 'POST');
-  toast('Lead adicionado à blacklist LGPD', 'warning');
+async function optoutCompany() {
+  if (!confirm('Confirmar opt-out LGPD para esta empresa? A ação não pode ser desfeita.')) return;
+  await api(`/api/companies/${currentCompanyId}/optout`, 'POST');
+  toast('Empresa adicionada à blacklist LGPD', 'warning');
   document.getElementById('btn-optout').disabled = true;
-  await refreshCurrentLead();
-  loadLeads();
+  await refreshCurrentCompany();
+  loadCompanies();
 }
 
-async function refreshCurrentLead() {
-  const data = await api(`/api/leads/${currentLeadId}`);
-  currentLeadData = data;
+async function refreshCurrentCompany() {
+  const data = await api(`/api/companies/${currentCompanyId}`);
+  currentCompanyData = data;
+  const c = data.company;
+  document.getElementById('modal-company-title').textContent = `${esc(c.name)}${c.sector ? ' — ' + esc(c.sector) : ''}`;
+  document.getElementById('company-info').innerHTML = `
+    <dl class="row mb-0 small">
+      <dt class="col-5">Setor</dt><dd class="col-7">${esc(c.sector)||'—'}</dd>
+      <dt class="col-5">Status</dt><dd class="col-7"><span class="badge ${STATUS_BADGE[c.status]||'bg-secondary'}">${STATUS_LABEL[c.status]||c.status}</span></dd>
+      <dt class="col-5">Interest</dt><dd class="col-7">${c.interest_score}/10</dd>
+      <dt class="col-5">Adicionado</dt><dd class="col-7">${c.created_at}</dd>
+    </dl>`;
   renderSequence(data.messages);
   renderSentimentHistory(data.sentiments);
+  renderContactsPanel(data.contacts);
+  populateContactSelects(data.contacts);
+  loadTimeline(currentCompanyId);
+  document.getElementById('consent-log-company').innerHTML = data.consent_logs.length
+    ? data.consent_logs.map(cl => `<div class="small mb-1"><span class="text-muted">${cl.created_at}</span> — <strong>${cl.action}</strong>${cl.contact_name ? ' (' + esc(cl.contact_name) + ')' : ''}: ${esc(cl.details)}</div>`).join('')
+    : '<p class="text-muted small mb-0">Nenhum log.</p>';
+}
+
+// ── Oportunidades (Melhoria 1) ────────────────────────────────────────────────
+const STAGE_BADGE = {
+  prospecting: 'bg-secondary',
+  qualified:   'bg-info text-dark',
+  proposal:    'bg-primary',
+  negotiation: 'bg-warning text-dark',
+  won:         'bg-success',
+  lost:        'bg-dark',
+};
+const STAGE_LABEL = {
+  prospecting: 'Prospecção',
+  qualified:   'Qualificado',
+  proposal:    'Proposta',
+  negotiation: 'Negociação',
+  won:         'Ganho',
+  lost:        'Perdido',
+};
+
+async function loadOpportunities() {
+  const opps = await api('/api/opportunities');
+  const tbody = document.getElementById('opp-tbody');
+
+  let pipelineTotal = 0;
+  tbody.innerHTML = opps.map(o => {
+    if (o.stage !== 'lost') pipelineTotal += (o.value || 0);
+    return `<tr>
+      <td>${esc(o.company_name||'—')}</td>
+      <td>${esc(o.name)}</td>
+      <td>
+        <div class="dropdown d-inline-block">
+          <button class="btn btn-sm ${STAGE_BADGE[o.stage]||'bg-secondary'} dropdown-toggle" data-bs-toggle="dropdown">${STAGE_LABEL[o.stage]||o.stage}</button>
+          <ul class="dropdown-menu">
+            ${Object.entries(STAGE_LABEL).map(([v,l]) =>
+              `<li><a class="dropdown-item${v===o.stage?' active':''}" href="#" onclick="updateOppStage(${o.id},'${v}',event)">${l}</a></li>`
+            ).join('')}
+          </ul>
+        </div>
+      </td>
+      <td>${formatCurrency(o.value||0)}</td>
+      <td class="small text-muted">${(o.created_at||'').substring(0,10)}</td>
+      <td>
+        <button class="btn btn-outline-danger btn-sm" onclick="deleteOpp(${o.id})"><i class="bi bi-trash"></i></button>
+      </td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" class="text-muted text-center">Nenhuma oportunidade.</td></tr>';
+
+  document.getElementById('opp-pipeline-total').textContent = formatCurrency(pipelineTotal);
+}
+
+async function createOpportunity() {
+  const company_id = document.getElementById('opp-company').value;
+  const name = document.getElementById('opp-name').value.trim();
+  if (!company_id) { toast('Selecione uma empresa', 'warning'); return; }
+  if (!name) { toast('Nome da oportunidade é obrigatório', 'warning'); return; }
+  await api('/api/opportunities', 'POST', {
+    company_id: parseInt(company_id),
+    name,
+    stage: document.getElementById('opp-stage').value,
+    value: parseFloat(document.getElementById('opp-value').value) || 0,
+    notes: document.getElementById('opp-notes').value.trim(),
+  });
+  toast('Oportunidade criada!');
+  ['opp-name','opp-value','opp-notes'].forEach(id => document.getElementById(id).value='');
+  document.getElementById('opp-stage').value = 'prospecting';
+  loadOpportunities(); loadStats();
+}
+
+async function updateOppStage(id, stage, event) {
+  if (event) event.preventDefault();
+  await api(`/api/opportunities/${id}`, 'PATCH', { stage });
+  toast('Estágio atualizado!');
+  loadOpportunities(); loadStats();
+}
+
+async function deleteOpp(id) {
+  if (!confirm('Remover esta oportunidade?')) return;
+  await api(`/api/opportunities/${id}`, 'DELETE');
+  toast('Oportunidade removida', 'warning');
+  loadOpportunities(); loadStats();
+}
+
+// ── Dashboard (Melhoria 5) ────────────────────────────────────────────────────
+async function loadDashboard() {
+  // Usa allCompanies que já está carregado; recarrega se necessário
+  if (!allCompanies.length) {
+    allCompanies = await api('/api/companies');
+  }
+
+  // Funil de status
+  const statusOrder = ['new','researched','sequence_created','contacted','hot_lead','meeting_set'];
+  const statusColors = {
+    new:'#6c757d', researched:'#0dcaf0', sequence_created:'#0d6efd',
+    contacted:'#0d6efd', hot_lead:'#dc3545', meeting_set:'#198754',
+  };
+  const statusCounts = {};
+  allCompanies.forEach(c => { statusCounts[c.status] = (statusCounts[c.status]||0) + 1; });
+
+  const funnelEl = document.getElementById('dashboard-funnel');
+  funnelEl.innerHTML = statusOrder.map(s => {
+    const count = statusCounts[s] || 0;
+    return `<div class="funnel-card" style="background:${statusColors[s]||'#6c757d'}">
+      <div class="funnel-num">${count}</div>
+      <div class="funnel-label">${STATUS_LABEL[s]||s}</div>
+    </div>`;
+  }).join('<div class="align-self-center text-muted fs-4">→</div>');
+
+  // Distribuição por setor
+  const sectorCounts = {};
+  allCompanies.forEach(c => {
+    const s = c.sector || 'Sem setor';
+    sectorCounts[s] = (sectorCounts[s]||0) + 1;
+  });
+  const total = allCompanies.length || 1;
+  const sectors = Object.entries(sectorCounts).sort((a,b) => b[1]-a[1]);
+  const sectorsEl = document.getElementById('dashboard-sectors');
+  sectorsEl.innerHTML = sectors.map(([name, count]) => {
+    const pct = Math.round(count / total * 100);
+    return `<div class="mb-2">
+      <div class="d-flex justify-content-between small mb-1">
+        <span>${esc(name)}</span><span><strong>${count}</strong> (${pct}%)</span>
+      </div>
+      <div class="progress" style="height:8px">
+        <div class="progress-bar bg-primary" style="width:${pct}%"></div>
+      </div>
+    </div>`;
+  }).join('') || '<p class="text-muted small">Nenhum dado.</p>';
+
+  // Score médio
+  const scoredCompanies = allCompanies.filter(c => c.interest_score > 0);
+  const avgScore = scoredCompanies.length
+    ? (scoredCompanies.reduce((sum,c) => sum + c.interest_score, 0) / scoredCompanies.length).toFixed(1)
+    : '—';
+  document.getElementById('dashboard-avg-score').textContent = avgScore;
+
+  // Top 5
+  const top5 = [...allCompanies].filter(c => c.interest_score > 0).sort((a,b) => b.interest_score - a.interest_score).slice(0, 5);
+  const top5El = document.getElementById('dashboard-top5');
+  top5El.innerHTML = top5.length
+    ? top5.map((c,i) => `<div class="d-flex justify-content-between align-items-center mb-1 small">
+        <span><span class="text-muted me-1">${i+1}.</span>${esc(c.name)}</span>
+        <span class="badge bg-warning text-dark">${c.interest_score}/10</span>
+      </div>`).join('')
+    : '<p class="text-muted small">Nenhuma empresa com score.</p>';
 }
 
 // ── RLHF ────────────────────────────────────────────────────────────────────
@@ -633,8 +1545,8 @@ async function loadRLHF() {
   const channelIcon = {linkedin:'<i class="bi bi-linkedin text-primary"></i>', email:'<i class="bi bi-envelope text-danger"></i>', whatsapp:'<i class="bi bi-whatsapp text-success"></i>'};
   el.innerHTML = msgs.map(m => `
     <div class="border rounded mb-3 p-3">
-      <div class="d-flex justify-content-between mb-2">
-        <span>${channelIcon[m.channel]||''} <strong>${esc(m.lead_name)}</strong> (${esc(m.lead_company)}) — ${m.lead_role} — Dia ${m.day}</span>
+      <div class="d-flex justify-content-between mb-2 flex-wrap gap-2">
+        <span>${channelIcon[m.channel]||''} <strong>${esc(m.company_name||'—')}</strong> — ${esc(m.contact_name||'—')} (${m.contact_role||'—'}) — Dia ${m.day}</span>
         <div class="d-flex gap-1">
           ${[1,2,3,4,5].map(n => `<button class="btn btn-sm ${m.score==n?'btn-warning':'btn-outline-warning'} score-btn" onclick="scoreMsgRLHF(${m.id},${n},this)">${n}★</button>`).join('')}
         </div>
@@ -698,16 +1610,22 @@ async function delDoc(id) {
 }
 
 async function queryRAG() {
+  const btn = document.getElementById('btn-rag-query');
   const query = document.getElementById('rag-query').value.trim();
   if (!query) { toast('Digite uma pergunta', 'warning'); return; }
   const storytelling = document.getElementById('storytelling-mode').checked;
-  document.getElementById('rag-answer').innerHTML = '<p class="text-muted small">⏳ Consultando documentos...</p>';
-  const data = await api('/api/rag/query', 'POST', {query, storytelling});
-  document.getElementById('rag-answer').innerHTML = `
-    <div class="card mt-2">
-      <div class="card-header small text-muted">Docs usados: ${data.docs_used.join(', ')}</div>
-      <div class="card-body"><pre>${esc(data.answer)}</pre></div>
-    </div>`;
+  setLoading(btn, true);
+  document.getElementById('rag-answer').innerHTML = '<p class="text-muted small">Consultando documentos...</p>';
+  try {
+    const data = await api('/api/rag/query', 'POST', {query, storytelling});
+    document.getElementById('rag-answer').innerHTML = `
+      <div class="card mt-2">
+        <div class="card-header small text-muted">Docs usados: ${data.docs_used.join(', ')}</div>
+        <div class="card-body"><pre>${esc(data.answer)}</pre></div>
+      </div>`;
+  } finally {
+    setLoading(btn, false);
+  }
 }
 
 // ── Golden Cases ─────────────────────────────────────────────────────────────
@@ -761,12 +1679,13 @@ async function delGoldenCase(id) {
 async function loadSlots() {
   const slots = await api('/api/schedule/slots');
   document.getElementById('slots-list').innerHTML = slots.length
-    ? `<table class="table table-sm table-hover"><thead class="table-light"><tr><th>Data/Hora</th><th>Duração</th><th>Status</th><th>Lead</th><th>Link</th><th></th></tr></thead><tbody>
+    ? `<table class="table table-sm table-hover"><thead class="table-light"><tr><th>Data/Hora</th><th>Duração</th><th>Status</th><th>Empresa</th><th>Contato</th><th>Link</th><th></th></tr></thead><tbody>
        ${slots.map(s => `<tr>
          <td>${s.date_time}</td>
          <td>${s.duration_min} min</td>
          <td>${s.booked ? '<span class="badge bg-success">Agendado</span>' : '<span class="badge bg-secondary">Disponível</span>'}</td>
-         <td>${s.lead_name ? `${esc(s.lead_name)} (${esc(s.lead_company)})` : '—'}</td>
+         <td>${s.company_name ? esc(s.company_name) : '—'}</td>
+         <td>${s.contact_name ? esc(s.contact_name) : '—'}</td>
          <td>${s.meeting_link ? `<a href="${esc(s.meeting_link)}" target="_blank" class="small">Abrir</a>` : '—'}</td>
          <td><button class="btn btn-outline-danger btn-sm" onclick="delSlot(${s.id})"><i class="bi bi-trash"></i></button></td>
        </tr>`).join('')}
@@ -792,10 +1711,10 @@ async function delSlot(id) {
   loadSlots();
 }
 
-async function renderAvailableSlotsForLead() {
+async function renderAvailableSlotsForCompany() {
   const slots = await api('/api/schedule/slots');
   const available = slots.filter(s => !s.booked);
-  const el = document.getElementById('available-slots-for-lead');
+  const el = document.getElementById('available-slots-for-company');
   if (!available.length) {
     el.innerHTML = '<p class="text-muted small mb-0">Nenhum slot disponível. Adicione na aba Agenda.</p>';
     return;
@@ -808,22 +1727,31 @@ async function renderAvailableSlotsForLead() {
 }
 
 async function bookSlot(slotId) {
-  const data = await api(`/api/schedule/slots/${slotId}/book`, 'POST', {lead_id: currentLeadId});
+  const contactSelect = document.getElementById('modal-contact-select');
+  const contactId = contactSelect ? contactSelect.value : null;
+  const data = await api(`/api/schedule/slots/${slotId}/book`, 'POST', {
+    company_id: currentCompanyId,
+    contact_id: contactId ? parseInt(contactId) : null,
+  });
   toast(`Reunião agendada para ${data.date_time}!`);
-  await refreshCurrentLead();
-  renderAvailableSlotsForLead();
-  loadLeads();
+  await refreshCurrentCompany();
+  renderAvailableSlotsForCompany();
+  loadCompanies();
 }
 
 // ── LGPD ─────────────────────────────────────────────────────────────────────
 async function loadConsentLogs() {
   const logs = await api('/api/consent-logs');
-  const actionBadge = {added:'bg-secondary', contacted:'bg-primary', meeting_booked:'bg-success', opted_out:'bg-danger'};
+  const actionBadge = {
+    company_added:'bg-secondary', contact_added:'bg-info text-dark',
+    contacted:'bg-primary', meeting_booked:'bg-success',
+    opted_out:'bg-danger',
+  };
   document.getElementById('consent-tbody').innerHTML = logs.map(l => `
     <tr>
       <td class="small">${l.created_at}</td>
-      <td>${esc(l.name||'—')}</td>
-      <td>${esc(l.company||'—')}</td>
+      <td>${esc(l.company_name||'—')}</td>
+      <td>${esc(l.contact_name||'—')}</td>
       <td><span class="badge ${actionBadge[l.action]||'bg-secondary'}">${l.action}</span></td>
       <td class="small">${esc(l.details)}</td>
     </tr>`).join('');
@@ -836,11 +1764,13 @@ function esc(s) {
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 loadStats();
-loadLeads();
+loadCompanies();
 
-// Check API key
-fetch('/api/stats').then(r => {
-  document.getElementById('api-status').textContent = r.ok ? '✓ API online' : '';
+fetch('/api/me').then(r => r.json()).then(d => {
+  document.getElementById('nav-username').textContent = d.name || d.username;
+  document.getElementById('api-status').textContent = 'API online';
+}).catch(() => {
+  window.location.href = '/login';
 });
 </script>
 </body>

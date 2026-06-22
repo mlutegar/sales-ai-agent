@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 prototype.db
 *.db
+.sessions/
+node_modules/
