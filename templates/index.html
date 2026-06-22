@@ -33,6 +33,7 @@
   .timeline-item:last-child { border-bottom:none; }
   .timeline-icon { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex-shrink:0; font-size:.85rem; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -56,6 +57,7 @@
   <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-info" id="s-score">—</div><div class="text-muted small">Score Médio</div></div></div>
   <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-secondary" id="s-docs">—</div><div class="text-muted small">Docs RAG</div></div></div>
   <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6 text-success" id="s-pipeline">—</div><div class="text-muted small">Pipeline R$</div></div></div>
+  <div class="col"><div class="stat-card card p-3 text-center"><div class="display-6" style="color:#7c6af7" id="s-enriched">—</div><div class="text-muted small">Com E-mail</div></div></div>
 </div>
 
 <!-- Tabs -->
@@ -68,6 +70,7 @@
   <li class="nav-item"><a class="nav-link" href="#" data-tab="golden"><i class="bi bi-trophy me-1"></i>Casos de Ouro</a></li>
   <li class="nav-item"><a class="nav-link" href="#" data-tab="agenda"><i class="bi bi-calendar-check me-1"></i>Agenda</a></li>
   <li class="nav-item"><a class="nav-link" href="#" data-tab="lgpd"><i class="bi bi-shield-lock me-1"></i>LGPD</a></li>
+  <li class="nav-item"><a class="nav-link" href="#" data-tab="metrics"><i class="bi bi-graph-up-arrow me-1"></i>Métricas</a></li>
 </ul>
 
 <!-- ═══ TAB: EMPRESAS ════════════════════════════════════════════════════════ -->
@@ -92,6 +95,14 @@
         <div class="mb-2"><input class="form-control form-control-sm" id="ct-email" placeholder="E-mail"></div>
         <div class="mb-2"><input class="form-control form-control-sm" id="ct-linkedin" placeholder="LinkedIn URL"></div>
         <div class="mb-3"><input class="form-control form-control-sm" id="ct-whatsapp" placeholder="WhatsApp"></div>
+        <div class="mb-2">
+          <select class="form-select form-select-sm" id="ct-country">
+            <option value="BR">&#x1F1E7;&#x1F1F7; Brasil (LGPD)</option>
+            <option value="EU">&#x1F1EA;&#x1F1FA; Uniao Europeia (GDPR)</option>
+            <option value="US">&#x1F1FA;&#x1F1F8; Estados Unidos (CAN-SPAM)</option>
+            <option value="OTHER">Outro pais</option>
+          </select>
+        </div>
         <button class="btn btn-primary btn-sm w-100" onclick="createCompanyAndContact()"><i class="bi bi-plus-circle me-1"></i>Adicionar</button>
 
         <hr>
@@ -100,6 +111,19 @@
         <input type="file" id="csv-file" accept=".csv" class="form-control form-control-sm mb-2">
         <button class="btn btn-outline-primary btn-sm w-100" id="btn-import-csv" onclick="importCSV()">Importar</button>
         <div id="csv-result" class="mt-2"></div>
+
+        <hr>
+        <h6 class="fw-bold mb-2"><i class="bi bi-person-lines-fill me-1"></i>Importar Lista (nome + empresa)</h6>
+        <p class="small text-muted mb-2">Colunas: <code>nome, empresa</code> — o sistema buscará e-mail e telefone automaticamente</p>
+        <input type="file" id="enrich-csv-file" accept=".csv" class="form-control form-control-sm mb-2">
+        <div class="form-check mb-2">
+          <input class="form-check-input" type="checkbox" id="auto-enrich-check" checked>
+          <label class="form-check-label small" for="auto-enrich-check">Enriquecer automaticamente após importar</label>
+        </div>
+        <button class="btn btn-outline-success btn-sm w-100" id="btn-import-enrich" onclick="importAndEnrich()">
+          <i class="bi bi-search me-1"></i>Importar e Enriquecer
+        </button>
+        <div id="enrich-csv-result" class="mt-2"></div>
       </div>
     </div>
 
@@ -108,7 +132,29 @@
       <div class="card p-3">
         <div class="d-flex justify-content-between mb-2">
           <h6 class="fw-bold mb-0"><i class="bi bi-list-ul me-1"></i>Lista de Empresas</h6>
-          <button class="btn btn-outline-secondary btn-sm" onclick="loadCompanies()"><i class="bi bi-arrow-clockwise"></i></button>
+          <div class="d-flex gap-2">
+            <div class="dropdown">
+              <button class="btn btn-outline-success btn-sm dropdown-toggle" data-bs-toggle="dropdown"><i class="bi bi-download me-1"></i>Exportar</button>
+              <ul class="dropdown-menu">
+                <li><a class="dropdown-item" href="#" onclick="exportCompaniesCSV()">CSV Padrao</a></li>
+                <li><a class="dropdown-item" href="#" onclick="exportCRM('hubspot')">HubSpot CSV</a></li>
+                <li><a class="dropdown-item" href="#" onclick="exportCRM('salesforce')">Salesforce CSV</a></li>
+                <li><a class="dropdown-item" href="#" onclick="exportCRM('linkedin')">LinkedIn CSV</a></li>
+              </ul>
+            </div>
+            <button class="btn btn-sm" style="background:#7c6af7;color:#fff;border:none" id="btn-bulk-enrich" onclick="bulkEnrichMissingContacts()" title="Buscar e-mail e telefone para contatos sem e-mail"><i class="bi bi-search me-1"></i>Enriquecer sem e-mail</button>
+            <button class="btn btn-outline-secondary btn-sm" onclick="loadCompanies()"><i class="bi bi-arrow-clockwise"></i></button>
+          </div>
+        </div>
+
+        <!-- Busca global de contatos -->
+        <div class="mb-2">
+          <div class="input-group input-group-sm" style="max-width:350px">
+            <span class="input-group-text"><i class="bi bi-person-search"></i></span>
+            <input id="global-contact-search" class="form-control" placeholder="Buscar contato por nome ou e-mail...">
+            <button class="btn btn-outline-secondary" onclick="clearContactSearch()">✕</button>
+          </div>
+          <div id="global-contact-results" class="d-none mt-1 border rounded p-2 bg-white shadow-sm" style="max-width:350px;max-height:250px;overflow-y:auto"></div>
         </div>
 
         <!-- Filtros (Melhoria 2) -->
@@ -131,11 +177,44 @@
           <span class="text-muted small align-self-center" id="filter-count"></span>
         </div>
 
+        <!-- Toolbar de ações em lote (aparece quando há seleção) -->
+        <div id="bulk-toolbar" class="d-none alert alert-secondary py-2 px-3 mb-2 align-items-center gap-2 flex-wrap">
+          <span id="bulk-count" class="small fw-bold me-1">0 selecionadas</span>
+          <button class="btn btn-sm btn-outline-primary" onclick="bulkResearch()">
+            <i class="bi bi-search me-1"></i>Gerar Pesquisa IA
+          </button>
+          <button class="btn btn-sm btn-success fw-semibold" onclick="openBulkDirectModal()" title="Selecione um produto por lead e gere mensagens personalizadas para todos de uma vez">
+            <i class="bi bi-envelope-paper me-1"></i>Gerar Mensagens por Produto
+          </button>
+          <button class="btn btn-sm btn-warning fw-semibold" onclick="openPropensityModal()" title="Analisa propensão de compra e sugere as melhores dores para cada lead selecionado">
+            <i class="bi bi-graph-up-arrow me-1"></i>Analisar Propensão & Gerar em Lote
+          </button>
+          <div class="dropdown">
+            <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">
+              <i class="bi bi-arrow-repeat me-1"></i>Mudar Status
+            </button>
+            <ul class="dropdown-menu">
+              <li><a class="dropdown-item" href="#" onclick="bulkStatus('new',event)">Novo</a></li>
+              <li><a class="dropdown-item" href="#" onclick="bulkStatus('contacted',event)">Contactado</a></li>
+              <li><a class="dropdown-item" href="#" onclick="bulkStatus('hot_lead',event)">🔥 Hot Lead</a></li>
+              <li><a class="dropdown-item" href="#" onclick="bulkStatus('meeting_set',event)">✅ Reunião</a></li>
+              <li><a class="dropdown-item" href="#" onclick="bulkStatus('rejected',event)">Rejeitado</a></li>
+            </ul>
+          </div>
+          <button class="btn btn-sm btn-link text-secondary ms-auto py-0" onclick="clearBulkSelection()">✕ Limpar seleção</button>
+        </div>
+
         <div class="table-responsive">
           <table class="table table-hover table-sm">
             <thead class="table-light"><tr>
+              <th style="width:24px"><input type="checkbox" id="select-all-cb" onclick="toggleSelectAll(this)" title="Selecionar todas"></th>
               <th style="width:30px"></th>
-              <th>Empresa</th><th>Setor</th><th>Contatos</th><th>Status</th><th>Score</th><th>Ações</th>
+              <th onclick="sortCompanies('name')" style="cursor:pointer">Empresa <i class="bi bi-arrow-down-up text-muted small" id="sort-icon-name"></i></th>
+              <th onclick="sortCompanies('sector')" style="cursor:pointer">Setor <i class="bi bi-arrow-down-up text-muted small" id="sort-icon-sector"></i></th>
+              <th>Contatos</th>
+              <th onclick="sortCompanies('status')" style="cursor:pointer">Status <i class="bi bi-arrow-down-up text-muted small" id="sort-icon-status"></i></th>
+              <th onclick="sortCompanies('interest_score')" style="cursor:pointer">Score <i class="bi bi-arrow-down-up text-muted small" id="sort-icon-interest_score"></i></th>
+              <th>Ações</th>
             </tr></thead>
             <tbody id="companies-tbody"></tbody>
           </table>
@@ -182,12 +261,20 @@
       <div class="card p-3">
         <div class="d-flex justify-content-between mb-2">
           <h6 class="fw-bold mb-0"><i class="bi bi-funnel me-1"></i>Pipeline de Oportunidades</h6>
-          <button class="btn btn-outline-secondary btn-sm" onclick="loadOpportunities()"><i class="bi bi-arrow-clockwise"></i></button>
+          <div class="d-flex gap-2">
+            <button class="btn btn-outline-success btn-sm" onclick="exportOpportunitiesCSV()" title="Exportar CSV"><i class="bi bi-download me-1"></i>CSV</button>
+            <button class="btn btn-outline-secondary btn-sm" onclick="loadOpportunities()"><i class="bi bi-arrow-clockwise"></i></button>
+          </div>
         </div>
         <div class="table-responsive">
           <table class="table table-hover table-sm">
             <thead class="table-light"><tr>
-              <th>Empresa</th><th>Oportunidade</th><th>Estágio</th><th>Valor</th><th>Data</th><th>Ações</th>
+              <th onclick="sortOpportunities('company_name')" style="cursor:pointer">Empresa <i class="bi bi-arrow-down-up text-muted small"></i></th>
+              <th>Oportunidade</th>
+              <th onclick="sortOpportunities('stage')" style="cursor:pointer">Estágio <i class="bi bi-arrow-down-up text-muted small"></i></th>
+              <th onclick="sortOpportunities('value')" style="cursor:pointer">Valor <i class="bi bi-arrow-down-up text-muted small"></i></th>
+              <th onclick="sortOpportunities('created_at')" style="cursor:pointer">Data <i class="bi bi-arrow-down-up text-muted small"></i></th>
+              <th>Ações</th>
             </tr></thead>
             <tbody id="opp-tbody"></tbody>
             <tfoot>
@@ -237,6 +324,54 @@
 
 <!-- ═══ TAB: RLHF ════════════════════════════════════════════════════════════ -->
 <div id="tab-rlhf" class="d-none">
+
+  <!-- ── Painel de Aprendizado ─────────────────────────────────────────────── -->
+  <div class="card p-3 mb-3 border-primary">
+    <div class="d-flex justify-content-between align-items-start mb-3">
+      <div>
+        <h6 class="fw-bold mb-1"><i class="bi bi-cpu me-1 text-primary"></i>Aprendizado de Máquina</h6>
+        <p class="text-muted small mb-0">O sistema melhora com suas avaliações e correções. Quanto mais você usa, melhor fica a geração futura.</p>
+      </div>
+      <div class="d-flex gap-2">
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadLearnStats()"><i class="bi bi-arrow-clockwise"></i></button>
+        <button class="btn btn-primary btn-sm" id="btn-analyze" onclick="triggerAnalysis()">
+          <i class="bi bi-lightbulb me-1"></i>Analisar Padrões
+        </button>
+      </div>
+    </div>
+    <div class="row g-2 mb-3">
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-2 text-center">
+          <div class="fw-bold fs-5 text-warning" id="learn-avg-score">—</div>
+          <div class="text-muted" style="font-size:.75rem">Score Médio ★</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-2 text-center">
+          <div class="fw-bold fs-5 text-success" id="learn-examples">—</div>
+          <div class="text-muted" style="font-size:.75rem">Exemplos Aprovados</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-2 text-center">
+          <div class="fw-bold fs-5 text-info" id="learn-corrections">—</div>
+          <div class="text-muted" style="font-size:.75rem">Correções p/ Analisar</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-2 text-center">
+          <div class="fw-bold fs-5 text-primary" id="learn-patterns-count">—</div>
+          <div class="text-muted" style="font-size:.75rem">Padrões Aprendidos</div>
+        </div>
+      </div>
+    </div>
+    <div id="learn-patterns-list" class="d-none">
+      <h6 class="small fw-bold text-muted mb-2"><i class="bi bi-journal-text me-1"></i>Regras de estilo extraídas das suas correções:</h6>
+      <div id="learn-patterns-body"></div>
+    </div>
+  </div>
+
+  <!-- ── Fila de Curadoria ─────────────────────────────────────────────────── -->
   <div class="card p-3">
     <div class="d-flex justify-content-between mb-3">
       <h6 class="fw-bold mb-0"><i class="bi bi-stars me-1"></i>Fila de Curadoria — Mensagens aguardando revisão humana</h6>
@@ -360,7 +495,217 @@
   </div>
 </div>
 
+
+<!-- ═══ TAB: METRICAS ════════════════════════════════════════════════════════ -->
+<div id="tab-metrics" class="d-none">
+  <!-- Empty state global enquanto não há dados -->
+  <div id="metrics-empty-state" class="text-center py-5 mb-3">
+    <div style="font-size:3rem">📊</div>
+    <h6 class="fw-semibold mt-2">Sem dados de métricas ainda</h6>
+    <p class="text-muted small">Gere sequências de mensagens e marque algumas como enviadas para começar a ver as estatísticas de performance aqui.</p>
+    <button class="btn btn-sm btn-outline-primary" onclick="document.querySelector('[data-tab=companies]').click()">
+      <i class="bi bi-arrow-left me-1"></i>Ir para Empresas
+    </button>
+  </div>
+  <div class="row g-3 mb-3">
+    <!-- Taxa de resposta por canal -->
+    <div class="col-md-6">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-bar-chart me-1"></i>Taxa de Resposta por Canal</h6>
+        <canvas id="chart-channel" height="200"></canvas>
+        <div id="chart-channel-empty" class="text-muted small text-center mt-2 d-none">Envie mensagens para gerar dados.</div>
+      </div>
+    </div>
+    <!-- Distribuicao por Cargo -->
+    <div class="col-md-3">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-people me-1"></i>Leads por Cargo</h6>
+        <canvas id="chart-role" height="220"></canvas>
+      </div>
+    </div>
+    <!-- A/B Testing resultados -->
+    <div class="col-md-3">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-shuffle me-1"></i>A/B Testing</h6>
+        <div id="ab-stats-panel"><p class="text-muted small">Nenhum teste realizado ainda.</p></div>
+      </div>
+    </div>
+  </div>
+  <div class="row g-3 mb-3">
+    <!-- Funil de conversao -->
+    <div class="col-md-5">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-3"><i class="bi bi-filter me-1"></i>Funil de Conversao</h6>
+        <canvas id="chart-funnel" height="200"></canvas>
+      </div>
+    </div>
+    <!-- Timing heatmap -->
+    <div class="col-md-7">
+      <div class="card p-3">
+        <h6 class="fw-bold mb-2"><i class="bi bi-clock me-1"></i>Melhores Horarios de Envio</h6>
+        <p class="text-muted small mb-2">Taxa de resposta por dia da semana e hora (mais escuro = melhor)</p>
+        <div id="timing-heatmap" style="overflow-x:auto"><p class="text-muted small">Envie mensagens para gerar dados de timing.</p></div>
+      </div>
+    </div>
+  </div>
+  <!-- Follow-ups pendentes -->
+  <div class="card p-3">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h6 class="fw-bold mb-0"><i class="bi bi-clock-history me-1 text-warning"></i>Follow-ups Pendentes</h6>
+      <div class="d-flex gap-2">
+        <select class="form-select form-select-sm" id="followup-days" style="width:160px">
+          <option value="3">3+ dias sem resposta</option>
+          <option value="5" selected>5+ dias sem resposta</option>
+          <option value="7">7+ dias sem resposta</option>
+          <option value="14">14+ dias sem resposta</option>
+        </select>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadFollowupPending()"><i class="bi bi-arrow-clockwise"></i></button>
+      </div>
+    </div>
+    <div id="followup-list"><p class="text-muted small">Carregando...</p></div>
+  </div>
+</div>
 </div><!-- /container -->
+
+<!-- ═══ BULK DIRECT MESSAGE MODAL ═══════════════════════════════════════════ -->
+<div class="modal fade" id="bulkDirectModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header bg-success bg-opacity-10">
+        <div>
+          <h5 class="modal-title fw-bold mb-0"><i class="bi bi-envelope-paper me-2 text-success"></i>Gerar Mensagens por Produto</h5>
+          <p class="text-muted small mb-0 mt-1">Defina um produto para cada lead (ou aplique o mesmo para todos) e gere mensagens personalizadas de uma vez</p>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <!-- Produto global -->
+        <div class="card border-0 bg-light p-3 mb-3">
+          <div class="row g-2 align-items-end">
+            <div class="col">
+              <label class="form-label fw-semibold small mb-1"><i class="bi bi-box-seam me-1 text-success"></i>Produto para todos os leads:</label>
+              <input type="text" class="form-control" id="bulk-direct-product-global"
+                placeholder="Ex: virtualização, servidores, CRM, automação...">
+            </div>
+            <div class="col-auto">
+              <button class="btn btn-success" onclick="applyProductToAllLeads()">
+                <i class="bi bi-check2-all me-1"></i>Aplicar para todos
+              </button>
+            </div>
+          </div>
+          <p class="text-muted small mt-2 mb-0"><i class="bi bi-info-circle me-1"></i>Você também pode definir produtos diferentes por lead na lista abaixo — basta editar o campo individualmente.</p>
+        </div>
+
+        <!-- Seleção de grupo rápido -->
+        <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+          <span class="small fw-semibold text-muted">Ação em grupo:</span>
+          <div class="d-flex gap-1 flex-wrap" id="bulk-direct-group-btns"></div>
+          <button class="btn btn-outline-secondary btn-sm ms-auto" onclick="bulkDirectSelectAll(true)">
+            <i class="bi bi-check-square me-1"></i>Selecionar todos
+          </button>
+          <button class="btn btn-outline-secondary btn-sm" onclick="bulkDirectSelectAll(false)">
+            <i class="bi bi-square me-1"></i>Desmarcar todos
+          </button>
+        </div>
+
+        <!-- Lista de leads -->
+        <div id="bulk-direct-leads-list"></div>
+      </div>
+      <div class="modal-footer d-flex justify-content-between align-items-center">
+        <span class="text-muted small"><span id="bulk-direct-count">0</span> lead(s) selecionado(s) para geração</span>
+        <div class="d-flex gap-2">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+          <button class="btn btn-success fw-semibold" onclick="generateBulkDirect()" id="btn-bulk-direct-gen">
+            <i class="bi bi-magic me-1"></i>Gerar Mensagens
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ PROPENSITY & BULK SEQUENCE MODAL ════════════════════════════════════ -->
+<div class="modal fade" id="propensityModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header bg-warning bg-opacity-10">
+        <div>
+          <h5 class="modal-title fw-bold mb-0"><i class="bi bi-graph-up-arrow me-2 text-warning"></i>Análise de Propensão & Geração em Lote</h5>
+          <p class="text-muted small mb-0 mt-1">O LLM pontua cada lead pela propensão de compra do produto selecionado e sugere as melhores dores</p>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+
+        <!-- Step 1: Configurar produto -->
+        <div id="prop-step-1">
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Produto que deseja vender a esses leads:</label>
+            <input type="text" class="form-control" id="prop-product" placeholder="Ex: infraestrutura cloud, CRM, automação de marketing...">
+          </div>
+          <div class="alert alert-secondary small">
+            <i class="bi bi-info-circle me-1"></i>
+            <strong id="prop-count-label">0 empresas</strong> selecionadas. O LLM irá pontuar cada uma de 1 a 10 e sugerir as 3 principais dores de cada lead para esse produto.
+          </div>
+          <button class="btn btn-warning fw-semibold" onclick="runPropensityAnalysis()" id="btn-run-propensity">
+            <i class="bi bi-lightning me-1"></i>Analisar Propensão
+          </button>
+        </div>
+
+        <!-- Step 2: Resultados e seleção -->
+        <div id="prop-step-2" class="d-none">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+              <h6 class="fw-bold mb-1"><i class="bi bi-trophy me-1 text-warning"></i>Leads ranqueados por propensão</h6>
+              <p class="text-muted small mb-0">Selecione os leads e escolha a dor que melhor se encaixa na sua abordagem</p>
+            </div>
+            <div class="d-flex gap-2">
+              <button class="btn btn-outline-secondary btn-sm" onclick="propSelectTop(3)">Top 3</button>
+              <button class="btn btn-outline-secondary btn-sm" onclick="propSelectTop(5)">Top 5</button>
+              <button class="btn btn-outline-secondary btn-sm" onclick="propSelectAll()">Todos</button>
+              <button class="btn btn-outline-secondary btn-sm" onclick="propClearAll()">Nenhum</button>
+            </div>
+          </div>
+          <div id="prop-results-list"></div>
+        </div>
+
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <div id="prop-footer-step1">
+          <!-- vazio no step1 -->
+        </div>
+        <div id="prop-footer-step2" class="d-none w-100 d-flex justify-content-between align-items-center gap-3">
+          <span class="text-muted small"><span id="prop-selected-count">0</span> lead(s) selecionado(s) para gerar mensagens</span>
+          <div class="d-flex gap-2">
+            <button class="btn btn-outline-secondary btn-sm" onclick="propGoBack()"><i class="bi bi-arrow-left me-1"></i>Voltar</button>
+            <button class="btn btn-success fw-semibold" onclick="generateBulkSequences()" id="btn-bulk-gen">
+              <i class="bi bi-magic me-1"></i>Gerar Mensagens em Lote
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Resultado do lote -->
+<div class="modal fade" id="bulkResultModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title fw-bold"><i class="bi bi-check-circle me-2 text-success"></i>Mensagens Geradas em Lote</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="bulk-result-body"></div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+        <button class="btn btn-primary" onclick="loadCompanies(); document.getElementById('bulkResultModal') && bootstrap.Modal.getInstance(document.getElementById('bulkResultModal')).hide()">
+          <i class="bi bi-arrow-clockwise me-1"></i>Recarregar Lista
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- ═══ COMPANY DETAIL MODAL ════════════════════════════════════════════════ -->
 <div class="modal fade" id="companyModal" tabindex="-1">
@@ -384,6 +729,7 @@
         </div>
         <div class="ms-auto d-flex gap-2 me-3">
           <button class="btn btn-outline-danger btn-sm" id="btn-optout" onclick="optoutCompany()"><i class="bi bi-slash-circle me-1"></i>Opt-out LGPD</button>
+          <button class="btn btn-danger btn-sm" id="btn-delete-company" onclick="deleteCompany()"><i class="bi bi-trash me-1"></i>Excluir</button>
         </div>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
@@ -403,9 +749,30 @@
               </div>
               <div class="card-body">
                 <div id="research-hook" class="msg-box mb-2" style="min-height:60px">Clique em "Pesquisar" para gerar o gancho personalizado...</div>
-                <div id="research-context" class="d-none">
+
+                <!-- Seleção de dor ─────────────────────────────── -->
+                <div id="pain-points-section" class="d-none mt-3">
+                  <p class="small fw-semibold mb-2"><i class="bi bi-bullseye me-1 text-danger"></i>Selecione a dor principal do lead para personalizar as mensagens:</p>
+                  <div id="pain-points-list" class="d-flex flex-column gap-2"></div>
+                  <div class="mt-2 d-none" id="pain-custom-wrap">
+                    <input type="text" class="form-control form-control-sm" id="pain-custom-input" placeholder="Ou descreva uma dor personalizada...">
+                    <button class="btn btn-sm btn-outline-secondary mt-1" onclick="selectCustomPain()"><i class="bi bi-check me-1"></i>Usar esta dor</button>
+                  </div>
+                  <button class="btn btn-link btn-sm p-0 mt-1 text-muted" onclick="document.getElementById('pain-custom-wrap').classList.toggle('d-none')">+ Dor personalizada</button>
+                  <div id="pain-selected-indicator" class="d-none mt-2 alert alert-success py-1 px-2 small">
+                    <i class="bi bi-check-circle me-1"></i><span id="pain-selected-text"></span>
+                    <button class="btn btn-link btn-sm p-0 ms-2" onclick="clearSelectedPain()">✕ Limpar</button>
+                  </div>
+                </div>
+                <!-- ──────────────────────────────────────────────── -->
+
+                <div id="research-context" class="d-none mt-2">
                   <button class="btn btn-link btn-sm p-0" onclick="toggleContext()">Ver contexto completo ▼</button>
                   <pre id="research-context-text" class="d-none mt-2 bg-light p-2 rounded"></pre>
+                </div>
+                <div id="research-history-section" class="d-none mt-2">
+                  <button class="btn btn-link btn-sm p-0 text-muted" onclick="toggleResearchHistory()"><i class="bi bi-clock-history me-1"></i>Histórico de pesquisas anteriores ▼</button>
+                  <div id="research-history-list" class="d-none mt-2"></div>
                 </div>
               </div>
             </div>
@@ -419,10 +786,21 @@
                     <option value="">Selecione contato...</option>
                   </select>
                   <button class="btn btn-primary btn-sm" id="btn-sequence" onclick="generateSequence()"><i class="bi bi-magic me-1"></i>Gerar</button>
+                  <button class="btn btn-outline-secondary btn-sm" id="btn-ab-variants" onclick="generateABVariants()" title="Gerar variante B para cada canal"><i class="bi bi-shuffle me-1"></i>A/B</button>
                 </div>
               </div>
               <div class="card-body" id="sequence-container">
                 <p class="text-muted small mb-0">Selecione um contato e clique em "Gerar" para criar as mensagens personalizadas.</p>
+              </div>
+              <div class="card-footer p-2 d-none" id="ab-variants-section">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <span class="small fw-bold text-secondary"><i class="bi bi-shuffle me-1"></i>Variantes A/B</span>
+                </div>
+                <div id="ab-variants-list"></div>
+              </div>
+              <div class="card-footer p-2 d-none" id="sequence-history-section">
+                <button class="btn btn-link btn-sm p-0 text-muted" onclick="toggleSequenceHistory()"><i class="bi bi-clock-history me-1"></i>Sequências anteriores ▼</button>
+                <div id="sequence-history-list" class="d-none mt-2"></div>
               </div>
             </div>
 
@@ -529,9 +907,45 @@ let currentCompanyId = null;
 let currentCompanyData = null;
 let gcSelectedScore = 5;
 let allCompanies = [];
+let allOpportunities = [];
 let currentPage = 1;
 const pageSize = 15;
 const companyModal = new bootstrap.Modal(document.getElementById('companyModal'));
+let companySortKey = 'created_at';
+let companySortAsc = false;
+let oppSortKey = 'created_at';
+let oppSortAsc = false;
+
+// ── Validação de e-mail ───────────────────────────────────────────────────────
+function isValidEmail(email) {
+  if (!email || email.trim() === '') return true; // campo opcional
+  return /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(email.trim());
+}
+
+// ── Validação inline de campos (destaca campo + feedback abaixo) ──────────────
+function setFieldError(fieldEl, message) {
+  if (!fieldEl) return;
+  fieldEl.classList.add('is-invalid');
+  let fb = fieldEl.parentElement.querySelector('.invalid-feedback');
+  if (!fb) { fb = document.createElement('div'); fb.className = 'invalid-feedback'; fieldEl.parentElement.appendChild(fb); }
+  fb.textContent = message;
+  fieldEl.focus();
+}
+function clearFieldError(fieldEl) {
+  if (!fieldEl) return;
+  fieldEl.classList.remove('is-invalid');
+  const fb = fieldEl.parentElement.querySelector('.invalid-feedback');
+  if (fb) fb.remove();
+}
+function clearAllFieldErrors(containerEl) {
+  if (!containerEl) return;
+  containerEl.querySelectorAll('.is-invalid').forEach(f => { f.classList.remove('is-invalid'); });
+  containerEl.querySelectorAll('.invalid-feedback').forEach(f => f.remove());
+}
+// Auto-limpa erro ao digitar
+document.addEventListener('input', e => {
+  if (e.target.classList && e.target.classList.contains('is-invalid')) clearFieldError(e.target);
+});
 
 // ── Tabs ────────────────────────────────────────────────────────────────────
 document.querySelectorAll('[data-tab]').forEach(a => {
@@ -541,11 +955,12 @@ document.querySelectorAll('[data-tab]').forEach(a => {
     a.classList.add('active');
     document.querySelectorAll('[id^="tab-"]').forEach(x => x.classList.add('d-none'));
     document.getElementById('tab-' + a.dataset.tab).classList.remove('d-none');
-    if (a.dataset.tab === 'rlhf')          loadRLHF();
+    if (a.dataset.tab === 'rlhf')          { loadRLHF(); loadLearnStats(); }
     if (a.dataset.tab === 'rag')           loadDocs();
     if (a.dataset.tab === 'golden')        loadGoldenCases();
     if (a.dataset.tab === 'agenda')        loadSlots();
     if (a.dataset.tab === 'lgpd')          loadConsentLogs();
+    if (a.dataset.tab === 'metrics')        loadMetrics();
     if (a.dataset.tab === 'companies')     loadCompanies();
     if (a.dataset.tab === 'opportunities') loadOpportunities();
     if (a.dataset.tab === 'dashboard')     loadDashboard();
@@ -618,6 +1033,7 @@ async function loadStats() {
   document.getElementById('s-score').textContent    = s.avg_score || '—';
   document.getElementById('s-docs').textContent     = s.docs_count;
   document.getElementById('s-pipeline').textContent = formatCurrency(s.pipeline_value || 0);
+  document.getElementById('s-enriched').textContent = `${s.enriched_contacts||0}/${s.total_contacts||0}`;
 }
 
 function formatCurrency(v) {
@@ -668,6 +1084,159 @@ function populateSectorFilter() {
     sectors.map(s => `<option value="${s}" ${s===current?'selected':''}>${esc(s)}</option>`).join('');
 }
 
+// ── Sort helpers ─────────────────────────────────────────────────────────────
+function sortArrayBy(arr, key, asc) {
+  return [...arr].sort((a, b) => {
+    const va = a[key] ?? '';
+    const vb = b[key] ?? '';
+    if (typeof va === 'number' && typeof vb === 'number') return asc ? va - vb : vb - va;
+    return asc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+  });
+}
+
+function sortCompanies(key) {
+  if (companySortKey === key) companySortAsc = !companySortAsc;
+  else { companySortKey = key; companySortAsc = true; }
+  document.querySelectorAll('[id^="sort-icon-"]').forEach(el => el.className = 'bi bi-arrow-down-up text-muted small');
+  const icon = document.getElementById(`sort-icon-${key}`);
+  if (icon) icon.className = `bi bi-arrow-${companySortAsc ? 'up' : 'down'} text-primary small`;
+  filterCompanies();
+}
+
+function sortOpportunities(key) {
+  if (oppSortKey === key) oppSortAsc = !oppSortAsc;
+  else { oppSortKey = key; oppSortAsc = true; }
+  renderOpportunitiesTable(sortArrayBy(allOpportunities, key, oppSortAsc));
+}
+
+// ── Export CSV ────────────────────────────────────────────────────────────────
+function downloadCSV(filename, rows) {
+  const csv = rows.map(r => r.map(c => `"${String(c||'').replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = filename; a.click();
+}
+
+function exportCompaniesCSV() {
+  const header = ['Nome','Setor','Status','Score','Contatos','Adicionado'];
+  const rows = allCompanies.map(c => [c.name, c.sector, STATUS_LABEL[c.status]||c.status, c.interest_score, c.contact_count, c.created_at]);
+  downloadCSV('empresas.csv', [header, ...rows]);
+  toast('CSV de empresas exportado!');
+}
+
+function exportOpportunitiesCSV() {
+  const header = ['Empresa','Oportunidade','Estágio','Valor','Data'];
+  const rows = allOpportunities.map(o => [o.company_name, o.name, STAGE_LABEL[o.stage]||o.stage, o.value, o.created_at]);
+  downloadCSV('oportunidades.csv', [header, ...rows]);
+  toast('CSV de oportunidades exportado!');
+}
+
+// ── Deletar empresa ───────────────────────────────────────────────────────────
+async function deleteCompany() {
+  if (!confirm('Excluir permanentemente esta empresa e todos os seus dados (contatos, mensagens, oportunidades)?\n\nEsta ação NÃO pode ser desfeita.')) return;
+  await api(`/api/companies/${currentCompanyId}`, 'DELETE');
+  toast('Empresa excluída', 'warning');
+  companyModal.hide();
+  loadCompanies();
+  loadStats();
+}
+
+// ── Histórico de pesquisa e sequência (carrega da API) ───────────────────────
+let _historyLoaded = false;
+
+async function _ensureHistoryLoaded() {
+  if (_historyLoaded || !currentCompanyId) return;
+  try {
+    const data = await api(`/api/companies/${currentCompanyId}/history`);
+    _historyLoaded = true;
+
+    // Histórico de pesquisas
+    const rhList = document.getElementById('research-history-list');
+    if (data.research_history && data.research_history.length > 0) {
+      document.getElementById('research-history-section').classList.remove('d-none');
+      rhList.innerHTML = data.research_history.map(h => `
+        <div class="border rounded p-2 mb-2 bg-white small">
+          <div class="d-flex justify-content-between mb-1">
+            <strong class="text-muted">${esc(h.contact_name || '')}</strong>
+            <span class="text-muted">${h.created_at ? h.created_at.substring(0,16).replace('T',' ') : 'Anterior'}</span>
+          </div>
+          <div class="msg-box mb-1">${esc(h.hook)}</div>
+          ${h.pain_points && h.pain_points.length ? `
+            <div class="mt-1">
+              ${h.pain_points.map(p => `<span class="badge bg-danger bg-opacity-10 text-danger fw-normal me-1 small">${esc(p.substring(0,50))}...</span>`).join('')}
+            </div>` : ''}
+        </div>`).join('');
+    } else {
+      rhList.innerHTML = '<p class="text-muted small mb-0">Nenhuma pesquisa anterior registrada.</p>';
+      document.getElementById('research-history-section').classList.remove('d-none');
+    }
+
+    // Histórico de sequências
+    const shList = document.getElementById('sequence-history-list');
+    if (data.sequence_history && data.sequence_history.length > 0) {
+      document.getElementById('sequence-history-section').classList.remove('d-none');
+      shList.innerHTML = data.sequence_history.map(h => `
+        <div class="border rounded p-2 mb-2 bg-white small">
+          <div class="fw-semibold mb-1"><i class="bi bi-person me-1"></i>${esc(h.contact_name || '?')}</div>
+          ${(h.messages||[]).map(m => `
+            <div class="mb-1 d-flex align-items-center gap-2">
+              <span class="badge bg-secondary">${m.channel} Dia ${m.day}</span>
+              <span class="${m.approved ? 'text-success' : 'text-muted'}">${m.approved ? '✓ Aprovado' : 'Pendente'}</span>
+              <span class="text-muted text-truncate" style="max-width:200px">${esc((m.content||'').substring(0,60))}...</span>
+            </div>`).join('')}
+        </div>`).join('');
+    } else {
+      shList.innerHTML = '<p class="text-muted small mb-0">Nenhuma sequência anterior registrada.</p>';
+      document.getElementById('sequence-history-section').classList.remove('d-none');
+    }
+  } catch(e) {
+    console.warn('Erro ao carregar histórico:', e);
+  }
+}
+
+function toggleResearchHistory() {
+  const list = document.getElementById('research-history-list');
+  list.classList.toggle('d-none');
+  if (!list.classList.contains('d-none')) _ensureHistoryLoaded();
+}
+
+function toggleSequenceHistory() {
+  const list = document.getElementById('sequence-history-list');
+  list.classList.toggle('d-none');
+  if (!list.classList.contains('d-none')) _ensureHistoryLoaded();
+}
+
+// ── Busca global de contatos ──────────────────────────────────────────────────
+let contactSearchTimeout = null;
+document.getElementById('global-contact-search').addEventListener('input', function() {
+  clearTimeout(contactSearchTimeout);
+  const q = this.value.trim();
+  const resultsEl = document.getElementById('global-contact-results');
+  if (!q) { resultsEl.classList.add('d-none'); return; }
+  contactSearchTimeout = setTimeout(async () => {
+    const contacts = await api(`/api/contacts?q=${encodeURIComponent(q)}`);
+    if (!contacts.length) {
+      resultsEl.innerHTML = '<p class="text-muted small mb-0 p-1">Nenhum contato encontrado.</p>';
+    } else {
+      resultsEl.innerHTML = contacts.map(ct => `
+        <div class="d-flex justify-content-between align-items-center py-1 border-bottom small">
+          <div>
+            <strong>${esc(ct.name)}</strong> <span class="text-muted">(${ROLE_LABEL[ct.role]||ct.role})</span><br>
+            <span class="text-muted">${esc(ct.company_name||'—')}</span>
+            ${ct.email ? ` · <a href="mailto:${esc(ct.email)}">${esc(ct.email)}</a>` : ''}
+          </div>
+          <button class="btn btn-outline-primary btn-sm py-0 ms-2" onclick="openCompany(${ct.company_id}); clearContactSearch()"><i class="bi bi-arrow-right"></i></button>
+        </div>`).join('');
+    }
+    resultsEl.classList.remove('d-none');
+  }, 300);
+});
+
+function clearContactSearch() {
+  document.getElementById('global-contact-search').value = '';
+  document.getElementById('global-contact-results').classList.add('d-none');
+}
+
 function filterCompanies() {
   const search = document.getElementById('filter-search').value.toLowerCase().trim();
   const status = document.getElementById('filter-status').value;
@@ -681,6 +1250,7 @@ function filterCompanies() {
   });
 
   document.getElementById('filter-count').textContent = `Mostrando ${filtered.length} de ${allCompanies.length} empresas`;
+  filtered = sortArrayBy(filtered, companySortKey, companySortAsc);
   currentPage = 1;
   renderCompaniesPage(filtered);
 }
@@ -705,29 +1275,60 @@ function renderCompaniesPage(filtered) {
   const tbody = document.getElementById('companies-tbody');
   tbody.innerHTML = '';
 
+  // Empty state
+  if (pageItems.length === 0) {
+    const isEmpty = allCompanies.length === 0;
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-5">
+      <div style="max-width:380px;margin:0 auto">
+        <div class="mb-3" style="font-size:3rem">${isEmpty ? '🏢' : '🔍'}</div>
+        <h6 class="fw-semibold">${isEmpty ? 'Nenhuma empresa cadastrada ainda' : 'Nenhum resultado encontrado'}</h6>
+        <p class="text-muted small mb-3">${isEmpty
+          ? 'Importe sua lista de leads via CSV ou adicione empresas manualmente para começar a prospecção.'
+          : 'Tente ajustar os filtros ou limpar a busca para ver mais resultados.'
+        }</p>
+        ${isEmpty ? `
+          <div class="d-flex gap-2 justify-content-center flex-wrap">
+            <button class="btn btn-primary btn-sm" onclick="document.getElementById('import-section').classList.remove('d-none')">
+              <i class="bi bi-upload me-1"></i>Importar CSV
+            </button>
+            <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addCompanyModal">
+              <i class="bi bi-plus me-1"></i>Adicionar empresa
+            </button>
+          </div>` : `
+          <button class="btn btn-outline-secondary btn-sm" onclick="clearFilters()">
+            <i class="bi bi-x me-1"></i>Limpar filtros
+          </button>`}
+      </div>
+    </td></tr>`;
+    return;
+  }
+
   pageItems.forEach(c => {
     const mainRow = document.createElement('tr');
     mainRow.id = `row-company-${c.id}`;
+    const isHot = c.interest_score >= 7;
+    if (isHot) mainRow.style.background = '#fff8e1';
     mainRow.innerHTML = `
+      <td><input type="checkbox" class="company-row-cb" data-id="${c.id}" onclick="toggleCompanySelect(${c.id}, this.checked)" ${selectedCompanyIds.has(c.id) ? 'checked' : ''}></td>
       <td>
         <button class="btn btn-link btn-sm p-0" onclick="toggleCompanyExpand(${c.id})" id="expand-btn-${c.id}">
           <i class="bi bi-chevron-right" id="expand-icon-${c.id}"></i>
         </button>
       </td>
-      <td><strong>${esc(c.name)}</strong></td>
+      <td><strong>${esc(c.name)}</strong>${isHot ? ' <span title="Lead quente!">🔥</span>' : ''}</td>
       <td>${esc(c.sector) || '—'}</td>
       <td><span class="badge bg-secondary">${c.contact_count || 0}</span></td>
       <td>
         <span class="badge ${STATUS_BADGE[c.status]||'bg-secondary'}">${STATUS_LABEL[c.status]||c.status}</span>
         ${c.opted_out ? '<span class="badge bg-dark ms-1">Blacklist</span>' : ''}
       </td>
-      <td>${c.interest_score > 0 ? `<span class="badge bg-warning text-dark">${c.interest_score}/10</span>` : '—'}</td>
+      <td>${c.interest_score > 0 ? `<span class="badge ${isHot ? 'bg-danger' : 'bg-warning text-dark'}">${c.interest_score}/10</span>` : '—'}</td>
       <td><button class="btn btn-outline-primary btn-sm" onclick="openCompany(${c.id})"><i class="bi bi-arrow-right"></i></button></td>`;
 
     const expandRow = document.createElement('tr');
     expandRow.id = `expand-row-${c.id}`;
     expandRow.className = 'expand-row d-none';
-    expandRow.innerHTML = `<td colspan="7"><div class="expand-inner" id="expand-inner-${c.id}"></div></td>`;
+    expandRow.innerHTML = `<td colspan="8"><div class="expand-inner" id="expand-inner-${c.id}"></div></td>`;
 
     tbody.appendChild(mainRow);
     tbody.appendChild(expandRow);
@@ -777,12 +1378,13 @@ function changePage(page, event) {
   const search = document.getElementById('filter-search').value.toLowerCase().trim();
   const status = document.getElementById('filter-status').value;
   const sector = document.getElementById('filter-sector').value;
-  const filtered = allCompanies.filter(c => {
+  let filtered = allCompanies.filter(c => {
     if (search && !c.name.toLowerCase().includes(search) && !(c.sector||'').toLowerCase().includes(search)) return false;
     if (status && c.status !== status) return false;
     if (sector && c.sector !== sector) return false;
     return true;
   });
+  filtered = sortArrayBy(filtered, companySortKey, companySortAsc);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   if (page < 1 || page > totalPages) return;
   currentPage = page;
@@ -816,9 +1418,17 @@ async function toggleCompanyExpand(companyId) {
             <tr>
               <td>${esc(ct.name)} ${ct.is_primary ? '<span class="badge" style="background:#7c6af7;font-size:.65rem">Principal</span>' : ''}</td>
               <td>${ROLE_LABEL[ct.role]||ct.role}</td>
-              <td>${ct.email ? `<a href="mailto:${esc(ct.email)}">${esc(ct.email)}</a>` : '—'}</td>
-              <td>${esc(ct.whatsapp)||'—'}</td>
               <td>
+                ${ct.email ? `<a href="mailto:${esc(ct.email)}">${esc(ct.email)}</a>` : '<span class="text-muted">—</span>'}
+                ${enrichBadge(ct)}
+              </td>
+              <td>${esc(ct.whatsapp)||'—'}</td>
+              <td class="d-flex gap-1 flex-wrap">
+                ${(!ct.email || ct.enrich_status === 'not_found') ? `
+                <button class="btn btn-outline-success btn-sm py-0" id="enrich-btn-${ct.id}"
+                  onclick="enrichSingleContact(${ct.id}, ${companyId})" title="Buscar e-mail e telefone">
+                  <i class="bi bi-search"></i>
+                </button>` : ''}
                 <button class="btn btn-outline-danger btn-sm py-0" onclick="removeContact(${companyId}, ${ct.id})">
                   <i class="bi bi-trash"></i>
                 </button>
@@ -845,6 +1455,7 @@ async function toggleCompanyExpand(companyId) {
           </select>
         </div>
         <div class="col-md-3"><input class="form-control form-control-sm" id="iac-email-${companyId}" placeholder="E-mail"></div>
+        <div class="col-md-2"><input class="form-control form-control-sm" id="iac-linkedin-${companyId}" placeholder="LinkedIn URL"></div>
         <div class="col-md-2"><input class="form-control form-control-sm" id="iac-wa-${companyId}" placeholder="WhatsApp"></div>
         <div class="col-md-2 d-flex gap-1">
           <button class="btn btn-primary btn-sm" onclick="saveInlineContact(${companyId})">Salvar</button>
@@ -857,6 +1468,600 @@ async function toggleCompanyExpand(companyId) {
     </button>`;
 }
 
+// ── Ações em lote ────────────────────────────────────────────────────────────
+let selectedCompanyIds = new Set();
+
+function toggleSelectAll(cb) {
+  document.querySelectorAll('.company-row-cb').forEach(chk => {
+    chk.checked = cb.checked;
+    const id = parseInt(chk.dataset.id);
+    if (cb.checked) selectedCompanyIds.add(id);
+    else selectedCompanyIds.delete(id);
+  });
+  updateBulkToolbar();
+}
+
+function toggleCompanySelect(id, checked) {
+  if (checked) selectedCompanyIds.add(id);
+  else selectedCompanyIds.delete(id);
+  // Atualiza o "selecionar todos" se necessário
+  const all = document.querySelectorAll('.company-row-cb');
+  const checked_count = document.querySelectorAll('.company-row-cb:checked').length;
+  const selectAllCb = document.getElementById('select-all-cb');
+  if (selectAllCb) selectAllCb.indeterminate = checked_count > 0 && checked_count < all.length;
+  if (selectAllCb) selectAllCb.checked = checked_count === all.length && all.length > 0;
+  updateBulkToolbar();
+}
+
+function updateBulkToolbar() {
+  const toolbar = document.getElementById('bulk-toolbar');
+  const count = selectedCompanyIds.size;
+  if (count > 0) {
+    toolbar.classList.remove('d-none');
+    toolbar.classList.add('d-flex');
+    document.getElementById('bulk-count').textContent = `${count} empresa${count > 1 ? 's' : ''} selecionada${count > 1 ? 's' : ''}`;
+  } else {
+    toolbar.classList.add('d-none');
+    toolbar.classList.remove('d-flex');
+  }
+}
+
+function clearBulkSelection() {
+  selectedCompanyIds.clear();
+  document.querySelectorAll('.company-row-cb').forEach(cb => cb.checked = false);
+  const selectAllCb = document.getElementById('select-all-cb');
+  if (selectAllCb) { selectAllCb.checked = false; selectAllCb.indeterminate = false; }
+  updateBulkToolbar();
+}
+
+async function bulkResearch() {
+  if (!selectedCompanyIds.size) return;
+  const count = selectedCompanyIds.size;
+  if (!confirm(`Gerar pesquisa IA para ${count} empresa(s)?\n\nO processamento acontece em background. Recarregue a lista em alguns minutos para ver os resultados.`)) return;
+  const btn = document.querySelector('#bulk-toolbar button');
+  const ids = [...selectedCompanyIds];
+  clearBulkSelection();
+  const result = await api('/api/companies/bulk-research', 'POST', { company_ids: ids });
+  toast(`✅ Pesquisa iniciada para ${result.queued} empresa(s). Recarregue a lista em alguns minutos.`, 'info');
+}
+
+// ── Propensity Scoring & Bulk Sequence ───────────────────────────────────────
+let propensityModal = null;
+let bulkResultModal = null;
+let propensityRankings = [];  // Resultados do LLM
+// Map: company_id -> selected pain point string
+let propPainSelections = {};
+// Set of company_ids selecionados para gerar mensagens
+let propSelectedIds = new Set();
+
+function openPropensityModal() {
+  if (!selectedCompanyIds.size) { toast('Selecione ao menos uma empresa', 'warning'); return; }
+  // Reset state
+  propensityRankings = [];
+  propPainSelections = {};
+  propSelectedIds = new Set();
+  document.getElementById('prop-step-1').classList.remove('d-none');
+  document.getElementById('prop-step-2').classList.add('d-none');
+  document.getElementById('prop-footer-step2').classList.add('d-none');
+  document.getElementById('prop-results-list').innerHTML = '';
+  document.getElementById('prop-product').value = '';
+  const count = selectedCompanyIds.size;
+  document.getElementById('prop-count-label').textContent = `${count} empresa${count>1?'s':''}`;
+  if (!propensityModal) propensityModal = new bootstrap.Modal(document.getElementById('propensityModal'));
+  propensityModal.show();
+}
+
+async function runPropensityAnalysis() {
+  const product = document.getElementById('prop-product').value.trim();
+  if (!product) { toast('Informe o produto a ser vendido', 'warning'); return; }
+  const btn = document.getElementById('btn-run-propensity');
+  setLoading(btn, true);
+  btn.textContent = 'Analisando com IA...';
+  try {
+    const data = await api('/api/companies/propensity', 'POST', {
+      company_ids: [...selectedCompanyIds],
+      product
+    });
+    propensityRankings = data.rankings || [];
+    renderPropensityResults(propensityRankings, product);
+    // Go to step 2
+    document.getElementById('prop-step-1').classList.add('d-none');
+    document.getElementById('prop-step-2').classList.remove('d-none');
+    document.getElementById('prop-footer-step2').classList.remove('d-none');
+  } catch(e) {
+    toast('Erro ao analisar propensão', 'danger');
+  } finally {
+    setLoading(btn, false);
+    btn.innerHTML = '<i class="bi bi-lightning me-1"></i>Analisar Propensão';
+  }
+}
+
+function renderPropensityResults(rankings, product) {
+  const list = document.getElementById('prop-results-list');
+  list.innerHTML = '';
+  rankings.forEach((item, idx) => {
+    const score = item.propensity_score || 0;
+    const scoreColor = score >= 8 ? '#2e7d32' : score >= 6 ? '#e65100' : '#757575';
+    const scoreBg = score >= 8 ? '#e8f5e9' : score >= 6 ? '#fff3e0' : '#f5f5f5';
+    const pains = item.pain_points || [];
+
+    const card = document.createElement('div');
+    card.className = 'border rounded p-3 mb-3';
+    card.id = `prop-card-${item.company_id}`;
+    card.style.cssText = `border-left: 4px solid ${scoreColor} !important; background: ${scoreBg};`;
+    card.innerHTML = `
+      <div class="d-flex align-items-start gap-3">
+        <div class="flex-shrink-0 text-center" style="width:48px">
+          <div class="fw-bold fs-4" style="color:${scoreColor}">${score}</div>
+          <div class="text-muted" style="font-size:10px">/ 10</div>
+        </div>
+        <div class="flex-grow-1">
+          <div class="d-flex align-items-center gap-2 mb-1">
+            <input type="checkbox" class="form-check-input prop-company-cb" id="prop-cb-${item.company_id}"
+              data-id="${item.company_id}" onchange="togglePropSelection(${item.company_id}, this.checked)">
+            <label class="fw-semibold mb-0" for="prop-cb-${item.company_id}">
+              <span class="text-muted small me-1">#${idx+1}</span>${esc(item.company_name || '')}
+            </label>
+            ${item.contact_name ? `<span class="text-muted small">— ${esc(item.contact_name)}</span>` : ''}
+            <span class="badge" style="background:${scoreColor}">${score >= 8 ? '🔥 Alta' : score >= 6 ? '⚡ Média' : '🔵 Baixa'}</span>
+          </div>
+          <p class="small text-muted mb-2"><i class="bi bi-chat-quote me-1"></i>${esc(item.reason || '')}</p>
+          <!-- Seleção de dor -->
+          <div class="prop-pain-select d-none" id="prop-pain-${item.company_id}">
+            <p class="small fw-semibold mb-1 text-dark"><i class="bi bi-bullseye me-1 text-danger"></i>Escolha a dor para abordar nesse lead:</p>
+            <div class="d-flex flex-column gap-1">
+              ${pains.map((p, pi) => `
+                <div class="d-flex align-items-start gap-2 p-2 rounded border bg-white prop-pain-card"
+                     style="cursor:pointer" onclick="selectPropPain(${item.company_id}, '${esc(p).replace(/'/g, "\\'")}', ${pi})">
+                  <input type="radio" class="form-check-input mt-1 flex-shrink-0" name="prop-pain-${item.company_id}"
+                    id="prop-pain-${item.company_id}-${pi}" value="${esc(p)}">
+                  <label for="prop-pain-${item.company_id}-${pi}" class="small mb-0 lh-sm" style="cursor:pointer">
+                    <span class="badge bg-danger bg-opacity-10 text-danger me-1 fw-normal">#${pi+1}</span>${esc(p)}
+                  </label>
+                </div>`).join('')}
+            </div>
+            <div class="mt-2 d-flex align-items-center gap-2">
+              <input type="text" class="form-control form-control-sm" id="prop-custom-pain-${item.company_id}"
+                placeholder="Ou digite uma dor personalizada...">
+              <button class="btn btn-sm btn-outline-secondary flex-shrink-0" onclick="selectPropPain(${item.company_id}, document.getElementById('prop-custom-pain-${item.company_id}').value, -1)">Usar</button>
+            </div>
+            <div class="d-none mt-1 alert alert-success py-1 px-2 small" id="prop-pain-sel-${item.company_id}">
+              <i class="bi bi-check-circle me-1"></i><span id="prop-pain-sel-text-${item.company_id}"></span>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    list.appendChild(card);
+  });
+  updatePropSelectedCount();
+}
+
+function togglePropSelection(companyId, checked) {
+  if (checked) {
+    propSelectedIds.add(companyId);
+    document.getElementById(`prop-pain-${companyId}`)?.classList.remove('d-none');
+  } else {
+    propSelectedIds.delete(companyId);
+    document.getElementById(`prop-pain-${companyId}`)?.classList.add('d-none');
+    delete propPainSelections[companyId];
+  }
+  updatePropSelectedCount();
+}
+
+function selectPropPain(companyId, pain, painIdx) {
+  if (!pain || !pain.trim()) { toast('Selecione ou digite uma dor', 'warning'); return; }
+  propPainSelections[companyId] = pain;
+  // Visual: marcar radio correto
+  if (painIdx >= 0) {
+    document.getElementById(`prop-pain-${companyId}-${painIdx}`).checked = true;
+  }
+  // Highlight selecionada
+  document.querySelectorAll(`#prop-pain-${companyId} .prop-pain-card`).forEach((c, i) => {
+    c.style.background = (i === painIdx) ? '#e8f5e9' : '#fff';
+    c.style.borderColor = (i === painIdx) ? '#4caf50' : '';
+  });
+  const indicator = document.getElementById(`prop-pain-sel-${companyId}`);
+  if (indicator) {
+    indicator.classList.remove('d-none');
+    document.getElementById(`prop-pain-sel-text-${companyId}`).textContent = `Dor selecionada: ${pain.substring(0, 60)}...`;
+  }
+}
+
+function propSelectTop(n) {
+  // Seleciona os top N por score (já estão ordenados)
+  propClearAll();
+  propensityRankings.slice(0, n).forEach(item => {
+    const cb = document.getElementById(`prop-cb-${item.company_id}`);
+    if (cb) { cb.checked = true; togglePropSelection(item.company_id, true); }
+  });
+}
+
+function propSelectAll() {
+  propensityRankings.forEach(item => {
+    const cb = document.getElementById(`prop-cb-${item.company_id}`);
+    if (cb) { cb.checked = true; togglePropSelection(item.company_id, true); }
+  });
+}
+
+function propClearAll() {
+  propensityRankings.forEach(item => {
+    const cb = document.getElementById(`prop-cb-${item.company_id}`);
+    if (cb) { cb.checked = false; togglePropSelection(item.company_id, false); }
+  });
+}
+
+function propGoBack() {
+  document.getElementById('prop-step-1').classList.remove('d-none');
+  document.getElementById('prop-step-2').classList.add('d-none');
+  document.getElementById('prop-footer-step2').classList.add('d-none');
+}
+
+function updatePropSelectedCount() {
+  document.getElementById('prop-selected-count').textContent = propSelectedIds.size;
+}
+
+async function generateBulkSequences() {
+  if (!_guard('bulk-seq')) return;
+  if (!propSelectedIds.size) { _unguard('bulk-seq'); toast('Selecione ao menos um lead', 'warning'); return; }
+  const product = document.getElementById('prop-product').value.trim() || 'solução de automação de vendas com IA';
+
+  // Monta targets com dor selecionada (ou sem dor se não selecionou)
+  const targets = [...propSelectedIds].map(id => ({
+    company_id: id,
+    selected_pain_point: propPainSelections[id] || ''
+  }));
+
+  const btn = document.getElementById('btn-bulk-gen');
+  setLoading(btn, true);
+  btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Gerando ${targets.length} sequências...`;
+  try {
+    const data = await api('/api/companies/bulk-sequence', 'POST', {
+      targets,
+      product_value: product
+    });
+
+    // Fechar modal de propensão
+    propensityModal.hide();
+    clearBulkSelection();
+
+    // Mostrar resultado
+    renderBulkResult(data);
+    if (!bulkResultModal) bulkResultModal = new bootstrap.Modal(document.getElementById('bulkResultModal'));
+    bulkResultModal.show();
+    loadStats();
+  } catch(e) {
+    toast('Erro ao gerar mensagens em lote', 'danger');
+  } finally {
+    setLoading(btn, false);
+    btn.innerHTML = '<i class="bi bi-magic me-1"></i>Gerar Mensagens em Lote';
+    _unguard('bulk-seq');
+  }
+}
+
+function renderBulkResult(data) {
+  const body = document.getElementById('bulk-result-body');
+  const results = data.results || [];
+  const errors = data.errors || [];
+  const channelIcon = { linkedin: 'linkedin', email: 'envelope', whatsapp: 'whatsapp' };
+  const channelLabel = { linkedin: 'LinkedIn', email: 'E-mail', whatsapp: 'WhatsApp' };
+
+  let html = `<div class="alert alert-success"><i class="bi bi-check-circle me-1"></i>
+    <strong>${results.length} sequência${results.length !== 1 ? 's' : ''} gerada${results.length !== 1 ? 's' : ''} com sucesso!</strong>
+    ${errors.length ? ` <span class="text-warning ms-2">${errors.length} erro(s).</span>` : ''}
+  </div>
+  <div class="accordion" id="bulk-result-accordion">`;
+
+  results.forEach((r, idx) => {
+    const collapseId = 'bra-' + idx;
+    const seq = r.sequence || [];
+    const prodBadge = r.product_value
+      ? '<span class="badge bg-success bg-opacity-10 text-success fw-normal"><i class="bi bi-box-seam me-1"></i>' + esc(r.product_value) + '</span>'
+      : '';
+    const painBadge = r.selected_pain_point
+      ? '<span class="badge bg-danger bg-opacity-10 text-danger fw-normal">&#127919; ' + esc(r.selected_pain_point.substring(0, 30)) + '</span>'
+      : '';
+    html += `
+    <div class="accordion-item mb-2 border rounded overflow-hidden">
+      <h2 class="accordion-header">
+        <button class="accordion-button ${idx > 0 ? 'collapsed' : ''}" type="button"
+          data-bs-toggle="collapse" data-bs-target="#${collapseId}" style="background:#f8f9fa">
+          <div class="d-flex align-items-center gap-2 w-100 me-3 flex-wrap">
+            <i class="bi bi-building text-primary"></i>
+            <strong>${esc(r.company_name)}</strong>
+            <span class="text-muted small">&#8212; ${esc(r.contact_name)}</span>
+            ` + prodBadge + ` ` + painBadge + `
+            <span class="badge bg-secondary fw-normal ms-auto">${seq.length} msg</span>
+          </div>
+        </button>
+      </h2>
+      <div id="${collapseId}" class="accordion-collapse collapse ${idx === 0 ? 'show' : ''}">
+        <div class="accordion-body pt-2 pb-3 px-3">
+          ${seq.map(msg => {
+            const icon = channelIcon[msg.channel] || 'chat';
+            const label = channelLabel[msg.channel] || msg.channel;
+            return `
+            <div class="mb-3">
+              <div class="d-flex align-items-center gap-2 mb-1">
+                <i class="bi bi-${icon} text-primary"></i>
+                <span class="fw-semibold small">Dia ${msg.day} &#8212; ${label}</span>
+                <button class="btn btn-outline-secondary btn-sm py-0 ms-auto" style="font-size:.7rem"
+                  onclick="(function(b){var pre=b.closest('.mb-3').querySelector('pre');navigator.clipboard.writeText(pre.textContent).then(function(){toast('Copiado!','success')});})(this)">
+                  <i class="bi bi-clipboard me-1"></i>Copiar
+                </button>
+              </div>
+              <pre class="border rounded p-2 bg-light mb-0" style="white-space:pre-wrap;font-size:.8rem;font-family:inherit">${esc(msg.content)}</pre>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>`;
+  });
+
+  html += '</div>';
+
+  if (errors.length) {
+    html += `<div class="border border-warning rounded p-3 mt-3">
+      <p class="fw-semibold mb-2 text-warning"><i class="bi bi-exclamation-triangle me-1"></i>Erros:</p>
+      ${errors.map(e => `<p class="small mb-1">&#10060; Empresa #${e.company_id}: ${esc(e.error)}</p>`).join('')}
+    </div>`;
+  }
+
+  body.innerHTML = html;
+}
+
+// ── Bulk Direct Modal ─────────────────────────────────────────────────────────
+let bulkDirectModal = null;
+// Map: company_id → { product, selected }
+let bulkDirectLeads = {};
+
+function openBulkDirectModal() {
+  if (!selectedCompanyIds.size) { toast('Selecione ao menos uma empresa', 'warning'); return; }
+  bulkDirectLeads = {};
+  const ids = [...selectedCompanyIds];
+
+  // Monta mapa com dados das empresas (usa allCompanies já carregado)
+  ids.forEach(id => {
+    const c = allCompanies.find(x => x.id === id);
+    bulkDirectLeads[id] = {
+      id,
+      name: c?.name || `Empresa #${id}`,
+      sector: c?.sector || '',
+      product: '',
+      selected: true,
+    };
+  });
+
+  document.getElementById('bulk-direct-product-global').value = '';
+  renderBulkDirectList();
+  document.getElementById('bulk-direct-group-btns').innerHTML = '';
+
+  if (!bulkDirectModal) bulkDirectModal = new bootstrap.Modal(document.getElementById('bulkDirectModal'));
+  bulkDirectModal.show();
+}
+
+function renderBulkDirectList() {
+  const list = document.getElementById('bulk-direct-leads-list');
+  const leads = Object.values(bulkDirectLeads);
+  if (!leads.length) { list.innerHTML = '<p class="text-muted small">Nenhum lead selecionado.</p>'; return; }
+
+  list.innerHTML = leads.map(l => `
+    <div class="d-flex align-items-center gap-3 border rounded p-2 mb-2" id="bdd-row-${l.id}">
+      <input type="checkbox" class="form-check-input flex-shrink-0" id="bdd-cb-${l.id}"
+        ${l.selected ? 'checked' : ''}
+        onchange="toggleBulkDirectLead(${l.id}, this.checked)">
+      <label class="fw-semibold flex-shrink-0 mb-0" for="bdd-cb-${l.id}" style="min-width:160px;cursor:pointer">
+        ${esc(l.name)}
+        ${l.sector ? `<span class="text-muted fw-normal small ms-1">— ${esc(l.sector)}</span>` : ''}
+      </label>
+      <input type="text" class="form-control form-control-sm"
+        id="bdd-prod-${l.id}"
+        placeholder="Produto para este lead..."
+        value="${esc(l.product)}"
+        oninput="bulkDirectLeads[${l.id}].product = this.value">
+    </div>`).join('');
+
+  updateBulkDirectCount();
+}
+
+function toggleBulkDirectLead(id, checked) {
+  if (bulkDirectLeads[id]) bulkDirectLeads[id].selected = checked;
+  updateBulkDirectCount();
+}
+
+function bulkDirectSelectAll(select) {
+  Object.values(bulkDirectLeads).forEach(l => {
+    l.selected = select;
+    const cb = document.getElementById(`bdd-cb-${l.id}`);
+    if (cb) cb.checked = select;
+  });
+  updateBulkDirectCount();
+}
+
+function applyProductToAllLeads() {
+  const product = document.getElementById('bulk-direct-product-global').value.trim();
+  if (!product) { toast('Informe o produto antes de aplicar', 'warning'); return; }
+  Object.values(bulkDirectLeads).forEach(l => {
+    l.product = product;
+    const inp = document.getElementById(`bdd-prod-${l.id}`);
+    if (inp) inp.value = product;
+  });
+  toast(`Produto "${product}" aplicado a todos os leads`, 'success');
+}
+
+function updateBulkDirectCount() {
+  const n = Object.values(bulkDirectLeads).filter(l => l.selected).length;
+  document.getElementById('bulk-direct-count').textContent = n;
+}
+
+async function generateBulkDirect() {
+  const targets = Object.values(bulkDirectLeads)
+    .filter(l => l.selected)
+    .map(l => ({
+      company_id: l.id,
+      product_value: l.product.trim() || document.getElementById('bulk-direct-product-global').value.trim() || 'solução de automação de vendas com IA',
+    }));
+
+  if (!targets.length) { toast('Selecione ao menos um lead', 'warning'); return; }
+
+  // Valida que todos têm produto
+  const semProduto = targets.filter(t => !t.product_value || t.product_value === 'solução de automação de vendas com IA' && !document.getElementById('bulk-direct-product-global').value.trim());
+  // Aviso suave mas não bloqueia
+  if (targets.some(t => !t.product_value.trim())) {
+    if (!confirm('Alguns leads não têm produto definido — será usado o padrão "solução de automação de vendas com IA". Continuar?')) return;
+  }
+
+  const btn = document.getElementById('btn-bulk-direct-gen');
+  setLoading(btn, true);
+  btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Gerando ${targets.length} sequência(s)...`;
+
+  try {
+    const data = await api('/api/companies/bulk-sequence', 'POST', { targets });
+    bulkDirectModal.hide();
+    clearBulkSelection();
+    renderBulkResult(data);
+    if (!bulkResultModal) bulkResultModal = new bootstrap.Modal(document.getElementById('bulkResultModal'));
+    bulkResultModal.show();
+    loadStats();
+  } catch (e) {
+    toast('Erro ao gerar mensagens em lote', 'danger');
+  } finally {
+    setLoading(btn, false);
+    btn.innerHTML = '<i class="bi bi-magic me-1"></i>Gerar Mensagens';
+  }
+}
+
+async function bulkStatus(status, event) {
+  if (event) event.preventDefault();
+  if (!selectedCompanyIds.size) return;
+  const label = STATUS_LABEL[status] || status;
+  if (!confirm(`Mudar status de ${selectedCompanyIds.size} empresa(s) para "${label}"?`)) return;
+  const ids = [...selectedCompanyIds];
+  clearBulkSelection();
+  await api('/api/companies/bulk-status', 'POST', { company_ids: ids, status });
+  toast(`Status atualizado para ${ids.length} empresa(s)`);
+  loadCompanies();
+}
+
+// ── Auto-fila rascunho de resposta ───────────────────────────────────────────
+let _pendingDraft = null;
+
+async function queueDraftReply() {
+  if (!_pendingDraft) return;
+  const { reply, companyId, contactId } = _pendingDraft;
+  await api(`/api/companies/${companyId}/queue-draft`, 'POST', {
+    content: reply,
+    contact_id: contactId || null,
+  });
+  toast('✅ Rascunho adicionado à fila de revisão (RLHF)!', 'success');
+  _pendingDraft = null;
+  document.getElementById('btn-use-draft')?.remove();
+  loadStats();
+}
+
+// ── Enriquecimento de contatos ────────────────────────────────────────────────
+
+function enrichBadge(ct) {
+  const map = {
+    found:     '<span class="badge bg-success ms-1" style="font-size:.65rem" title="Encontrado via Apollo">Apollo ✓</span>',
+    guessed:   '<span class="badge bg-warning text-dark ms-1" style="font-size:.65rem" title="Estimado por IA">IA ≈</span>',
+    not_found: '<span class="badge bg-secondary ms-1" style="font-size:.65rem" title="Não encontrado">Não enc.</span>',
+    pending:   ct.email ? '' : '<span class="badge bg-light text-dark border ms-1" style="font-size:.65rem">Pendente</span>',
+  };
+  return map[ct.enrich_status] || '';
+}
+
+async function enrichSingleContact(contactId, companyId) {
+  const btn = document.getElementById(`enrich-btn-${contactId}`);
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>'; }
+  try {
+    const result = await api('/api/contacts/enrich', 'POST', { contact_id: contactId });
+    if (result.ok) {
+      const sourceLabel = result.source === 'apollo' ? 'Apollo' : 'Estimado por IA';
+      toast(`✓ ${result.email || '—'} encontrado (${sourceLabel})`, 'success');
+    } else {
+      toast('Não foi possível encontrar dados para este contato.', 'warning');
+    }
+    expandedRows.delete(companyId);
+    await toggleCompanyExpand(companyId);
+    loadStats();
+  } catch {
+    toast('Erro ao enriquecer contato', 'danger');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-search"></i>'; }
+  }
+}
+
+async function bulkEnrichMissingContacts() {
+  const btn = document.getElementById('btn-bulk-enrich');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Enriquecendo...'; }
+  toast('Enriquecimento em lote iniciado — pode levar alguns minutos...', 'info');
+  try {
+    const result = await api('/api/contacts/bulk-enrich', 'POST', {});
+    toast(`Concluído: ${result.found} via Apollo, ${result.guessed} estimados por IA, ${result.not_found} não encontrados`, result.found > 0 ? 'success' : 'info');
+    loadCompanies();
+    loadStats();
+  } catch {
+    toast('Erro no enriquecimento em lote', 'danger');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-search me-1"></i>Enriquecer sem e-mail'; }
+  }
+}
+
+async function importAndEnrich() {
+  const fileInput = document.getElementById('enrich-csv-file');
+  const autoEnrich = document.getElementById('auto-enrich-check').checked;
+  const resultEl = document.getElementById('enrich-csv-result');
+  const btn = document.getElementById('btn-import-enrich');
+
+  if (!fileInput.files.length) { toast('Selecione um arquivo CSV', 'warning'); return; }
+
+  const text = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result);
+    reader.onerror = reject;
+    reader.readAsText(fileInput.files[0], 'UTF-8');
+  });
+
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) { toast('CSV vazio', 'warning'); return; }
+
+  const sep = lines[0].includes(';') ? ';' : ',';
+  const headers = lines[0].split(sep).map(h => h.trim().toLowerCase().replace(/["""]/g,''));
+  const nameIdx    = headers.findIndex(h => h === 'nome' || h === 'name' || h === 'contato');
+  const companyIdx = headers.findIndex(h => h === 'empresa' || h === 'company');
+
+  if (nameIdx < 0 || companyIdx < 0) {
+    toast('CSV deve ter colunas "nome" (ou "name"/"contato") e "empresa" (ou "company")', 'danger');
+    return;
+  }
+
+  const contacts = lines.slice(1)
+    .map(l => l.split(sep).map(c => c.trim().replace(/^[""]|[""]$/g, '')))
+    .filter(cols => cols[nameIdx] && cols[companyIdx])
+    .map(cols => ({ name: cols[nameIdx], company_name: cols[companyIdx] }));
+
+  if (!contacts.length) { toast('Nenhuma linha válida no CSV', 'warning'); return; }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Importando...';
+  resultEl.innerHTML = `<div class="text-muted small">Importando ${contacts.length} contato(s)${autoEnrich ? ' e iniciando enriquecimento...' : ''}. Aguarde.</div>`;
+
+  try {
+    const result = await api('/api/contacts/import-and-enrich', 'POST', { contacts, auto_enrich: autoEnrich });
+    resultEl.innerHTML = `<div class="small text-success fw-bold mt-1">
+      <i class="bi bi-check-circle me-1"></i>${result.imported} contato(s) importado(s).
+      ${autoEnrich ? '<br><span class="text-muted fw-normal">Enriquecimento rodando em background — recarregue a lista em alguns instantes.</span>' : ''}
+    </div>`;
+    fileInput.value = '';
+    loadCompanies();
+    loadStats();
+  } catch {
+    resultEl.innerHTML = `<div class="small text-danger"><i class="bi bi-exclamation-triangle me-1"></i>Erro na importação.</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-search me-1"></i>Importar e Enriquecer';
+  }
+}
+
 async function removeContact(companyId, contactId) {
   if (!confirm('Remover este contato?')) return;
   await api(`/api/companies/${companyId}/contacts/${contactId}`, 'DELETE');
@@ -867,25 +2072,44 @@ async function removeContact(companyId, contactId) {
 }
 
 async function saveInlineContact(companyId) {
-  const name = document.getElementById(`iac-name-${companyId}`).value.trim();
-  if (!name) { toast('Nome é obrigatório', 'warning'); return; }
+  const nameEl  = document.getElementById(`iac-name-${companyId}`);
+  const emailEl = document.getElementById(`iac-email-${companyId}`);
+  const name  = nameEl.value.trim();
+  const email = emailEl.value.trim();
+
+  clearFieldError(nameEl); clearFieldError(emailEl);
+  let valid = true;
+  if (!name)  { setFieldError(nameEl,  'Nome é obrigatório'); valid = false; }
+  if (email && !isValidEmail(email)) { setFieldError(emailEl, 'E-mail inválido (ex: nome@empresa.com)'); valid = false; }
+  if (!valid) return;
+
   await api(`/api/companies/${companyId}/contacts`, 'POST', {
     name,
     role: document.getElementById(`iac-role-${companyId}`).value,
-    email: document.getElementById(`iac-email-${companyId}`).value.trim(),
+    email,
+    linkedin: document.getElementById(`iac-linkedin-${companyId}`).value.trim(),
     whatsapp: document.getElementById(`iac-wa-${companyId}`).value.trim(),
   });
-  toast('Contato adicionado!');
+  toast('✅ Contato adicionado!');
   expandedRows.delete(companyId);
   toggleCompanyExpand(companyId);
   loadStats();
 }
 
 async function createCompanyAndContact() {
-  const companyName = document.getElementById('c-name').value.trim();
-  const contactName = document.getElementById('ct-name').value.trim();
-  if (!companyName) { toast('Nome da empresa é obrigatório', 'warning'); return; }
-  if (!contactName) { toast('Nome do contato é obrigatório', 'warning'); return; }
+  const cNameEl  = document.getElementById('c-name');
+  const ctNameEl = document.getElementById('ct-name');
+  const emailEl  = document.getElementById('ct-email');
+  const companyName = cNameEl.value.trim();
+  const contactName = ctNameEl.value.trim();
+  const email = emailEl.value.trim();
+
+  clearAllFieldErrors(document.getElementById('addCompanyModal') || document.body);
+  let valid = true;
+  if (!companyName) { setFieldError(cNameEl,  'Nome da empresa é obrigatório'); valid = false; }
+  if (!contactName) { setFieldError(ctNameEl, 'Nome do contato é obrigatório'); valid = false; }
+  if (email && !isValidEmail(email)) { setFieldError(emailEl, 'E-mail inválido (ex: nome@empresa.com)'); valid = false; }
+  if (!valid) return;
 
   const comp = await api('/api/companies', 'POST', {
     name: companyName,
@@ -947,6 +2171,7 @@ async function importCSV() {
   const dataLines = lines.slice(1).filter(l => l.trim());
   const total = dataLines.length;
   let imported = 0, errors = 0;
+  const errorDetails = [];
 
   setLoading(btn, true);
   resultEl.innerHTML = `<div class="text-muted small">Importando 0/${total}...</div>`;
@@ -960,7 +2185,7 @@ async function importCSV() {
     const email   = colIdx.email >= 0 ? cols[colIdx.email] : '';
     const wa      = colIdx.whatsapp >= 0 ? cols[colIdx.whatsapp] : '';
 
-    if (!empresa) { errors++; continue; }
+    if (!empresa) { errors++; errorDetails.push(`Linha ${i+2}: coluna "empresa" vazia`); continue; }
 
     resultEl.innerHTML = `<div class="text-muted small">Importando ${i+1}/${total}...</div>`;
 
@@ -974,6 +2199,7 @@ async function importCSV() {
           compId = e.existing_id;
         } else {
           errors++;
+          errorDetails.push(`Linha ${i+2}: falha ao criar empresa "${empresa}"`);
           continue;
         }
       }
@@ -987,21 +2213,24 @@ async function importCSV() {
         }).catch(() => {});
       }
       imported++;
-    } catch {
+    } catch(err) {
       errors++;
+      errorDetails.push(`Linha ${i+2}: ${err?.error || 'erro desconhecido'}`);
     }
   }
 
   setLoading(btn, false);
-  resultEl.innerHTML = `<div class="small text-${errors > 0 ? 'warning' : 'success'}">
-    Concluído: ${imported} empresa(s) importada(s)${errors > 0 ? `, ${errors} erro(s)` : ''}.
-  </div>`;
+  const errHtml = errorDetails.length
+    ? `<details class="mt-1"><summary class="small text-warning" style="cursor:pointer">${errors} erro(s) — clique para ver detalhes</summary><ul class="small mt-1 mb-0">${errorDetails.map(e=>`<li>${e}</li>`).join('')}</ul></details>`
+    : '';
+  resultEl.innerHTML = `<div class="small text-${errors > 0 ? 'warning' : 'success'}">Concluído: ${imported} empresa(s) importada(s).</div>${errHtml}`;
   fileInput.value = '';
   loadCompanies(); loadStats();
 }
 
 async function openCompany(id) {
   currentCompanyId = id;
+  _historyLoaded = false;  // Reset ao abrir nova empresa
   const data = await api(`/api/companies/${id}`);
   currentCompanyData = data;
   const c = data.company;
@@ -1030,8 +2259,16 @@ async function openCompany(id) {
     hookEl.textContent = c.research_hook;
     if (c.research_context) {
       document.getElementById('research-context').classList.remove('d-none');
-      try { document.getElementById('research-context-text').textContent = JSON.stringify(JSON.parse(c.research_context), null, 2); }
-      catch { document.getElementById('research-context-text').textContent = c.research_context; }
+      try {
+        const parsedCtx = JSON.parse(c.research_context);
+        document.getElementById('research-context-text').textContent = JSON.stringify(parsedCtx, null, 2);
+        // Restaura pain points se existirem
+        if (parsedCtx.pain_points && parsedCtx.pain_points.length > 0) {
+          renderPainPoints(parsedCtx.pain_points);
+        }
+      } catch {
+        document.getElementById('research-context-text').textContent = c.research_context;
+      }
     }
   } else {
     hookEl.textContent = 'Clique em "Pesquisar" para gerar o gancho personalizado...';
@@ -1055,14 +2292,51 @@ async function openCompany(id) {
   // Available slots
   renderAvailableSlotsForCompany();
 
+  // Limpar todo estado anterior do modal
   document.getElementById('handon-alert').classList.add('d-none');
   document.getElementById('sentiment-result').innerHTML = '';
   document.getElementById('prospect-response').value = '';
   document.getElementById('add-contact-form').classList.add('d-none');
+  document.getElementById('modal-product').value = '';
+  document.getElementById('response-contact-select').value = '';
+  document.getElementById('sequence-container').innerHTML = '<p class="text-muted small mb-0">Selecione um contato e clique em "Gerar" para criar as mensagens personalizadas.</p>';
+  document.getElementById('research-context').classList.add('d-none');
+  document.getElementById('research-context-text').classList.add('d-none');
+  // Limpa seleção de dor
+  currentSelectedPainPoint = '';
+  document.getElementById('pain-points-section')?.classList.add('d-none');
+  document.getElementById('pain-selected-indicator')?.classList.add('d-none');
+  document.getElementById('pain-points-list').innerHTML = '';
+  document.getElementById('research-history-section').classList.add('d-none');
+  document.getElementById('research-history-list').classList.add('d-none');
+  document.getElementById('sequence-history-section').classList.add('d-none');
+  document.getElementById('sequence-history-list').classList.add('d-none');
+
+  // Mostrar histórico de pesquisa se houver
+  if (data.research_history && data.research_history.length > 0) {
+    document.getElementById('research-history-section').classList.remove('d-none');
+    document.getElementById('research-history-list').innerHTML = data.research_history.map((h, i) => `
+      <div class="border rounded p-2 mb-2 bg-white small">
+        <div class="text-muted mb-1">${h.created_at ? h.created_at.substring(0,19).replace('T',' ') : 'Anterior'}</div>
+        <div class="msg-box">${esc(h.hook)}</div>
+      </div>`).join('');
+  }
+
+  // Mostrar histórico de sequências se houver
+  if (data.sequence_history && data.sequence_history.length > 0) {
+    document.getElementById('sequence-history-section').classList.remove('d-none');
+    document.getElementById('sequence-history-list').innerHTML = data.sequence_history.map(h => `
+      <div class="border rounded p-2 mb-2 bg-white small">
+        <div class="text-muted mb-1">${h.created_at ? h.created_at.substring(0,19).replace('T',' ') : 'Anterior'} — <strong>${esc(h.contact_name||'?')}</strong></div>
+        ${(h.messages||[]).map(m => `<div class="mb-1"><span class="badge bg-secondary">${m.channel} Dia ${m.day}</span> <span class="text-muted">${esc((m.content||'').substring(0,60))}...</span></div>`).join('')}
+      </div>`).join('');
+  }
 
   // Resetar edição inline
   cancelCompanyEdit();
 
+  // Carrega timeline de interacoes
+  loadInteractionsForCompany(id);
   companyModal.show();
 }
 
@@ -1155,7 +2429,7 @@ function renderContactsPanel(contacts) {
     return;
   }
   el.innerHTML = contacts.map(ct => `
-    <div class="contact-card">
+    <div class="contact-card" id="contact-card-${ct.id}">
       <div class="d-flex justify-content-between align-items-start">
         <div>
           <strong>${esc(ct.name)}</strong>
@@ -1165,9 +2439,55 @@ function renderContactsPanel(contacts) {
           ${ct.whatsapp ? `<div class="small"><i class="bi bi-whatsapp me-1 text-success"></i>${esc(ct.whatsapp)}</div>` : ''}
           ${ct.linkedin ? `<div class="small"><i class="bi bi-linkedin me-1 text-primary"></i><a href="${esc(ct.linkedin)}" target="_blank">LinkedIn</a></div>` : ''}
         </div>
-        <button class="btn btn-outline-danger btn-sm py-0" onclick="removeContactFromModal(${ct.id})"><i class="bi bi-trash"></i></button>
+        <div class="d-flex gap-1">
+          ${!ct.is_primary ? `<button class="btn btn-outline-warning btn-sm py-0" title="Tornar principal" onclick="setPrimaryContact(${ct.id})"><i class="bi bi-star"></i></button>` : ''}
+          <button class="btn btn-outline-secondary btn-sm py-0" title="Editar" onclick="toggleEditContactForm(${ct.id})"><i class="bi bi-pencil"></i></button>
+          <button class="btn btn-outline-danger btn-sm py-0" title="Remover" onclick="removeContactFromModal(${ct.id})"><i class="bi bi-trash"></i></button>
+        </div>
+      </div>
+      <div id="edit-contact-form-${ct.id}" class="d-none mt-2 p-2 border rounded bg-light">
+        <div class="mb-2"><input class="form-control form-control-sm" id="ect-name-${ct.id}" placeholder="Nome *" value="${esc(ct.name)}"></div>
+        <div class="mb-2">
+          <select class="form-select form-select-sm" id="ect-role-${ct.id}">
+            <option value="c_level" ${ct.role==='c_level'?'selected':''}>C-Level / Diretor</option>
+            <option value="manager" ${ct.role==='manager'?'selected':''}>Gerente / Coordenador</option>
+            <option value="engineer" ${ct.role==='engineer'?'selected':''}>Engenheiro / TI</option>
+            <option value="other" ${ct.role==='other'?'selected':''}>Outro</option>
+          </select>
+        </div>
+        <div class="mb-2"><input class="form-control form-control-sm" id="ect-email-${ct.id}" placeholder="E-mail" value="${esc(ct.email||'')}"></div>
+        <div class="mb-2"><input class="form-control form-control-sm" id="ect-linkedin-${ct.id}" placeholder="LinkedIn URL" value="${esc(ct.linkedin||'')}"></div>
+        <div class="mb-2"><input class="form-control form-control-sm" id="ect-whatsapp-${ct.id}" placeholder="WhatsApp" value="${esc(ct.whatsapp||'')}"></div>
+        <div class="d-flex gap-2">
+          <button class="btn btn-primary btn-sm" onclick="saveContactEdit(${ct.id})">Salvar</button>
+          <button class="btn btn-link btn-sm" onclick="document.getElementById('edit-contact-form-${ct.id}').classList.add('d-none')">Cancelar</button>
+        </div>
       </div>
     </div>`).join('');
+}
+
+function toggleEditContactForm(contactId) {
+  document.getElementById(`edit-contact-form-${contactId}`).classList.toggle('d-none');
+}
+
+async function saveContactEdit(contactId) {
+  const name = document.getElementById(`ect-name-${contactId}`).value.trim();
+  if (!name) { toast('Nome é obrigatório', 'warning'); return; }
+  await api(`/api/companies/${currentCompanyId}/contacts/${contactId}`, 'PATCH', {
+    name,
+    role: document.getElementById(`ect-role-${contactId}`).value,
+    email: document.getElementById(`ect-email-${contactId}`).value.trim(),
+    linkedin: document.getElementById(`ect-linkedin-${contactId}`).value.trim(),
+    whatsapp: document.getElementById(`ect-whatsapp-${contactId}`).value.trim(),
+  });
+  toast('Contato atualizado!');
+  await refreshCurrentCompany();
+}
+
+async function setPrimaryContact(contactId) {
+  await api(`/api/companies/${currentCompanyId}/contacts/${contactId}/set-primary`, 'PATCH', {});
+  toast('Contato principal atualizado!');
+  await refreshCurrentCompany();
 }
 
 function populateContactSelects(contacts) {
@@ -1182,7 +2502,9 @@ function toggleAddContactForm() {
 
 async function addContactToCompany() {
   const name = document.getElementById('new-ct-name').value.trim();
+  const email = document.getElementById('new-ct-email').value.trim();
   if (!name) { toast('Nome é obrigatório', 'warning'); return; }
+  if (!isValidEmail(email)) { toast('E-mail inválido', 'warning'); return; }
   await api(`/api/companies/${currentCompanyId}/contacts`, 'POST', {
     name,
     role: document.getElementById('new-ct-role').value,
@@ -1260,22 +2582,138 @@ function renderSentimentHistory(sents) {
     : '<p class="text-muted small mb-0">Nenhuma resposta registrada.</p>';
 }
 
+// ── Guard contra duplo-clique / requisições paralelas ────────────────────────
+const _processing = {};
+function _guard(key) {
+  if (_processing[key]) { toast('Aguarde, operação em andamento...', 'warning'); return false; }
+  _processing[key] = true;
+  return true;
+}
+function _unguard(key) { delete _processing[key]; }
+
 // ── Company actions ───────────────────────────────────────────────────────────
+// Dor selecionada no modal de empresa
+let currentSelectedPainPoint = '';
+
 async function runResearch() {
+  if (!_guard('research')) return;
   const btn = document.getElementById('btn-research');
   const product = document.getElementById('modal-product').value.trim() || 'solução de automação de vendas com IA';
   setLoading(btn, true);
-  document.getElementById('research-hook').textContent = 'Pesquisando...';
+
+  // Progresso animado
+  const hookEl = document.getElementById('research-hook');
+  const steps = ['🔍 Buscando informações da empresa...', '🧠 Analisando perfil do lead...', '✍️ Gerando gancho personalizado...'];
+  let stepIdx = 0;
+  hookEl.textContent = steps[0];
+  hookEl.style.color = '#888';
+  const progressInterval = setInterval(() => {
+    stepIdx = (stepIdx + 1) % steps.length;
+    hookEl.textContent = steps[stepIdx];
+  }, 2500);
+
+  // Limpar seleção anterior de dor
+  currentSelectedPainPoint = '';
+  document.getElementById('pain-points-section').classList.add('d-none');
+  document.getElementById('pain-selected-indicator').classList.add('d-none');
   try {
     const data = await api(`/api/companies/${currentCompanyId}/research`, 'POST', {product_value: product});
-    document.getElementById('research-hook').textContent = data.hook;
+    clearInterval(progressInterval);
+    hookEl.style.color = '';
+
+    if (data.hook && data.hook.startsWith('[ERRO')) {
+      hookEl.textContent = '❌ Erro ao pesquisar. Tente novamente.';
+      hookEl.style.color = '#dc3545';
+      toast('Erro na pesquisa com IA. Verifique sua API key.', 'danger');
+      return;
+    }
+
+    hookEl.textContent = data.hook;
     document.getElementById('research-context').classList.remove('d-none');
     try { document.getElementById('research-context-text').textContent = JSON.stringify(JSON.parse(data.context), null, 2); }
     catch { document.getElementById('research-context-text').textContent = data.context; }
-    toast('Pesquisa concluída!');
+    // Renderizar dores se disponíveis
+    if (data.pain_points && data.pain_points.length > 0) {
+      renderPainPoints(data.pain_points);
+    }
+    // Mostrar seção de histórico
+    document.getElementById('research-history-section').classList.remove('d-none');
+    toast('✅ Pesquisa concluída!');
+  } catch(e) {
+    clearInterval(progressInterval);
+    hookEl.textContent = 'Clique em "Pesquisar" para gerar o gancho personalizado...';
+    hookEl.style.color = '';
   } finally {
     setLoading(btn, false);
+    _unguard('research');
   }
+}
+
+function renderPainPoints(painPoints) {
+  const section = document.getElementById('pain-points-section');
+  const list = document.getElementById('pain-points-list');
+  list.innerHTML = '';
+  painPoints.forEach((pain, idx) => {
+    const card = document.createElement('div');
+    card.className = 'pain-point-card d-flex align-items-start gap-2 p-2 rounded border cursor-pointer';
+    card.style.cssText = 'cursor:pointer; transition: all 0.15s ease;';
+    card.dataset.pain = pain;
+    card.id = `pain-card-${idx}`;
+    card.innerHTML = `
+      <div class="flex-shrink-0 mt-1">
+        <div class="form-check mb-0">
+          <input class="form-check-input" type="radio" name="pain-radio" id="pain-radio-${idx}" value="${esc(pain)}" onchange="selectPainPoint(${idx}, '${esc(pain).replace(/'/g, "\\'")}')">
+        </div>
+      </div>
+      <label for="pain-radio-${idx}" class="small mb-0 lh-sm" style="cursor:pointer">
+        <span class="badge bg-danger bg-opacity-10 text-danger me-1 fw-normal">#${idx+1}</span>${esc(pain)}
+      </label>`;
+    card.addEventListener('click', () => {
+      document.getElementById(`pain-radio-${idx}`).checked = true;
+      selectPainPoint(idx, pain);
+    });
+    list.appendChild(card);
+  });
+  section.classList.remove('d-none');
+}
+
+function selectPainPoint(idx, pain) {
+  currentSelectedPainPoint = pain;
+  // Visual feedback nas cards
+  document.querySelectorAll('#pain-points-list .pain-point-card').forEach((c, i) => {
+    if (i === idx) {
+      c.style.cssText = 'cursor:pointer; background:#e8f5e9; border-color:#4caf50!important; transition: all 0.15s ease;';
+    } else {
+      c.style.cssText = 'cursor:pointer; transition: all 0.15s ease;';
+    }
+  });
+  // Indicador de seleção
+  document.getElementById('pain-selected-text').textContent = `Dor selecionada: ${pain}`;
+  document.getElementById('pain-selected-indicator').classList.remove('d-none');
+  toast(`✅ Dor selecionada — as mensagens serão geradas com foco nessa dor`, 'success');
+}
+
+function selectCustomPain() {
+  const val = document.getElementById('pain-custom-input').value.trim();
+  if (!val) { toast('Digite a dor personalizada', 'warning'); return; }
+  // Deselect radio buttons
+  document.querySelectorAll('input[name="pain-radio"]').forEach(r => r.checked = false);
+  document.querySelectorAll('#pain-points-list .pain-point-card').forEach(c => {
+    c.style.cssText = 'cursor:pointer; transition: all 0.15s ease;';
+  });
+  currentSelectedPainPoint = val;
+  document.getElementById('pain-selected-text').textContent = `Dor personalizada: ${val}`;
+  document.getElementById('pain-selected-indicator').classList.remove('d-none');
+  toast('✅ Dor personalizada definida', 'success');
+}
+
+function clearSelectedPain() {
+  currentSelectedPainPoint = '';
+  document.querySelectorAll('input[name="pain-radio"]').forEach(r => r.checked = false);
+  document.querySelectorAll('#pain-points-list .pain-point-card').forEach(c => {
+    c.style.cssText = 'cursor:pointer; transition: all 0.15s ease;';
+  });
+  document.getElementById('pain-selected-indicator').classList.add('d-none');
 }
 
 function toggleContext() {
@@ -1283,19 +2721,59 @@ function toggleContext() {
 }
 
 async function generateSequence() {
+  if (!_guard('sequence')) return;
   const btn = document.getElementById('btn-sequence');
   const contactId = document.getElementById('modal-contact-select').value;
   if (!contactId) { toast('Selecione um contato primeiro', 'warning'); return; }
   const product = document.getElementById('modal-product').value.trim() || 'solução de automação de vendas com IA';
   setLoading(btn, true);
-  document.getElementById('sequence-container').innerHTML = '<p class="text-muted small">Gerando sequência com IA...</p>';
+
+  // Progresso animado por canal
+  const seqContainer = document.getElementById('sequence-container');
+  const painNote = currentSelectedPainPoint ? `<br><span class="badge bg-danger bg-opacity-10 text-danger small">🎯 Dor: ${esc(currentSelectedPainPoint.substring(0,50))}...</span>` : '';
+  const progressSteps = [
+    '🔗 Gerando mensagem para LinkedIn...',
+    '📧 Gerando e-mail de prospecção...',
+    '💬 Gerando mensagem WhatsApp...',
+    '✨ Finalizando sequência...',
+  ];
+  let pStep = 0;
+  seqContainer.innerHTML = `<div class="text-center py-3">
+    <div class="spinner-border spinner-border-sm text-primary me-2"></div>
+    <span id="seq-progress-text" class="text-muted small">${progressSteps[0]}</span>${painNote}
+    <div class="progress mt-2 mx-4" style="height:4px">
+      <div class="progress-bar progress-bar-striped progress-bar-animated" id="seq-progress-bar" style="width:10%"></div>
+    </div>
+  </div>`;
+  const pInterval = setInterval(() => {
+    pStep = Math.min(pStep + 1, progressSteps.length - 1);
+    const el = document.getElementById('seq-progress-text');
+    const bar = document.getElementById('seq-progress-bar');
+    if (el) el.textContent = progressSteps[pStep];
+    if (bar) bar.style.width = `${10 + pStep * 28}%`;
+  }, 4000);
+
   try {
-    const data = await api(`/api/companies/${currentCompanyId}/sequence`, 'POST', {contact_id: parseInt(contactId), product_value: product});
+    const payload = {contact_id: parseInt(contactId), product_value: product};
+    if (currentSelectedPainPoint) payload.selected_pain_point = currentSelectedPainPoint;
+    const data = await api(`/api/companies/${currentCompanyId}/sequence`, 'POST', payload);
+    clearInterval(pInterval);
+
+    if (data.error) {
+      seqContainer.innerHTML = `<div class="alert alert-danger small">${esc(data.error)}</div>`;
+      return;
+    }
     renderSequence(data.sequence);
-    toast('Sequência gerada!');
+    // Mostrar seção de histórico de sequências
+    document.getElementById('sequence-history-section').classList.remove('d-none');
+    toast(currentSelectedPainPoint ? '✅ Sequência gerada com a dor selecionada!' : '✅ Sequência gerada!');
     loadStats();
+  } catch(e) {
+    clearInterval(pInterval);
+    seqContainer.innerHTML = '<p class="text-muted small mb-0">Selecione um contato e clique em "Gerar" para criar as mensagens personalizadas.</p>';
   } finally {
     setLoading(btn, false);
+    _unguard('sequence');
   }
 }
 
@@ -1348,9 +2826,13 @@ async function recordResponse() {
         <span class="badge bg-${colors[data.sentiment]} mb-1">${labels[data.sentiment]}</span>
         <span class="badge bg-warning text-dark ms-1">${data.interest_score}/10</span>
         <p class="mb-1 small mt-1">${esc(data.reasoning)}</p>
-        ${data.handon_required ? '<div class="alert alert-warning py-1 mb-0 small"><strong>HAND-OFF:</strong> Empresa quente — transição para humano recomendada!</div>' : ''}
-        <p class="text-muted small mb-0">Sequência pausada: sim</p>
+        ${data.handon_required ? '<div class="alert alert-warning py-1 mb-1 small"><strong>HAND-OFF:</strong> Empresa quente — transição para humano recomendada!</div>' : ''}
+        <p class="text-muted small mb-1">Sequência pausada: sim</p>
+        ${data.draft_reply ? `<div class="mt-2"><strong class="small">✍️ Rascunho de resposta sugerida:</strong><div class="msg-box mt-1 small">${esc(data.draft_reply)}</div><button id="btn-use-draft" class="btn btn-sm btn-outline-success mt-1" onclick="queueDraftReply()"><i class="bi bi-inbox me-1"></i>Usar rascunho → Fila de revisão</button></div>` : ''}
       </div>`;
+    if (data.draft_reply) {
+      _pendingDraft = { reply: data.draft_reply, companyId: currentCompanyId, contactId: contactId ? parseInt(contactId) : null };
+    }
     if (data.handon_required) document.getElementById('handon-alert').classList.remove('d-none');
     await refreshCurrentCompany();
   } finally {
@@ -1408,9 +2890,12 @@ const STAGE_LABEL = {
 };
 
 async function loadOpportunities() {
-  const opps = await api('/api/opportunities');
-  const tbody = document.getElementById('opp-tbody');
+  allOpportunities = await api('/api/opportunities');
+  renderOpportunitiesTable(sortArrayBy(allOpportunities, oppSortKey, oppSortAsc));
+}
 
+function renderOpportunitiesTable(opps) {
+  const tbody = document.getElementById('opp-tbody');
   let pipelineTotal = 0;
   tbody.innerHTML = opps.map(o => {
     if (o.stage !== 'lost') pipelineTotal += (o.value || 0);
@@ -1426,6 +2911,7 @@ async function loadOpportunities() {
             ).join('')}
           </ul>
         </div>
+        ${o.stage === 'lost' && o.lost_reason ? `<div class="small text-muted mt-1">${esc(LOST_REASON_LABEL[o.lost_reason] || o.lost_reason)}${o.lost_competitor ? ` · vs. ${esc(o.lost_competitor)}` : ''}</div>` : ''}
       </td>
       <td>${formatCurrency(o.value||0)}</td>
       <td class="small text-muted">${(o.created_at||'').substring(0,10)}</td>
@@ -1434,15 +2920,16 @@ async function loadOpportunities() {
       </td>
     </tr>`;
   }).join('') || '<tr><td colspan="6" class="text-muted text-center">Nenhuma oportunidade.</td></tr>';
-
   document.getElementById('opp-pipeline-total').textContent = formatCurrency(pipelineTotal);
 }
 
 async function createOpportunity() {
   const company_id = document.getElementById('opp-company').value;
   const name = document.getElementById('opp-name').value.trim();
+  const valueRaw = document.getElementById('opp-value').value;
   if (!company_id) { toast('Selecione uma empresa', 'warning'); return; }
   if (!name) { toast('Nome da oportunidade é obrigatório', 'warning'); return; }
+  if (valueRaw !== '' && parseFloat(valueRaw) < 0) { toast('Valor não pode ser negativo', 'warning'); return; }
   await api('/api/opportunities', 'POST', {
     company_id: parseInt(company_id),
     name,
@@ -1456,10 +2943,46 @@ async function createOpportunity() {
   loadOpportunities(); loadStats();
 }
 
+const LOST_REASON_LABEL = {
+  preco:            'Preço alto',
+  concorrente:      'Escolheu concorrente',
+  sem_budget:       'Sem orçamento',
+  timing:           'Timing ruim',
+  sem_decisor:      'Sem acesso ao decisor',
+  sem_necessidade:  'Sem necessidade',
+  projeto_cancelado:'Projeto cancelado',
+  outro:            'Outro',
+};
+
+let pendingLostOppId = null;
+const lostReasonModal = new bootstrap.Modal(document.getElementById('lostReasonModal'));
+
 async function updateOppStage(id, stage, event) {
   if (event) event.preventDefault();
+  if (stage === 'lost') {
+    pendingLostOppId = id;
+    document.getElementById('lost-reason').value = '';
+    document.getElementById('lost-competitor').value = '';
+    document.getElementById('lost-notes').value = '';
+    lostReasonModal.show();
+    return;
+  }
   await api(`/api/opportunities/${id}`, 'PATCH', { stage });
   toast('Estágio atualizado!');
+  loadOpportunities(); loadStats();
+}
+
+async function confirmLostReason() {
+  if (!pendingLostOppId) return;
+  await api(`/api/opportunities/${pendingLostOppId}`, 'PATCH', {
+    stage:           'lost',
+    lost_reason:     document.getElementById('lost-reason').value,
+    lost_competitor: document.getElementById('lost-competitor').value.trim(),
+    lost_notes:      document.getElementById('lost-notes').value.trim(),
+  });
+  lostReasonModal.hide();
+  pendingLostOppId = null;
+  toast('Oportunidade marcada como perdida', 'warning');
   loadOpportunities(); loadStats();
 }
 
@@ -1584,12 +3107,72 @@ async function saveRLHFCorrection(id) {
   loadRLHF();
 }
 
+async function loadLearnStats() {
+  const s = await api('/api/learn/stats');
+  if (!s) return;
+  document.getElementById('learn-avg-score').textContent = s.avg_score || '—';
+  const totalExamples = (s.approved_examples || []).reduce((sum, e) => sum + e.total, 0);
+  document.getElementById('learn-examples').textContent = totalExamples || 0;
+  document.getElementById('learn-corrections').textContent = s.corrections_pending_analysis || 0;
+  document.getElementById('learn-patterns-count').textContent = (s.learned_patterns || []).length;
+  const patternsEl = document.getElementById('learn-patterns-list');
+  const bodyEl = document.getElementById('learn-patterns-body');
+  if (s.learned_patterns && s.learned_patterns.length > 0) {
+    const chIcon = {linkedin:"<i class="bi bi-linkedin"></i>", email:"<i class="bi bi-envelope"></i>", whatsapp:"<i class="bi bi-whatsapp"></i>"};
+    const roleLabel = {c_level:"C-Level", manager:"Gerente", engineer:"Engenheiro", other:"Outro"};
+    bodyEl.innerHTML = s.learned_patterns.map(p =>
+      "<div class="d-flex align-items-start gap-2 mb-2 small">" +
+      "<span class="badge bg-light text-dark border">" + (chIcon[p.channel]||p.channel) + "</span>" +
+      "<span class="badge bg-light text-dark border">" + (roleLabel[p.role]||p.role) + "</span>" +
+      "<span class="text-muted flex-grow-1">" + esc(p.pattern) + "</span>" +
+      "<span class="text-muted" style="font-size:.7rem">" + Math.round(p.confidence*100) + "%</span>" +
+      "</div>"
+    ).join("");
+    patternsEl.classList.remove("d-none");
+  } else {
+    patternsEl.classList.add("d-none");
+  }
+  const btn = document.getElementById("btn-analyze");
+  if (s.ready_to_analyze) {
+    btn.className = btn.className.replace("btn-primary","btn-success");
+    btn.innerHTML = "<i class="bi bi-lightbulb-fill me-1"></i>Analisar Padroes (" + s.corrections_pending_analysis + ")";
+  } else {
+    btn.className = btn.className.replace("btn-success","btn-primary");
+    btn.innerHTML = "<i class="bi bi-lightbulb me-1"></i>Analisar Padroes";
+  }
+}
+
+async function triggerAnalysis() {
+  const btn = document.getElementById("btn-analyze");
+  btn.disabled = true;
+  btn.innerHTML = "<span class="spinner-border spinner-border-sm me-1"></span>Analisando...";
+  try {
+    const res = await api("/api/learn/analyze", "POST", {});
+    if (res.ok) {
+      const total = (res.analyzed || []).reduce((sum, r) => sum + r.rules_extracted, 0);
+      toast(total + " regras de estilo aprendidas!");
+    } else {
+      toast(res.message || "Sem correcoes suficientes ainda. Continue avaliando!");
+    }
+  } catch(e) {
+    toast("Erro na analise");
+  } finally {
+    btn.disabled = false;
+    await loadLearnStats();
+  }
+}
+
+// ── Aprendizado: carrega ao abrir aba
 // ── RAG ─────────────────────────────────────────────────────────────────────
 async function loadDocs() {
   const docs = await api('/api/documents');
   document.getElementById('doc-list').innerHTML = docs.length
     ? docs.map(d => `<div class="d-flex justify-content-between align-items-center mb-1 small"><span><i class="bi bi-file-earmark-text me-1"></i>${esc(d.name)} <span class="text-muted">(${Math.round(d.size/1000)}kb)</span></span><button class="btn btn-link text-danger btn-sm p-0" onclick="delDoc(${d.id})"><i class="bi bi-trash"></i></button></div>`).join('')
-    : '<p class="text-muted small mb-0">Nenhum documento.</p>';
+    : `<div class="text-center py-3">
+        <div style="font-size:2rem">📄</div>
+        <p class="fw-semibold small mt-1 mb-1">Nenhum documento cadastrado</p>
+        <p class="text-muted small mb-0">Adicione materiais do produto (especificações, cases, proposta de valor).<br>Eles serão usados automaticamente para personalizar as mensagens geradas.</p>
+      </div>`;
 }
 
 async function addDoc() {
@@ -1639,8 +3222,7 @@ document.querySelectorAll('#gc-score-btns .score-btn').forEach(btn => {
 
 async function loadGoldenCases() {
   const cases = await api('/api/golden-cases');
-  document.getElementById('golden-list').innerHTML = cases.length
-    ? cases.map(c => `
+  document.getElementById('golden-list').innerHTML = cases.length ? cases.map(c => `
         <div class="border rounded p-2 mb-2">
           <div class="d-flex justify-content-between">
             <strong>${esc(c.title)}</strong>
@@ -1652,7 +3234,11 @@ async function loadGoldenCases() {
           ${c.context ? `<div class="text-muted small">${esc(c.context)}</div>` : ''}
           <div class="msg-box mt-1 small">${esc(c.content)}</div>
         </div>`).join('')
-    : '<p class="text-muted">Nenhum caso cadastrado.</p>';
+    : `<div class="text-center py-4">
+        <div style="font-size:2.5rem">🏆</div>
+        <h6 class="fw-semibold mt-2">Nenhum caso de sucesso cadastrado</h6>
+        <p class="text-muted small">Adicione exemplos reais de mensagens que geraram resposta positiva.<br>Eles serão usados como referência nas próximas gerações de mensagens.</p>
+      </div>`;
 }
 
 async function addGoldenCase() {
@@ -1772,6 +3358,302 @@ fetch('/api/me').then(r => r.json()).then(d => {
 }).catch(() => {
   window.location.href = '/login';
 });
+
+// ════════════════════════════════════════════════════════════
+// FEATURE 7 — Metricas Dashboard
+// ════════════════════════════════════════════════════════════
+let chartChannel = null, chartRole = null, chartFunnel = null;
+
+async function loadMetrics() {
+  const [overview, timing] = await Promise.all([
+    api('/api/metrics/overview').catch(() => null),
+    api('/api/metrics/timing').catch(() => null),
+  ]);
+  if (!overview) return;
+
+  // Empty state global se não houver nenhum dado de mensagens enviadas
+  const totalSent = (overview.by_channel || []).reduce((sum, r) => sum + (r.sent || 0), 0);
+  const metricsEmpty = document.getElementById('metrics-empty-state');
+  if (metricsEmpty) {
+    metricsEmpty.classList.toggle('d-none', totalSent > 0);
+  }
+
+  const channelEl = document.getElementById('chart-channel');
+  const labels = (overview.by_channel || []).map(r => r.channel || 'N/A');
+  const rates  = (overview.by_channel || []).map(r => r.response_rate || 0);
+  const sent   = (overview.by_channel || []).map(r => r.sent || 0);
+  const emptyEl = document.getElementById('chart-channel-empty');
+  if (labels.length === 0) {
+    if (emptyEl) emptyEl.classList.remove('d-none');
+  } else {
+    if (emptyEl) emptyEl.classList.add('d-none');
+    if (chartChannel) chartChannel.destroy();
+    chartChannel = new Chart(channelEl, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Taxa de Resposta (%)', data: rates, backgroundColor: ['#0077b5','#ea4335','#25d366'], yAxisID: 'y' },
+          { label: 'Msgs Enviadas', data: sent, backgroundColor: '#e9ecef', yAxisID: 'y2', type: 'line', borderColor: '#6c757d', fill: false }
+        ]
+      },
+      options: { responsive: true, plugins: { legend: { position: 'bottom' } },
+        scales: { y: { beginAtZero: true, max: 100, title: { display: true, text: '%' } },
+                  y2: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false } } } }
+    });
+  }
+
+  const roleEl = document.getElementById('chart-role');
+  const roleMap = { c_level:'C-Level', manager:'Gerente', engineer:'Engenheiro', other:'Outro' };
+  const roleLabs = (overview.by_role || []).map(r => roleMap[r.role] || r.role);
+  const roleTots = (overview.by_role || []).map(r => r.total || 0);
+  if (chartRole) chartRole.destroy();
+  chartRole = new Chart(roleEl, {
+    type: 'doughnut',
+    data: { labels: roleLabs, datasets: [{ data: roleTots, backgroundColor: ['#7c6af7','#0dcaf0','#198754','#ffc107'] }] },
+    options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+  });
+
+  const STATUS_L = { new:'Novo', researched:'Pesquisado', sequence_created:'Sequencia criada',
+    contacted:'Contactado', needs_followup:'Follow-up', hot_lead:'Hot Lead',
+    rejected:'Rejeitado', meeting_set:'Reuniao', opted_out:'Opt-out' };
+  const funnelEl = document.getElementById('chart-funnel');
+  const fLabels = (overview.funnel || []).map(r => STATUS_L[r.status] || r.status);
+  const fData   = (overview.funnel || []).map(r => r.total || 0);
+  if (chartFunnel) chartFunnel.destroy();
+  chartFunnel = new Chart(funnelEl, {
+    type: 'bar',
+    data: { labels: fLabels, datasets: [{ label: 'Leads', data: fData, backgroundColor: '#7c6af7' }] },
+    options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true } } }
+  });
+
+  const ab = overview.ab_stats || {};
+  const abEl = document.getElementById('ab-stats-panel');
+  if (ab.decided > 0) {
+    const bRate = ((ab.b_won / ab.decided) * 100).toFixed(0);
+    abEl.innerHTML =
+      '<div class="text-center mb-2"><div class="display-6 fw-bold" style="color:#7c6af7">' + bRate + '%</div>' +
+      '<div class="text-muted small">variante B venceu</div></div>' +
+      '<div class="small"><div class="d-flex justify-content-between"><span>Testes realizados</span><strong>' + ab.decided + '</strong></div>' +
+      '<div class="d-flex justify-content-between"><span>Variante B venceu</span><strong>' + ab.b_won + '</strong></div></div>';
+  } else {
+    abEl.innerHTML = '<p class="text-muted small">Nenhum teste A/B concluido ainda.</p>';
+  }
+
+  renderTimingHeatmap(timing || []);
+  loadFollowupPending();
+}
+
+function renderTimingHeatmap(rows) {
+  var el = document.getElementById('timing-heatmap');
+  if (!rows || !rows.length) { el.innerHTML = '<p class="text-muted small">Envie mensagens para gerar dados de timing.</p>'; return; }
+  var byChannel = {};
+  rows.forEach(function(r) {
+    if (!byChannel[r.channel]) byChannel[r.channel] = {};
+    byChannel[r.channel][r.day_of_week + '_' + r.hour_of_day] = r.response_rate || 0;
+  });
+  var days = ['Seg','Ter','Qua','Qui','Sex','Sab','Dom'];
+  var html = '';
+  Object.keys(byChannel).forEach(function(ch) {
+    var data = byChannel[ch];
+    var vals = Object.values(data);
+    var maxRate = vals.length ? Math.max.apply(null, vals) : 1;
+    if (!maxRate) maxRate = 1;
+    html += '<div class="mb-3"><strong class="small">' + ch.toUpperCase() + '</strong><div style="overflow-x:auto"><table class="table table-bordered table-sm" style="font-size:.7rem;min-width:600px"><thead><tr><th style="width:40px">Dia</th>';
+    for (var h = 8; h <= 20; h++) html += '<th class="text-center">' + h + 'h</th>';
+    html += '</tr></thead><tbody>';
+    for (var di = 0; di < 7; di++) {
+      html += '<tr><td><strong>' + days[di] + '</strong></td>';
+      for (var hr = 8; hr <= 20; hr++) {
+        var rate = data[di + '_' + hr] || 0;
+        var alpha = rate > 0 ? Math.max(0.15, rate / maxRate) : 0;
+        var bg = rate > 0 ? 'rgba(124,106,247,' + alpha.toFixed(2) + ')' : '#f8f9fa';
+        var tc = rate > 50 ? '#fff' : 'inherit';
+        var lab = rate > 0 ? rate.toFixed(0) + '%' : '-';
+        html += '<td class="text-center" style="background:' + bg + ';color:' + tc + '">' + lab + '</td>';
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table></div></div>';
+  });
+  el.innerHTML = html || '<p class="text-muted small">Dados insuficientes.</p>';
+}
+
+// ════════════════════════════════════════════════════════════
+// FEATURE 6 — Follow-up Automatico
+// ════════════════════════════════════════════════════════════
+async function loadFollowupPending() {
+  var daysEl = document.getElementById('followup-days');
+  var days = daysEl ? daysEl.value : 5;
+  var el = document.getElementById('followup-list');
+  if (!el) return;
+  el.innerHTML = '<p class="text-muted small">Carregando...</p>';
+  var rows = await api('/api/followup/pending?days=' + days).catch(function() { return []; });
+  if (!rows.length) {
+    el.innerHTML = '<p class="text-muted small"><i class="bi bi-check-circle text-success me-1"></i>Nenhum follow-up pendente.</p>';
+    return;
+  }
+  var ROLE = { c_level:'C-Level', manager:'Gerente', engineer:'Engenheiro', other:'Outro' };
+  var html = '<div class="table-responsive"><table class="table table-sm table-hover"><thead class="table-light"><tr><th>Lead</th><th>Empresa</th><th>Setor</th><th>Dias sem resp.</th><th>Canal</th><th>Acao</th></tr></thead><tbody>';
+  rows.forEach(function(r) {
+    html += '<tr>' +
+      '<td>' + esc(r.name) + ' <span class="badge bg-secondary">' + (ROLE[r.role]||r.role) + '</span></td>' +
+      '<td>' + esc(r.company||'') + '</td><td>' + esc(r.sector||'') + '</td>' +
+      '<td><span class="badge ' + (r.days_since >= 7 ? 'bg-danger' : 'bg-warning text-dark') + '">' + r.days_since + ' dias</span></td>' +
+      '<td><select class="form-select form-select-sm" id="fu-channel-' + r.id + '" style="width:110px">' +
+        '<option value="email">Email</option><option value="linkedin">LinkedIn</option><option value="whatsapp">WhatsApp</option>' +
+      '</select></td>' +
+      '<td><button class="btn btn-warning btn-sm" onclick="genFollowup(' + r.id + ', this)"><i class="bi bi-send me-1"></i>Gerar</button></td></tr>';
+  });
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
+}
+
+async function genFollowup(lid, btn) {
+  var chEl = document.getElementById('fu-channel-' + lid);
+  var ch = chEl ? chEl.value : 'email';
+  setLoading(btn, true);
+  var res = await api('/api/followup/' + lid + '/generate', 'POST', { channel: ch }).catch(function() { return null; });
+  setLoading(btn, false);
+  if (res) { toast('Follow-up gerado! Verifique na aba RLHF.', 'success'); loadFollowupPending(); }
+}
+
+// ════════════════════════════════════════════════════════════
+// FEATURE 1 — A/B Testing
+// ════════════════════════════════════════════════════════════
+async function generateABVariants() {
+  if (!currentCompanyId) return;
+  var btn = document.getElementById('btn-ab-variants');
+  setLoading(btn, true);
+  var res = await api('/api/leads/' + currentCompanyId + '/variants/generate', 'POST', {}).catch(function() { return null; });
+  if (!res && currentCompanyData && currentCompanyData.contacts && currentCompanyData.contacts.length) {
+    res = await api('/api/leads/' + currentCompanyData.contacts[0].id + '/variants/generate', 'POST', {}).catch(function() { return null; });
+  }
+  setLoading(btn, false);
+  if (!res || !res.variants) { toast('Gere a sequencia principal primeiro.', 'warning'); return; }
+  var section = document.getElementById('ab-variants-section');
+  if (section) section.classList.remove('d-none');
+  renderABVariants(res.variants);
+  toast(res.variants.length + ' variantes B geradas!', 'success');
+}
+
+function renderABVariants(variants) {
+  var el = document.getElementById('ab-variants-list');
+  if (!el || !variants.length) return;
+  var COLORS = { linkedin:'0077b5', email:'ea4335', whatsapp:'25d366' };
+  var html = '';
+  variants.forEach(function(v) {
+    var color = COLORS[v.channel] || '6c757d';
+    html += '<div class="border rounded p-2 mb-3">' +
+      '<div class="d-flex justify-content-between align-items-center mb-2">' +
+        '<span class="badge" style="background:#' + color + '">' + (v.channel||'').toUpperCase() + '</span>' +
+        '<small class="text-muted">Escolha a melhor variante para este lead</small>' +
+      '</div>' +
+      '<div class="row g-2">' +
+        '<div class="col-6">' +
+          '<div class="small fw-bold text-muted mb-1">Variante A (original)</div>' +
+          '<div class="msg-box" style="font-size:.78rem;max-height:120px;overflow-y:auto">' + esc(v.variant_a||'') + '</div>' +
+          '<button class="btn btn-outline-primary btn-sm w-100 mt-1" onclick="setABWinner(' + v.id + ','a')"><i class="bi bi-check-circle me-1"></i>Usar A</button>' +
+        '</div>' +
+        '<div class="col-6">' +
+          '<div class="small fw-bold text-muted mb-1">Variante B (alternativa)</div>' +
+          '<div class="msg-box" style="font-size:.78rem;max-height:120px;overflow-y:auto">' + esc(v.variant_b||'') + '</div>' +
+          '<button class="btn btn-primary btn-sm w-100 mt-1" onclick="setABWinner(' + v.id + ','b')"><i class="bi bi-stars me-1"></i>Usar B</button>' +
+        '</div>' +
+      '</div></div>';
+  });
+  el.innerHTML = html;
+}
+
+async function setABWinner(vid, winner) {
+  await api('/api/ab-variants/' + vid + '/winner', 'POST', { winner: winner });
+  toast('Variante ' + winner.toUpperCase() + ' selecionada!', 'success');
+}
+
+// ════════════════════════════════════════════════════════════
+// FEATURE 4 — CRM Export
+// ════════════════════════════════════════════════════════════
+function exportCRM(format) {
+  window.open('/api/crm/export?format=' + format, '_blank');
+  toast('Exportando CSV formato ' + format + '...');
+}
+
+// ════════════════════════════════════════════════════════════
+// FEATURE 3 — Timeline / Historico
+// ════════════════════════════════════════════════════════════
+async function loadInteractionsForCompany(companyId) {
+  var el = document.getElementById('company-timeline');
+  if (!el) return;
+  var rows = await api('/api/companies/' + companyId + '/timeline').catch(function() { return []; });
+  if (!rows.length) { el.innerHTML = '<p class="text-muted small">Nenhuma interacao registrada.</p>'; return; }
+  var ICONS = {
+    sent:      { icon: 'send',          color: '#0077b5' },
+    response:  { icon: 'chat-dots',     color: '#198754' },
+    followup:  { icon: 'reply',         color: '#ffc107' },
+    meeting:   { icon: 'calendar-check',color: '#7c6af7' },
+    ab_winner: { icon: 'shuffle',       color: '#0dcaf0' },
+    note:      { icon: 'journal-text',  color: '#6c757d' },
+  };
+  var html = '';
+  rows.forEach(function(r) {
+    var ic = ICONS[r.interaction_type] || ICONS.note;
+    var typeLabel = (r.interaction_type||'').replace(/_/g,' ').toUpperCase();
+    var chLabel = r.channel ? ' &middot; ' + r.channel.toUpperCase() : '';
+    var ts = (r.created_at||'').replace('T',' ').substring(0,16);
+    html += '<div class="timeline-item">' +
+      '<div class="timeline-icon" style="background:' + ic.color + '20">' +
+        '<i class="bi bi-' + ic.icon + '" style="color:' + ic.color + '"></i>' +
+      '</div>' +
+      '<div style="flex:1">' +
+        '<div class="small fw-bold">' + typeLabel + chLabel + '</div>' +
+        '<div class="small text-muted">' + esc(r.notes||'') + '</div>' +
+        '<div style="font-size:.72rem;color:#adb5bd">' + ts + '</div>' +
+      '</div></div>';
+  });
+  el.innerHTML = html;
+}
+
 </script>
+
+<!-- ═══ Modal: Motivo de Perda ══════════════════════════════════════════════ -->
+<div class="modal fade" id="lostReasonModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title fw-bold"><i class="bi bi-flag me-1 text-danger"></i>Motivo da Perda</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-2">
+          <label class="form-label small fw-bold mb-1">Motivo principal</label>
+          <select class="form-select form-select-sm" id="lost-reason">
+            <option value="">Selecione (opcional)...</option>
+            <option value="preco">Preço alto</option>
+            <option value="concorrente">Escolheu concorrente</option>
+            <option value="sem_budget">Sem orçamento</option>
+            <option value="timing">Timing ruim</option>
+            <option value="sem_decisor">Sem acesso ao decisor</option>
+            <option value="sem_necessidade">Sem necessidade identificada</option>
+            <option value="projeto_cancelado">Projeto cancelado</option>
+            <option value="outro">Outro</option>
+          </select>
+        </div>
+        <div class="mb-2">
+          <label class="form-label small fw-bold mb-1">Concorrente escolhido</label>
+          <input class="form-control form-control-sm" id="lost-competitor" placeholder="Ex: Salesforce, HubSpot...">
+        </div>
+        <div class="mb-1">
+          <label class="form-label small fw-bold mb-1">Observações</label>
+          <textarea class="form-control form-control-sm" id="lost-notes" rows="2" placeholder="Detalhes adicionais..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
+        <button type="button" class="btn btn-danger btn-sm" onclick="confirmLostReason()"><i class="bi bi-check2 me-1"></i>Confirmar Perda</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
