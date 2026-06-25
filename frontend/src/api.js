@@ -15,7 +15,13 @@ export async function api(path, method = 'GET', body = null) {
     throw new Error('Unauthorized')
   }
 
-  const data = await res.json().catch(() => ({}))
+  let data
+  try {
+    data = await res.json()
+  } catch (err) {
+    if (!res.ok) throw new Error(`Erro ${res.status}`)
+    throw new Error('Resposta inválida do servidor (esperava JSON)')
+  }
 
   if (!res.ok) {
     const err = new Error(data.error || `Erro ${res.status}`)

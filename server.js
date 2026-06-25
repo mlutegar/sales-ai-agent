@@ -1517,6 +1517,49 @@ function checkApis() {
 initDb();
 checkApis();
 
+// ── Métricas (Feature 7) ───────────────────────────────────────────────────────
+app.get('/api/metrics/overview', (req, res) => {
+  const db = getDb();
+  const by_channel = db.prepare("SELECT channel, COUNT(*) as total, SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) as sent, ROUND(AVG(CASE WHEN score IS NOT NULL THEN score * 20 ELSE 0 END), 0) as response_rate FROM messages GROUP BY channel").all();
+  const by_role = db.prepare("SELECT role, COUNT(*) as total FROM contacts GROUP BY role").all();
+  const funnel = db.prepare("SELECT status, COUNT(*) as total FROM companies GROUP BY status").all();
+  db.close();
+  res.json({ by_channel, by_role, funnel, ab_stats: { decided: 0, b_won: 0 } });
+});
+
+app.get('/api/metrics/timing', (req, res) => {
+  res.json([]);
+});
+
+// ── Follow-up (Feature 6) ─────────────────────────────────────────────────────
+app.get('/api/followup/pending', (req, res) => {
+  const days = parseInt(req.query.days || 5);
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT ct.id, ct.name, ct.role, c.name as company, c.sector, 
+      CAST(julianday('now') - julianday(c.created_at) AS INTEGER) as days_since
+    FROM contacts ct
+    JOIN companies c ON c.id = ct.company_id
+    WHERE c.status NOT IN ('hot_lead', 'meeting_set', 'opted_out', 'rejected')
+      AND CAST(julianday('now') - julianday(c.created_at) AS INTEGER) >= ?
+    ORDER BY days_since DESC LIMIT 50
+  `).all(days);
+  db.close();
+  res.json(rows);
+});
+
+app.post('/api/followup/:id/generate', (req, res) => {
+  const channel = req.body.channel || 'email';
+  const db = getDb();
+  const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(req.params.id);
+  if(!contact) { db.close(); return res.status(404).json({error: 'Not found'}); }
+  const content = `Follow up automático via ${channel} para ${contact.name}...`;
+  db.prepare("INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved) VALUES (?,?,?,?,?,?,?,'pending',0)")
+    .run(contact.id, contact.company_id, channel, 5, 'follow_up', content, content);
+  db.close();
+  res.json({ ok: true });
+});
+
 // Catch-all route to serve React frontend for non-API requests
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
