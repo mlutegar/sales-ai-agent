@@ -63,6 +63,7 @@
 <!-- Tabs -->
 <ul class="nav nav-tabs mb-3" id="mainTabs">
   <li class="nav-item"><a class="nav-link active" href="#" data-tab="companies"><i class="bi bi-building me-1"></i>Empresas</a></li>
+  <li class="nav-item"><a class="nav-link" href="#" data-tab="followup"><i class="bi bi-clock-history me-1"></i>Follow-ups <span id="followup-badge" class="badge bg-danger rounded-pill ms-1" style="display:none;font-size:10px"></span></a></li>
   <li class="nav-item"><a class="nav-link" href="#" data-tab="opportunities"><i class="bi bi-funnel me-1"></i>Oportunidades</a></li>
   <li class="nav-item"><a class="nav-link" href="#" data-tab="dashboard"><i class="bi bi-bar-chart-line me-1"></i>Dashboard</a></li>
   <li class="nav-item"><a class="nav-link" href="#" data-tab="rlhf"><i class="bi bi-stars me-1"></i>RLHF / Curadoria</a></li>
@@ -565,6 +566,28 @@
     <div id="followup-list"><p class="text-muted small">Carregando...</p></div>
   </div>
 </div>
+
+<!-- ═══ TAB: FOLLOW-UPS ══════════════════════════════════════════════════════ -->
+<div id="tab-followup" class="d-none">
+  <div class="card p-3">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h6 class="fw-bold mb-0"><i class="bi bi-clock-history me-1 text-warning"></i>Follow-ups Pendentes</h6>
+      <div class="d-flex gap-2 align-items-center">
+        <select class="form-select form-select-sm" id="followup-days-filter" style="width:180px" onchange="loadFollowupAlerts()">
+          <option value="3">3+ dias sem contato</option>
+          <option value="7" selected>7+ dias sem contato</option>
+          <option value="14">14+ dias sem contato</option>
+          <option value="30">30+ dias sem contato</option>
+        </select>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadFollowupAlerts()"><i class="bi bi-arrow-clockwise"></i></button>
+      </div>
+    </div>
+    <div id="followup-list-tab" class="d-flex flex-column gap-0">
+      <p class="text-muted small">Carregando...</p>
+    </div>
+  </div>
+</div>
+
 </div><!-- /container -->
 
 <!-- ═══ BULK DIRECT MESSAGE MODAL ═══════════════════════════════════════════ -->
@@ -830,8 +853,9 @@
             <div class="card mb-3">
               <div class="card-header d-flex align-items-center justify-content-between">
                 <span class="fw-bold"><i class="bi bi-people me-1"></i>Contatos</span>
-                <div class="d-flex gap-2">
-                  <button class="btn btn-outline-secondary btn-sm" onclick="findNewContactsForCompany()" title="Buscar novo contato na internet"><i class="bi bi-search me-1"></i>Buscar Contato</button>
+                <div class="d-flex gap-1 flex-wrap">
+                  <button class="btn btn-outline-secondary btn-sm" onclick="openFindContactsModal()" title="Buscar novo contato na internet"><i class="bi bi-search me-1"></i>Buscar</button>
+                  <button class="btn btn-outline-success btn-sm" onclick="window.open('/api/companies/'+currentCompanyId+'/contacts/export')" title="Exportar contatos CSV"><i class="bi bi-download me-1"></i>CSV</button>
                   <button class="btn btn-outline-primary btn-sm" onclick="toggleAddContactForm()"><i class="bi bi-person-plus me-1"></i>Adicionar</button>
                 </div>
               </div>
@@ -970,6 +994,7 @@ document.querySelectorAll('[data-tab]').forEach(a => {
     if (a.dataset.tab === 'companies')     loadCompanies();
     if (a.dataset.tab === 'opportunities') loadOpportunities();
     if (a.dataset.tab === 'dashboard')     loadDashboard();
+    if (a.dataset.tab === 'followup')      loadFollowupAlerts();
   });
 });
 
@@ -1321,7 +1346,10 @@ function renderCompaniesPage(filtered) {
           <i class="bi bi-chevron-right" id="expand-icon-${c.id}"></i>
         </button>
       </td>
-      <td><strong>${esc(c.name)}</strong>${isHot ? ' <span title="Lead quente!">🔥</span>' : ''}</td>
+      <td>
+        <strong>${esc(c.name)}</strong>${isHot ? ' <span title="Lead quente!">🔥</span>' : ''}
+        ${c.import_source ? `<div><span class="badge bg-light text-secondary border" style="font-size:10px" title="Importado de: ${esc(c.import_source)}"><i class="bi bi-file-earmark-excel me-1 text-success"></i>${esc(c.import_source)}</span></div>` : ''}
+      </td>
       <td>${esc(c.sector) || '—'}</td>
       <td><span class="badge bg-secondary">${c.contact_count || 0}</span></td>
       <td>
@@ -2594,18 +2622,31 @@ function renderContactsPanel(contacts) {
     el.innerHTML = '<p class="text-muted small mb-0">Nenhum contato. Adicione um acima.</p>';
     return;
   }
-  el.innerHTML = contacts.map(ct => `
+  el.innerHTML = contacts.map(ct => {
+    const score = ct.completeness_score ?? 0;
+    const missing = ct.completeness_missing || [];
+    const barColor = score >= 67 ? 'bg-success' : score >= 34 ? 'bg-warning' : 'bg-danger';
+    const missingTip = missing.length ? `Faltam: ${missing.join(', ')}` : 'Perfil completo!';
+    return `
     <div class="contact-card" id="contact-card-${ct.id}" data-contact-id="${ct.id}" data-primary="${ct.is_primary ? 1 : 0}">
       <div class="d-flex justify-content-between align-items-start">
-        <div>
+        <div style="flex:1;min-width:0">
           <strong>${esc(ct.name)}</strong>
           ${ct.is_primary ? '<span class="badge-primary-tag ms-1">Principal</span>' : ''}
+          ${ct.import_source ? `<span class="badge bg-light text-secondary border ms-1" style="font-size:9px" title="Importado de: ${esc(ct.import_source)}"><i class="bi bi-file-earmark-excel me-1 text-success"></i>${esc(ct.import_source)}</span>` : ''}
           <div class="text-muted small">${ROLE_LABEL[ct.role]||ct.role}</div>
+          ${ct.import_notes ? `<div class="text-muted" style="font-size:10px"><i class="bi bi-info-circle me-1"></i>${esc(ct.import_notes)}</div>` : ''}
           ${ct.email ? `<div class="small"><i class="bi bi-envelope me-1"></i><a href="mailto:${esc(ct.email)}">${esc(ct.email)}</a></div>` : ''}
           ${ct.whatsapp ? `<div class="small"><i class="bi bi-whatsapp me-1 text-success"></i>${esc(ct.whatsapp)}</div>` : ''}
           ${ct.linkedin ? `<div class="small"><i class="bi bi-linkedin me-1 text-primary"></i><a href="${esc(ct.linkedin)}" target="_blank">LinkedIn</a></div>` : ''}
+          <div class="mt-1" title="${missingTip}">
+            <div class="progress" style="height:4px;border-radius:2px">
+              <div class="progress-bar ${barColor}" style="width:${score}%"></div>
+            </div>
+            <div class="text-muted" style="font-size:10px">${score}% completo${missing.length ? ' · ' + missingTip : ''}</div>
+          </div>
         </div>
-        <div class="d-flex gap-1">
+        <div class="d-flex gap-1 ms-2 flex-shrink-0">
           ${!ct.is_primary ? `<button class="btn btn-outline-warning btn-sm py-0" title="Tornar principal" onclick="setPrimaryContact(${ct.id})"><i class="bi bi-star"></i></button>` : ''}
           <button class="btn btn-outline-secondary btn-sm py-0" title="Editar" onclick="toggleEditContactForm(${ct.id})"><i class="bi bi-pencil"></i></button>
           <button class="btn btn-outline-danger btn-sm py-0" title="Remover" onclick="removeContactFromModal(${ct.id})"><i class="bi bi-trash"></i></button>
@@ -2629,7 +2670,8 @@ function renderContactsPanel(contacts) {
           <button class="btn btn-link btn-sm" onclick="document.getElementById('edit-contact-form-${ct.id}').classList.add('d-none')">Cancelar</button>
         </div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function toggleEditContactForm(contactId) {
@@ -3284,16 +3326,16 @@ async function loadLearnStats() {
   const patternsEl = document.getElementById('learn-patterns-list');
   const bodyEl = document.getElementById('learn-patterns-body');
   if (s.learned_patterns && s.learned_patterns.length > 0) {
-    const chIcon = {linkedin:"<i class="bi bi-linkedin"></i>", email:"<i class="bi bi-envelope"></i>", whatsapp:"<i class="bi bi-whatsapp"></i>"};
+    const chIcon = {linkedin:'<i class="bi bi-linkedin"></i>', email:'<i class="bi bi-envelope"></i>', whatsapp:'<i class="bi bi-whatsapp"></i>'};
     const roleLabel = {c_level:"C-Level", manager:"Gerente", engineer:"Engenheiro", other:"Outro"};
     bodyEl.innerHTML = s.learned_patterns.map(p =>
-      "<div class="d-flex align-items-start gap-2 mb-2 small">" +
-      "<span class="badge bg-light text-dark border">" + (chIcon[p.channel]||p.channel) + "</span>" +
-      "<span class="badge bg-light text-dark border">" + (roleLabel[p.role]||p.role) + "</span>" +
-      "<span class="text-muted flex-grow-1">" + esc(p.pattern) + "</span>" +
-      "<span class="text-muted" style="font-size:.7rem">" + Math.round(p.confidence*100) + "%</span>" +
-      "</div>"
-    ).join("");
+      '<div class="d-flex align-items-start gap-2 mb-2 small">' +
+      '<span class="badge bg-light text-dark border">' + (chIcon[p.channel]||p.channel) + '</span>' +
+      '<span class="badge bg-light text-dark border">' + (roleLabel[p.role]||p.role) + '</span>' +
+      '<span class="text-muted flex-grow-1">' + esc(p.pattern) + '</span>' +
+      '<span class="text-muted" style="font-size:.7rem">' + Math.round(p.confidence*100) + '%</span>' +
+      '</div>'
+    ).join('');
     patternsEl.classList.remove("d-none");
   } else {
     patternsEl.classList.add("d-none");
@@ -3301,17 +3343,17 @@ async function loadLearnStats() {
   const btn = document.getElementById("btn-analyze");
   if (s.ready_to_analyze) {
     btn.className = btn.className.replace("btn-primary","btn-success");
-    btn.innerHTML = "<i class="bi bi-lightbulb-fill me-1"></i>Analisar Padroes (" + s.corrections_pending_analysis + ")";
+    btn.innerHTML = '<i class="bi bi-lightbulb-fill me-1"></i>Analisar Padrões (' + s.corrections_pending_analysis + ')';
   } else {
     btn.className = btn.className.replace("btn-success","btn-primary");
-    btn.innerHTML = "<i class="bi bi-lightbulb me-1"></i>Analisar Padroes";
+    btn.innerHTML = '<i class="bi bi-lightbulb me-1"></i>Analisar Padrões';
   }
 }
 
 async function triggerAnalysis() {
   const btn = document.getElementById("btn-analyze");
   btn.disabled = true;
-  btn.innerHTML = "<span class="spinner-border spinner-border-sm me-1"></span>Analisando...";
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Analisando...';
   try {
     const res = await api("/api/learn/analyze", "POST", {});
     if (res.ok) {
@@ -3719,12 +3761,12 @@ function renderABVariants(variants) {
         '<div class="col-6">' +
           '<div class="small fw-bold text-muted mb-1">Variante A (original)</div>' +
           '<div class="msg-box" style="font-size:.78rem;max-height:120px;overflow-y:auto">' + esc(v.variant_a||'') + '</div>' +
-          '<button class="btn btn-outline-primary btn-sm w-100 mt-1" onclick="setABWinner(' + v.id + ','a')"><i class="bi bi-check-circle me-1"></i>Usar A</button>' +
+          '<button class="btn btn-outline-primary btn-sm w-100 mt-1" onclick="setABWinner(' + v.id + ',\'a\')"><i class="bi bi-check-circle me-1"></i>Usar A</button>' +
         '</div>' +
         '<div class="col-6">' +
           '<div class="small fw-bold text-muted mb-1">Variante B (alternativa)</div>' +
           '<div class="msg-box" style="font-size:.78rem;max-height:120px;overflow-y:auto">' + esc(v.variant_b||'') + '</div>' +
-          '<button class="btn btn-primary btn-sm w-100 mt-1" onclick="setABWinner(' + v.id + ','b')"><i class="bi bi-stars me-1"></i>Usar B</button>' +
+          '<button class="btn btn-primary btn-sm w-100 mt-1" onclick="setABWinner(' + v.id + ',\'b\')"><i class="bi bi-stars me-1"></i>Usar B</button>' +
         '</div>' +
       '</div></div>';
   });
@@ -3830,24 +3872,43 @@ async function loadInteractionsForCompany(companyId) {
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
+        <!-- Filtro por cargo (Melhoria 3) -->
+        <div class="mb-3 d-flex align-items-center gap-2 flex-wrap">
+          <span class="small fw-bold text-muted">Buscar perfil:</span>
+          <div class="btn-group btn-group-sm" id="fnc-role-filter">
+            <button class="btn btn-outline-secondary active" data-role="">Qualquer</button>
+            <button class="btn btn-outline-secondary" data-role="c_level">C-Level</button>
+            <button class="btn btn-outline-secondary" data-role="manager">Gerente</button>
+            <button class="btn btn-outline-secondary" data-role="engineer">TI/Engenharia</button>
+          </div>
+        </div>
         <!-- Loading -->
-        <div id="fnc-loading" class="text-center py-4">
+        <div id="fnc-loading" class="text-center py-4 d-none">
           <div class="spinner-border text-primary mb-2" role="status"></div>
           <div class="text-muted small">Buscando novos contatos para esta empresa...</div>
         </div>
         <!-- Sugestões -->
         <div id="fnc-suggestions" class="d-none">
-          <p class="text-muted small mb-3"><i class="bi bi-info-circle me-1"></i>Sugestões de contatos para prospecção. Clique em <strong>Adicionar ao CRM</strong> para importar.</p>
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <p class="text-muted small mb-0"><i class="bi bi-info-circle me-1"></i>Clique em <strong>Adicionar</strong> para importar ao CRM.</p>
+            <span id="fnc-source-badge" class="badge bg-secondary small"></span>
+          </div>
           <div id="fnc-cards" class="d-flex flex-column gap-3"></div>
         </div>
         <!-- Erro -->
         <div id="fnc-error" class="d-none alert alert-warning">
           <i class="bi bi-exclamation-triangle me-1"></i>Não foi possível buscar sugestões. Tente novamente.
         </div>
+        <!-- Inicial (antes de buscar) -->
+        <div id="fnc-initial" class="text-center py-4 text-muted small">
+          <i class="bi bi-search fs-3 d-block mb-2 text-primary opacity-50"></i>
+          Selecione o perfil desejado e clique em <strong>Buscar</strong>.
+        </div>
       </div>
       <div class="modal-footer py-2">
         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Fechar</button>
-        <button type="button" class="btn btn-outline-primary btn-sm" onclick="findNewContactsForCompany(true)"><i class="bi bi-arrow-repeat me-1"></i>Buscar Novamente</button>
+        <button type="button" class="btn btn-primary btn-sm" onclick="findNewContactsForCompany()"><i class="bi bi-search me-1"></i>Buscar</button>
+        <button type="button" class="btn btn-outline-primary btn-sm d-none" id="fnc-retry-btn" onclick="findNewContactsForCompany()"><i class="bi bi-arrow-repeat me-1"></i>Buscar Novamente</button>
       </div>
     </div>
   </div>
@@ -3855,33 +3916,53 @@ async function loadInteractionsForCompany(companyId) {
 
 <script>
 // ─── Buscar Novo Contato da Empresa ─────────────────────────────────────────
-async function findNewContactsForCompany(retry = false) {
+// Inicializa filtro de cargo
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('fnc-role-filter')?.addEventListener('click', e => {
+    const btn = e.target.closest('[data-role]');
+    if (!btn) return;
+    document.querySelectorAll('#fnc-role-filter .btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+
+  // Abre modal sem buscar automaticamente
+  document.getElementById('findNewContactsModal')?.addEventListener('show.bs.modal', () => {
+    document.getElementById('fnc-initial').classList.remove('d-none');
+    document.getElementById('fnc-loading').classList.add('d-none');
+    document.getElementById('fnc-suggestions').classList.add('d-none');
+    document.getElementById('fnc-error').classList.add('d-none');
+    document.getElementById('fnc-retry-btn').classList.add('d-none');
+    const title = document.getElementById('fnc-company-name');
+    if (title) title.textContent = document.getElementById('modal-company-title')?.textContent || '';
+  });
+});
+
+async function findNewContactsForCompany() {
   if (!currentCompanyId) return;
 
-  // Abre o modal e mostra loading
-  const modal = new bootstrap.Modal(document.getElementById('findNewContactsModal'));
-  if (!retry) modal.show();
+  // Pega filtro de cargo selecionado
+  const activeRoleBtn = document.querySelector('#fnc-role-filter .btn.active');
+  const preferredRole = activeRoleBtn?.dataset.role || '';
 
+  document.getElementById('fnc-initial').classList.add('d-none');
   document.getElementById('fnc-loading').classList.remove('d-none');
   document.getElementById('fnc-suggestions').classList.add('d-none');
   document.getElementById('fnc-error').classList.add('d-none');
-
-  // Nome da empresa no título
-  const companyNameEl = document.getElementById('fnc-company-name');
-  if (companyNameEl) companyNameEl.textContent = document.getElementById('modal-company-title')?.textContent || '';
+  document.getElementById('fnc-retry-btn').classList.add('d-none');
 
   // Pega contato de referência (primário ou primeiro da lista)
   let refContactId = null;
-  const primaryBtn = document.querySelector('#contacts-list [data-primary="1"]');
-  if (primaryBtn) {
-    refContactId = primaryBtn.dataset.contactId;
-  } else {
-    const firstContact = document.querySelector('#contacts-list [data-contact-id]');
-    if (firstContact) refContactId = firstContact.dataset.contactId;
+  const primaryEl = document.querySelector('#contacts-list [data-primary="1"]');
+  if (primaryEl) refContactId = primaryEl.dataset.contactId;
+  else {
+    const first = document.querySelector('#contacts-list [data-contact-id]');
+    if (first) refContactId = first.dataset.contactId;
   }
 
   try {
-    const body = refContactId ? { reference_contact_id: parseInt(refContactId) } : {};
+    const body = { preferred_role: preferredRole || null };
+    if (refContactId) body.reference_contact_id = parseInt(refContactId);
+
     const res = await fetch(`/api/companies/${currentCompanyId}/find-new-contacts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3890,37 +3971,47 @@ async function findNewContactsForCompany(retry = false) {
     const data = await res.json();
 
     document.getElementById('fnc-loading').classList.add('d-none');
+    document.getElementById('fnc-retry-btn').classList.remove('d-none');
 
     if (!res.ok || !data.suggestions || data.suggestions.length === 0) {
       document.getElementById('fnc-error').classList.remove('d-none');
       return;
     }
 
-    // Armazena sugestões num mapa global para evitar problemas de escape no onclick
+    // Badge de fonte
+    const srcLabels = { apollo: '🔵 Apollo.io', linkedin: '🔗 LinkedIn', claude: '🤖 IA' };
+    const srcBadge = document.getElementById('fnc-source-badge');
+    if (srcBadge) srcBadge.textContent = srcLabels[data.source] || '🤖 IA';
+
+    // Armazena sugestões num mapa global (evita problemas de escape no onclick)
     window._fncSuggestions = {};
     const cards = document.getElementById('fnc-cards');
     cards.innerHTML = '';
     data.suggestions.forEach((s, i) => {
-      // Tenta mapear cargo para role
       const roleLower = (s.role || '').toLowerCase();
       let roleKey = 'other';
-      if (roleLower.includes('ceo') || roleLower.includes('cto') || roleLower.includes('coo') || roleLower.includes('diretor') || roleLower.includes('vp ') || roleLower.includes('chief')) roleKey = 'c_level';
+      if (roleLower.includes('ceo') || roleLower.includes('cto') || roleLower.includes('coo') || roleLower.includes('diretor') || roleLower.includes('vp') || roleLower.includes('chief')) roleKey = 'c_level';
       else if (roleLower.includes('gerente') || roleLower.includes('coordenador') || roleLower.includes('manager') || roleLower.includes('head')) roleKey = 'manager';
       else if (roleLower.includes('engineer') || roleLower.includes('engenheiro') || roleLower.includes('developer') || roleLower.includes('tech') || roleLower.includes('analista')) roleKey = 'engineer';
       window._fncSuggestions[i] = { ...s, _roleKey: roleKey };
 
       cards.innerHTML += `
-        <div class="border rounded p-3 bg-light">
-          <div class="d-flex justify-content-between align-items-start">
-            <div>
+        <div class="border rounded p-3 bg-light" id="fnc-card-${i}">
+          <div class="d-flex justify-content-between align-items-start gap-2">
+            <div style="min-width:0;flex:1">
               <div class="fw-bold">${s.name || '—'}</div>
               <div class="text-muted small">${s.role || '—'}</div>
               ${s.email ? `<div class="small mt-1"><i class="bi bi-envelope me-1 text-secondary"></i>${s.email}</div>` : ''}
-              ${s.linkedin ? `<div class="small"><i class="bi bi-linkedin me-1 text-secondary"></i><a href="${s.linkedin}" target="_blank" class="text-decoration-none">${s.linkedin}</a></div>` : ''}
+              ${s.linkedin ? `<div class="small"><i class="bi bi-linkedin me-1 text-secondary"></i><a href="${s.linkedin}" target="_blank" class="text-decoration-none text-truncate d-inline-block" style="max-width:200px">${s.linkedin}</a></div>` : ''}
             </div>
-            <button class="btn btn-sm btn-success ms-3 flex-shrink-0" onclick="addSuggestedContact(${i}, this)">
-              <i class="bi bi-person-plus me-1"></i>Adicionar ao CRM
-            </button>
+            <div class="d-flex flex-column gap-1 flex-shrink-0">
+              <button class="btn btn-sm btn-success" onclick="addSuggestedContact(${i}, this)">
+                <i class="bi bi-person-plus me-1"></i>Adicionar
+              </button>
+              <button class="btn btn-sm btn-outline-secondary" onclick="dismissSuggestion(${i}, this)">
+                <i class="bi bi-x me-1"></i>Ignorar
+              </button>
+            </div>
           </div>
           ${s.rationale ? `<div class="mt-2 small text-secondary border-top pt-2"><i class="bi bi-lightbulb me-1"></i>${s.rationale}</div>` : ''}
         </div>`;
@@ -3931,6 +4022,7 @@ async function findNewContactsForCompany(retry = false) {
   } catch (err) {
     document.getElementById('fnc-loading').classList.add('d-none');
     document.getElementById('fnc-error').classList.remove('d-none');
+    document.getElementById('fnc-retry-btn').classList.remove('d-none');
     console.error('findNewContactsForCompany error:', err);
   }
 }
@@ -3940,7 +4032,7 @@ async function addSuggestedContact(idx, btn) {
   const s = (window._fncSuggestions || {})[idx];
   if (!s) return;
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Adicionando...';
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>';
 
   try {
     const res = await fetch(`/api/companies/${currentCompanyId}/contacts`, {
@@ -3951,24 +4043,88 @@ async function addSuggestedContact(idx, btn) {
         role: s._roleKey || 'other',
         email: s.email || '',
         linkedin: s.linkedin || '',
-        whatsapp: ''
+        whatsapp: '',
+        suggestion_id: s.suggestion_id || null,
       })
     });
     const data = await res.json();
     if (res.ok && data.id) {
-      btn.innerHTML = '<i class="bi bi-check2 me-1"></i>Adicionado!';
+      btn.innerHTML = '<i class="bi bi-check2"></i> Adicionado!';
       btn.classList.replace('btn-success', 'btn-outline-success');
-      // Atualiza lista de contatos em background
       if (typeof refreshCurrentCompany === 'function') refreshCurrentCompany();
     } else {
-      throw new Error('Erro ao adicionar');
+      throw new Error(data.error || 'Erro ao adicionar');
     }
   } catch (err) {
     btn.disabled = false;
-    btn.innerHTML = '<i class="bi bi-person-plus me-1"></i>Adicionar ao CRM';
-    alert('Erro ao adicionar contato. Tente novamente.');
+    btn.innerHTML = '<i class="bi bi-person-plus me-1"></i>Adicionar';
+    alert('Erro: ' + err.message);
   }
 }
+
+async function dismissSuggestion(idx, btn) {
+  const s = (window._fncSuggestions || {})[idx];
+  if (!s || !s.suggestion_id) {
+    document.getElementById(`fnc-card-${idx}`)?.remove();
+    return;
+  }
+  try {
+    await fetch(`/api/companies/${currentCompanyId}/suggestions/${s.suggestion_id}/dismiss`, { method: 'POST' });
+    document.getElementById(`fnc-card-${idx}`)?.remove();
+  } catch (e) {
+    document.getElementById(`fnc-card-${idx}`)?.remove();
+  }
+}
+
+// ─── Follow-up alerts ────────────────────────────────────────────────────────
+let _followupAlerts = [];
+
+async function loadFollowupAlerts() {
+  const days = document.getElementById('followup-days-filter')?.value || 7;
+  try {
+    const data = await api(`/api/followup-alerts?days=${days}`);
+    _followupAlerts = data.alerts || [];
+    const badge = document.getElementById('followup-badge');
+    if (badge) {
+      badge.textContent = _followupAlerts.length || '';
+      badge.style.display = _followupAlerts.length ? 'inline' : 'none';
+    }
+    renderFollowupAlerts();
+  } catch (e) { /* silencioso */ }
+}
+
+function renderFollowupAlerts() {
+  const html = _followupAlerts.length
+    ? _followupAlerts.map(a => `
+      <div class="d-flex justify-content-between align-items-center border-bottom py-2">
+        <div>
+          <div class="fw-bold small">${esc(a.contact_name)}</div>
+          <div class="text-muted" style="font-size:11px">${esc(a.company_name)}</div>
+          <div class="text-danger" style="font-size:11px"><i class="bi bi-clock me-1"></i>${a.days_since_last >= 999 ? 'Nunca contatado' : a.days_since_last + ' dias sem contato'}</div>
+        </div>
+        <button class="btn btn-outline-primary btn-sm py-0" onclick="openCompany(${a.company_id})">
+          <i class="bi bi-arrow-right"></i>
+        </button>
+      </div>`).join('')
+    : '<p class="text-muted small mb-0 text-center py-3">Nenhum follow-up pendente 🎉</p>';
+
+  // Atualiza ambos os containers (tab dedicado + card de métricas)
+  ['followup-list', 'followup-list-tab'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = html;
+  });
+}
+
+// Abre modal de busca de contatos
+function openFindContactsModal() {
+  const modal = new bootstrap.Modal(document.getElementById('findNewContactsModal'));
+  modal.show();
+}
+
+// Carrega follow-ups quando o app iniciar
+document.addEventListener('DOMContentLoaded', () => {
+  setTimeout(loadFollowupAlerts, 2000);
+});
 </script>
 
 </body>

@@ -1,0 +1,805 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import CompanyModal from './CompanyModal.jsx';
+
+const API = '';
+
+const STATUS_BADGES = {
+  new: { cls: 'bg-secondary', label: 'Novo' },
+  researched: { cls: 'bg-info', label: 'Pesquisado' },
+  sequence_created: { cls: 'bg-primary', label: 'Sequência criada' },
+  contacted: { cls: 'bg-primary', label: 'Contactado' },
+  hot_lead: { cls: 'bg-danger', label: '🔥 Hot Lead' },
+  meeting_set: { cls: 'bg-success', label: '✅ Reunião' },
+  opted_out: { cls: 'bg-secondary', label: 'Opt-out' },
+  rejected: { cls: 'bg-secondary', label: 'Rejeitado' },
+};
+
+const PAGE_SIZE = 15;
+
+// ── AddForm ────────────────────────────────────────────────────────────────────
+function AddForm({ onAdded, toast }) {
+  const [form, setForm] = useState({
+    companyName: '', sector: '',
+    contactName: '', role: 'other', email: '', linkedin: '', whatsapp: '', country: 'BR',
+  });
+  const [loading, setLoading] = useState(false);
+
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  async function handleSubmit() {
+    if (!form.companyName.trim() || !form.contactName.trim()) {
+      toast('Nome da empresa e do contato são obrigatórios', 'warning'); return;
+    }
+    setLoading(true);
+    try {
+      const res = await fetch(`${API}/api/companies`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: form.companyName.trim(),
+          sector: form.sector.trim(),
+          contact_name: form.contactName.trim(),
+          contact_role: form.role,
+          contact_email: form.email.trim(),
+          contact_linkedin: form.linkedin.trim(),
+          contact_whatsapp: form.whatsapp.trim(),
+          contact_country: form.country,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      toast('Empresa adicionada!', 'success');
+      setForm({ companyName: '', sector: '', contactName: '', role: 'other', email: '', linkedin: '', whatsapp: '', country: 'BR' });
+      onAdded();
+    } catch (err) {
+      toast(err.message || 'Erro ao adicionar', 'danger');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="card p-3">
+      <h6 className="fw-bold mb-3"><i className="bi bi-building-add me-1"></i>Nova Empresa</h6>
+      <div className="mb-2">
+        <input className="form-control form-control-sm" placeholder="Nome da empresa *" value={form.companyName} onChange={set('companyName')} />
+      </div>
+      <div className="mb-3">
+        <input className="form-control form-control-sm" placeholder="Setor (ex: Fintech)" value={form.sector} onChange={set('sector')} />
+      </div>
+
+      <h6 className="fw-bold mb-2 mt-1"><i className="bi bi-person-plus me-1"></i>Primeiro Contato</h6>
+      <div className="mb-2">
+        <input className="form-control form-control-sm" placeholder="Nome do contato *" value={form.contactName} onChange={set('contactName')} />
+      </div>
+      <div className="mb-2">
+        <select className="form-select form-select-sm" value={form.role} onChange={set('role')}>
+          <option value="c_level">C-Level / Diretor</option>
+          <option value="manager">Gerente / Coordenador</option>
+          <option value="engineer">Engenheiro / TI</option>
+          <option value="other">Outro</option>
+        </select>
+      </div>
+      <div className="mb-2">
+        <input className="form-control form-control-sm" placeholder="E-mail" type="email" value={form.email} onChange={set('email')} />
+      </div>
+      <div className="mb-2">
+        <input className="form-control form-control-sm" placeholder="LinkedIn URL" value={form.linkedin} onChange={set('linkedin')} />
+      </div>
+      <div className="mb-3">
+        <input className="form-control form-control-sm" placeholder="WhatsApp" value={form.whatsapp} onChange={set('whatsapp')} />
+      </div>
+      <div className="mb-2">
+        <select className="form-select form-select-sm" value={form.country} onChange={set('country')}>
+          <option value="BR">🇧🇷 Brasil (LGPD)</option>
+          <option value="EU">🇪🇺 União Europeia (GDPR)</option>
+          <option value="US">🇺🇸 Estados Unidos (CAN-SPAM)</option>
+          <option value="OTHER">Outro país</option>
+        </select>
+      </div>
+      <button className="btn btn-primary btn-sm w-100" onClick={handleSubmit} disabled={loading}>
+        <i className="bi bi-plus-circle me-1"></i>{loading ? 'Adicionando...' : 'Adicionar'}
+      </button>
+
+      <CSVImport toast={toast} onAdded={onAdded} />
+    </div>
+  );
+}
+
+// ── CSVImport ──────────────────────────────────────────────────────────────────
+function CSVImport({ toast, onAdded }) {
+  const [csvResult, setCsvResult] = useState('');
+  const [enrichResult, setEnrichResult] = useState('');
+  const [autoEnrich, setAutoEnrich] = useState(true);
+  const csvRef = useRef();
+  const enrichRef = useRef();
+
+  async function importCSV() {
+    const file = csvRef.current?.files[0];
+    if (!file) { toast('Selecione um arquivo CSV', 'warning'); return; }
+    const text = await file.text();
+    const lines = text.trim().split('\n').slice(1);
+    let ok = 0, fail = 0;
+    for (const line of lines) {
+      const [empresa, setor, contato, cargo, email, whatsapp] = line.split(',').map((s) => s.trim().replace(/^"|"$/g, ''));
+      if (!empresa) continue;
+      try {
+        const res = await fetch(`${API}/api/companies`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: empresa, sector: setor || '', contact_name: contato || '', contact_role: cargo || 'other', contact_email: email || '', contact_whatsapp: whatsapp || '' }),
+        });
+        const d = await res.json();
+        if (d.error) fail++; else ok++;
+      } catch { fail++; }
+    }
+    setCsvResult(`✅ ${ok} importadas, ❌ ${fail} falhas`);
+    if (ok > 0) onAdded();
+  }
+
+  async function importAndEnrich() {
+    const file = enrichRef.current?.files[0];
+    if (!file) { toast('Selecione um arquivo CSV', 'warning'); return; }
+    const text = await file.text();
+    const lines = text.trim().split('\n').slice(1);
+    let ok = 0, fail = 0;
+    const ids = [];
+    for (const line of lines) {
+      const [nome, empresa] = line.split(',').map((s) => s.trim().replace(/^"|"$/g, ''));
+      if (!nome && !empresa) continue;
+      try {
+        const res = await fetch(`${API}/api/companies`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: empresa || nome, sector: '', contact_name: nome || '', contact_role: 'other' }),
+        });
+        const d = await res.json();
+        if (d.error) { fail++; } else { ok++; if (d.id) ids.push(d.id); }
+      } catch { fail++; }
+    }
+    if (autoEnrich && ids.length > 0) {
+      try {
+        await fetch(`${API}/api/contacts/bulk-enrich`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ company_ids: ids }),
+        });
+      } catch { /* ignore */ }
+    }
+    setEnrichResult(`✅ ${ok} importadas${autoEnrich ? ' e enriquecidas' : ''}, ❌ ${fail} falhas`);
+    if (ok > 0) onAdded();
+  }
+
+  return (
+    <>
+      <hr />
+      <h6 className="fw-bold mb-2"><i className="bi bi-file-earmark-spreadsheet me-1"></i>Importar CSV</h6>
+      <p className="small text-muted mb-2">Colunas: empresa, setor, contato, cargo, email, whatsapp</p>
+      <input type="file" ref={csvRef} accept=".csv" className="form-control form-control-sm mb-2" />
+      <button className="btn btn-outline-primary btn-sm w-100" onClick={importCSV}>Importar</button>
+      {csvResult && <div className="mt-2 small text-muted">{csvResult}</div>}
+
+      <hr />
+      <h6 className="fw-bold mb-2"><i className="bi bi-person-lines-fill me-1"></i>Importar Lista (nome + empresa)</h6>
+      <p className="small text-muted mb-2">Colunas: <code>nome, empresa</code> — o sistema buscará e-mail e telefone automaticamente</p>
+      <input type="file" ref={enrichRef} accept=".csv" className="form-control form-control-sm mb-2" />
+      <div className="form-check mb-2">
+        <input className="form-check-input" type="checkbox" id="auto-enrich-check" checked={autoEnrich} onChange={(e) => setAutoEnrich(e.target.checked)} />
+        <label className="form-check-label small" htmlFor="auto-enrich-check">Enriquecer automaticamente após importar</label>
+      </div>
+      <button className="btn btn-outline-success btn-sm w-100" onClick={importAndEnrich}>
+        <i className="bi bi-search me-1"></i>Importar e Enriquecer
+      </button>
+      {enrichResult && <div className="mt-2 small text-muted">{enrichResult}</div>}
+    </>
+  );
+}
+
+// ── FiltersBar ─────────────────────────────────────────────────────────────────
+function FiltersBar({ filters, setFilters, sectors, count }) {
+  return (
+    <div className="d-flex gap-2 mb-2 flex-wrap align-items-center">
+      <input
+        className="form-control form-control-sm"
+        style={{ maxWidth: 220 }}
+        placeholder="🔍 Buscar empresa..."
+        value={filters.search}
+        onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
+      />
+      <select
+        className="form-select form-select-sm"
+        style={{ maxWidth: 160 }}
+        value={filters.status}
+        onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
+      >
+        <option value="">Todos os status</option>
+        <option value="new">Novo</option>
+        <option value="researched">Pesquisado</option>
+        <option value="sequence_created">Sequência criada</option>
+        <option value="contacted">Contactado</option>
+        <option value="hot_lead">🔥 Hot Lead</option>
+        <option value="meeting_set">✅ Reunião</option>
+        <option value="opted_out">Opt-out</option>
+      </select>
+      <select
+        className="form-select form-select-sm"
+        style={{ maxWidth: 160 }}
+        value={filters.sector}
+        onChange={(e) => setFilters((f) => ({ ...f, sector: e.target.value }))}
+      >
+        <option value="">Todos os setores</option>
+        {sectors.map((s) => <option key={s} value={s}>{s}</option>)}
+      </select>
+      <button
+        className="btn btn-outline-secondary btn-sm"
+        onClick={() => setFilters({ search: '', status: '', sector: '' })}
+      >
+        ✕ Limpar
+      </button>
+      {count !== null && <span className="text-muted small">{count} empresa(s)</span>}
+    </div>
+  );
+}
+
+// ── BulkToolbar ────────────────────────────────────────────────────────────────
+function BulkToolbar({ selected, onClear, onBulkResearch, onBulkMessages, onBulkPropensity, onBulkStatus }) {
+  const count = selected.length;
+  if (count === 0) return null;
+
+  return (
+    <div className="alert alert-secondary py-2 px-3 mb-2 d-flex align-items-center gap-2 flex-wrap">
+      <span className="small fw-bold me-1">{count} selecionada(s)</span>
+      <button className="btn btn-sm btn-outline-primary" onClick={onBulkResearch}>
+        <i className="bi bi-search me-1"></i>Gerar Pesquisa IA
+      </button>
+      <button className="btn btn-sm btn-success fw-semibold" onClick={onBulkMessages} title="Selecione um produto por lead e gere mensagens personalizadas para todos de uma vez">
+        <i className="bi bi-envelope-paper me-1"></i>Gerar Mensagens por Produto
+      </button>
+      <button className="btn btn-sm btn-warning fw-semibold" onClick={onBulkPropensity} title="Analisa propensão de compra e sugere as melhores dores para cada lead selecionado">
+        <i className="bi bi-graph-up-arrow me-1"></i>Analisar Propensão &amp; Gerar em Lote
+      </button>
+      <div className="dropdown">
+        <button className="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">
+          <i className="bi bi-arrow-repeat me-1"></i>Mudar Status
+        </button>
+        <ul className="dropdown-menu">
+          {[['new', 'Novo'], ['contacted', 'Contactado'], ['hot_lead', '🔥 Hot Lead'], ['meeting_set', '✅ Reunião'], ['rejected', 'Rejeitado']].map(([v, l]) => (
+            <li key={v}><button className="dropdown-item" onClick={() => onBulkStatus(v)}>{l}</button></li>
+          ))}
+        </ul>
+      </div>
+      <button className="btn btn-sm btn-link text-secondary ms-auto py-0" onClick={onClear}>✕ Limpar seleção</button>
+    </div>
+  );
+}
+
+// ── ExpandedRow ────────────────────────────────────────────────────────────────
+function ExpandedRow({ company, onEnrich, onRemoveContact, onContactAdded, toast }) {
+  const [addForm, setAddForm] = useState({ name: '', role: 'other', email: '', whatsapp: '', linkedin: '', country: 'BR' });
+  const [adding, setAdding] = useState(false);
+  const set = (k) => (e) => setAddForm((f) => ({ ...f, [k]: e.target.value }));
+
+  async function handleAddContact() {
+    if (!addForm.name.trim()) { toast('Nome do contato obrigatório', 'warning'); return; }
+    setAdding(true);
+    try {
+      const res = await fetch(`${API}/api/companies/${company.id}/contacts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: addForm.name.trim(),
+          role: addForm.role,
+          email: addForm.email.trim(),
+          whatsapp: addForm.whatsapp.trim(),
+          linkedin: addForm.linkedin.trim(),
+          country: addForm.country,
+        }),
+      });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      toast('Contato adicionado!', 'success');
+      setAddForm({ name: '', role: 'other', email: '', whatsapp: '', linkedin: '', country: 'BR' });
+      onContactAdded();
+    } catch (err) {
+      toast(err.message || 'Erro', 'danger');
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  const contacts = company.contacts || [];
+
+  return (
+    <div style={{ background: '#f8f9fa', padding: '12px 16px', borderTop: '1px solid #dee2e6' }}>
+      <div className="d-flex gap-3 flex-wrap">
+        <div style={{ flex: 1, minWidth: 300 }}>
+          <p className="fw-bold small mb-2"><i className="bi bi-people me-1"></i>Contatos ({contacts.length})</p>
+          {contacts.length === 0 && <p className="text-muted small">Nenhum contato cadastrado.</p>}
+          {contacts.map((ct) => (
+            <div key={ct.id} className="d-flex align-items-start justify-content-between mb-2 p-2 rounded" style={{ background: '#fff', border: '1px solid #dee2e6' }}>
+              <div>
+                <div className="fw-semibold small">{ct.name}</div>
+                {ct.role && <div className="text-muted" style={{ fontSize: '.78rem' }}>{ct.role}</div>}
+                {ct.email && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-envelope me-1"></i>{ct.email}</div>}
+                {ct.whatsapp && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-whatsapp me-1"></i>{ct.whatsapp}</div>}
+                {ct.linkedin && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-linkedin me-1"></i><a href={ct.linkedin} target="_blank" rel="noreferrer">LinkedIn</a></div>}
+              </div>
+              <div className="d-flex gap-1 ms-2">
+                <button className="btn btn-xs btn-outline-secondary" style={{ fontSize: '.75rem', padding: '2px 6px' }} onClick={() => onEnrich(ct.id)} title="Enriquecer">
+                  <i className="bi bi-search"></i>
+                </button>
+                <button className="btn btn-xs btn-outline-danger" style={{ fontSize: '.75rem', padding: '2px 6px' }} onClick={() => onRemoveContact(company.id, ct.id)} title="Remover">
+                  <i className="bi bi-trash"></i>
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ minWidth: 280 }}>
+          <p className="fw-bold small mb-2"><i className="bi bi-person-plus me-1"></i>Novo Contato</p>
+          <input className="form-control form-control-sm mb-1" placeholder="Nome *" value={addForm.name} onChange={set('name')} />
+          <select className="form-select form-select-sm mb-1" value={addForm.role} onChange={set('role')}>
+            <option value="c_level">C-Level / Diretor</option>
+            <option value="manager">Gerente / Coordenador</option>
+            <option value="engineer">Engenheiro / TI</option>
+            <option value="other">Outro</option>
+          </select>
+          <input className="form-control form-control-sm mb-1" placeholder="E-mail" type="email" value={addForm.email} onChange={set('email')} />
+          <input className="form-control form-control-sm mb-1" placeholder="WhatsApp" value={addForm.whatsapp} onChange={set('whatsapp')} />
+          <input className="form-control form-control-sm mb-1" placeholder="LinkedIn URL" value={addForm.linkedin} onChange={set('linkedin')} />
+          <select className="form-select form-select-sm mb-2" value={addForm.country} onChange={set('country')}>
+            <option value="BR">🇧🇷 Brasil (LGPD)</option>
+            <option value="EU">🇪🇺 União Europeia (GDPR)</option>
+            <option value="US">🇺🇸 Estados Unidos (CAN-SPAM)</option>
+            <option value="OTHER">Outro país</option>
+          </select>
+          <button className="btn btn-primary btn-sm w-100" onClick={handleAddContact} disabled={adding}>
+            {adding ? 'Adicionando...' : 'Adicionar Contato'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── CompanyRow ─────────────────────────────────────────────────────────────────
+function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onOpen, onEnrich, onRemoveContact, onContactAdded, toast }) {
+  const badge = STATUS_BADGES[company.status] || STATUS_BADGES.new;
+  const contacts = company.contacts || [];
+
+  return (
+    <>
+      <tr style={selected ? { background: '#f0edff' } : {}}>
+        <td>
+          <input type="checkbox" checked={selected} onChange={() => onToggle(company.id)} />
+        </td>
+        <td>
+          <button
+            className="btn btn-xs p-0 border-0 bg-transparent"
+            style={{ fontSize: '.85rem' }}
+            onClick={() => onToggleExpand(company.id)}
+            title="Expandir contatos"
+          >
+            <i className={`bi ${expanded ? 'bi-chevron-down' : 'bi-chevron-right'}`}></i>
+          </button>
+        </td>
+        <td className="fw-semibold">{company.name}</td>
+        <td className="text-muted small">{company.sector || '—'}</td>
+        <td>
+          <span className="badge" style={{ background: '#7c6af7', color: '#fff', fontSize: '.75rem' }}>
+            {contacts.length}
+          </span>
+        </td>
+        <td>
+          <span className={`badge ${badge.cls}`} style={{ fontSize: '.75rem' }}>{badge.label}</span>
+        </td>
+        <td className="text-center">
+          {company.interest_score != null ? (
+            <span className="fw-bold text-warning">{company.interest_score}</span>
+          ) : '—'}
+        </td>
+        <td>
+          <div className="d-flex gap-1">
+            <button className="btn btn-xs btn-outline-primary" style={{ fontSize: '.75rem', padding: '2px 6px' }} onClick={() => onOpen(company)} title="Abrir empresa">
+              <i className="bi bi-box-arrow-up-right"></i>
+            </button>
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={8} style={{ padding: 0 }}>
+            <ExpandedRow
+              company={company}
+              onEnrich={onEnrich}
+              onRemoveContact={onRemoveContact}
+              onContactAdded={onContactAdded}
+              toast={toast}
+            />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+// ── GlobalContactSearch ────────────────────────────────────────────────────────
+function GlobalContactSearch() {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState([]);
+  const [show, setShow] = useState(false);
+  const debounceRef = useRef();
+
+  useEffect(() => {
+    clearTimeout(debounceRef.current);
+    if (!query.trim()) { setResults([]); setShow(false); return; }
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API}/api/contacts?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        setResults(data.contacts || data || []);
+        setShow(true);
+      } catch { setResults([]); }
+    }, 300);
+    return () => clearTimeout(debounceRef.current);
+  }, [query]);
+
+  function clear() { setQuery(''); setResults([]); setShow(false); }
+
+  return (
+    <div className="mb-2">
+      <div className="input-group input-group-sm" style={{ maxWidth: 350 }}>
+        <span className="input-group-text"><i className="bi bi-person-search"></i></span>
+        <input
+          className="form-control"
+          placeholder="Buscar contato por nome ou e-mail..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <button className="btn btn-outline-secondary" onClick={clear}>✕</button>
+      </div>
+      {show && results.length > 0 && (
+        <div
+          className="mt-1 border rounded p-2 bg-white shadow-sm"
+          style={{ maxWidth: 350, maxHeight: 250, overflowY: 'auto', position: 'absolute', zIndex: 100 }}
+        >
+          {results.map((ct) => (
+            <div key={ct.id} className="py-1 border-bottom small">
+              <span className="fw-semibold">{ct.name}</span>
+              {ct.email && <span className="text-muted ms-2">{ct.email}</span>}
+              {ct.company_name && <span className="badge bg-light text-dark ms-2" style={{ fontSize: '.7rem' }}>{ct.company_name}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main Companies Component ───────────────────────────────────────────────────
+export default function Companies({ toast, loadStats }) {
+  const [companies, setCompanies] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState([]);
+  const [expanded, setExpanded] = useState([]);
+  const [filters, setFilters] = useState({ search: '', status: '', sector: '' });
+  const [page, setPage] = useState(1);
+  const [modalCompany, setModalCompany] = useState(null);
+  const [sectors, setSectors] = useState([]);
+
+  const loadCompanies = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`${API}/api/companies`);
+      const data = await res.json();
+      const list = data.companies || data || [];
+      setCompanies(list);
+      const uniqueSectors = [...new Set(list.map((c) => c.sector).filter(Boolean))].sort();
+      setSectors(uniqueSectors);
+    } catch (err) {
+      toast('Erro ao carregar empresas', 'danger');
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => { loadCompanies(); }, [loadCompanies]);
+
+  // Filtering
+  const filtered = companies.filter((c) => {
+    if (filters.search && !c.name?.toLowerCase().includes(filters.search.toLowerCase()) && !c.sector?.toLowerCase().includes(filters.search.toLowerCase())) return false;
+    if (filters.status && c.status !== filters.status) return false;
+    if (filters.sector && c.sector !== filters.sector) return false;
+    return true;
+  });
+
+  // Pagination
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE) || 1;
+  const paginated = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  function handleToggle(id) {
+    setSelected((s) => s.includes(id) ? s.filter((x) => x !== id) : [...s, id]);
+  }
+
+  function handleSelectAll(checked) {
+    setSelected(checked ? paginated.map((c) => c.id) : []);
+  }
+
+  function handleToggleExpand(id) {
+    setExpanded((e) => e.includes(id) ? e.filter((x) => x !== id) : [...e, id]);
+  }
+
+  async function handleEnrichContact(contactId) {
+    try {
+      const res = await fetch(`${API}/api/contacts/enrich`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contact_id: contactId }),
+      });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      toast('Contato enriquecido!', 'success');
+      loadCompanies();
+    } catch (err) {
+      toast(err.message || 'Erro ao enriquecer', 'danger');
+    }
+  }
+
+  async function handleRemoveContact(companyId, contactId) {
+    if (!window.confirm('Remover contato?')) return;
+    try {
+      const res = await fetch(`${API}/api/companies/${companyId}/contacts/${contactId}`, { method: 'DELETE' });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      toast('Contato removido', 'success');
+      loadCompanies();
+    } catch (err) {
+      toast(err.message || 'Erro ao remover', 'danger');
+    }
+  }
+
+  async function bulkResearch() {
+    if (selected.length === 0) return;
+    try {
+      const res = await fetch(`${API}/api/companies/bulk-research`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company_ids: selected }),
+      });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      toast(`Pesquisa IA iniciada para ${selected.length} empresa(s)`, 'success');
+      loadCompanies();
+      if (loadStats) loadStats();
+    } catch (err) {
+      toast(err.message || 'Erro', 'danger');
+    }
+  }
+
+  function openBulkDirectModal() {
+    toast('Função "Gerar Mensagens por Produto" — abrir modal de produto', 'info');
+  }
+
+  function openPropensityModal() {
+    toast('Função "Analisar Propensão" — abrir modal', 'info');
+  }
+
+  async function bulkStatus(status) {
+    if (selected.length === 0) return;
+    try {
+      const res = await fetch(`${API}/api/companies/bulk-status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company_ids: selected, status }),
+      });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      toast(`Status atualizado para ${selected.length} empresa(s)`, 'success');
+      setSelected([]);
+      loadCompanies();
+      if (loadStats) loadStats();
+    } catch (err) {
+      toast(err.message || 'Erro', 'danger');
+    }
+  }
+
+  async function bulkEnrichMissing() {
+    try {
+      const res = await fetch(`${API}/api/contacts/bulk-enrich`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      toast('Enriquecimento em lote iniciado!', 'success');
+      loadCompanies();
+    } catch (err) {
+      toast(err.message || 'Erro', 'danger');
+    }
+  }
+
+  function exportCSV(format) {
+    let rows, headers;
+    if (format === 'hubspot') {
+      headers = ['Company Name', 'Industry', 'First Name', 'Last Name', 'Email', 'Phone'];
+      rows = companies.flatMap((c) => (c.contacts || []).map((ct) => {
+        const [first, ...rest] = (ct.name || '').split(' ');
+        return [c.name, c.sector || '', first, rest.join(' '), ct.email || '', ct.whatsapp || ''];
+      }));
+    } else if (format === 'salesforce') {
+      headers = ['Account Name', 'Industry', 'Contact Name', 'Title', 'Email', 'Phone'];
+      rows = companies.flatMap((c) => (c.contacts || []).map((ct) => [c.name, c.sector || '', ct.name || '', ct.role || '', ct.email || '', ct.whatsapp || '']));
+    } else if (format === 'linkedin') {
+      headers = ['Company', 'First Name', 'Last Name', 'Title', 'Email'];
+      rows = companies.flatMap((c) => (c.contacts || []).map((ct) => {
+        const [first, ...rest] = (ct.name || '').split(' ');
+        return [c.name, first, rest.join(' '), ct.role || '', ct.email || ''];
+      }));
+    } else {
+      headers = ['empresa', 'setor', 'status', 'score', 'contato', 'cargo', 'email', 'whatsapp', 'linkedin'];
+      rows = companies.flatMap((c) => (c.contacts || [{ name: '', role: '', email: '', whatsapp: '', linkedin: '' }]).map((ct) => [
+        c.name, c.sector || '', c.status || '', c.interest_score ?? '', ct.name || '', ct.role || '', ct.email || '', ct.whatsapp || '', ct.linkedin || '',
+      ]));
+    }
+    const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `companies_${format || 'padrao'}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  const allOnPageSelected = paginated.length > 0 && paginated.every((c) => selected.includes(c.id));
+
+  return (
+    <div className="row g-3">
+      {/* Sidebar */}
+      <div className="col-md-3">
+        <AddForm onAdded={() => { loadCompanies(); if (loadStats) loadStats(); }} toast={toast} />
+      </div>
+
+      {/* Main table area */}
+      <div className="col-md-9">
+        <div className="card p-3">
+          {/* Header */}
+          <div className="d-flex justify-content-between mb-2">
+            <h6 className="fw-bold mb-0"><i className="bi bi-list-ul me-1"></i>Lista de Empresas</h6>
+            <div className="d-flex gap-2">
+              <div className="dropdown">
+                <button className="btn btn-outline-success btn-sm dropdown-toggle" data-bs-toggle="dropdown">
+                  <i className="bi bi-download me-1"></i>Exportar
+                </button>
+                <ul className="dropdown-menu">
+                  <li><button className="dropdown-item" onClick={() => exportCSV('')}>CSV Padrão</button></li>
+                  <li><button className="dropdown-item" onClick={() => exportCSV('hubspot')}>HubSpot CSV</button></li>
+                  <li><button className="dropdown-item" onClick={() => exportCSV('salesforce')}>Salesforce CSV</button></li>
+                  <li><button className="dropdown-item" onClick={() => exportCSV('linkedin')}>LinkedIn CSV</button></li>
+                </ul>
+              </div>
+              <button
+                className="btn btn-sm"
+                style={{ background: '#7c6af7', color: '#fff', border: 'none' }}
+                onClick={bulkEnrichMissing}
+                title="Buscar e-mail e telefone para contatos sem e-mail"
+              >
+                <i className="bi bi-search me-1"></i>Enriquecer sem e-mail
+              </button>
+              <button className="btn btn-outline-secondary btn-sm" onClick={loadCompanies}>
+                <i className="bi bi-arrow-clockwise"></i>
+              </button>
+            </div>
+          </div>
+
+          {/* Global contact search */}
+          <GlobalContactSearch />
+
+          {/* Filters */}
+          <FiltersBar
+            filters={filters}
+            setFilters={(f) => { setFilters(f); setPage(1); }}
+            sectors={sectors}
+            count={filtered.length}
+          />
+
+          {/* Bulk toolbar */}
+          <BulkToolbar
+            selected={selected}
+            onClear={() => setSelected([])}
+            onBulkResearch={bulkResearch}
+            onBulkMessages={openBulkDirectModal}
+            onBulkPropensity={openPropensityModal}
+            onBulkStatus={bulkStatus}
+          />
+
+          {/* Table */}
+          <div className="table-responsive">
+            <table className="table table-hover table-sm">
+              <thead className="table-light">
+                <tr>
+                  <th style={{ width: 24 }}>
+                    <input
+                      type="checkbox"
+                      checked={allOnPageSelected}
+                      onChange={(e) => handleSelectAll(e.target.checked)}
+                      title="Selecionar todas"
+                    />
+                  </th>
+                  <th style={{ width: 30 }}></th>
+                  <th>Empresa</th>
+                  <th>Setor</th>
+                  <th>Contatos</th>
+                  <th>Status</th>
+                  <th>Score</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading && (
+                  <tr><td colSpan={8} className="text-center text-muted py-3">Carregando...</td></tr>
+                )}
+                {!loading && paginated.length === 0 && (
+                  <tr><td colSpan={8} className="text-center text-muted py-3">Nenhuma empresa encontrada.</td></tr>
+                )}
+                {!loading && paginated.map((company) => (
+                  <CompanyRow
+                    key={company.id}
+                    company={company}
+                    selected={selected.includes(company.id)}
+                    onToggle={handleToggle}
+                    expanded={expanded.includes(company.id)}
+                    onToggleExpand={handleToggleExpand}
+                    onOpen={setModalCompany}
+                    onEnrich={handleEnrichContact}
+                    onRemoveContact={handleRemoveContact}
+                    onContactAdded={() => { loadCompanies(); if (loadStats) loadStats(); }}
+                    toast={toast}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination */}
+          <div className="d-flex justify-content-between align-items-center mt-2">
+            <span className="text-muted small">
+              Mostrando {Math.min((page - 1) * PAGE_SIZE + 1, filtered.length)}–{Math.min(page * PAGE_SIZE, filtered.length)} de {filtered.length}
+            </span>
+            <nav>
+              <ul className="pagination pagination-sm mb-0">
+                <li className={`page-item ${page === 1 ? 'disabled' : ''}`}>
+                  <button className="page-link" onClick={() => setPage(page - 1)}>‹</button>
+                </li>
+                {Array.from({ length: totalPages }, (_, i) => i + 1)
+                  .filter((p) => p === 1 || p === totalPages || Math.abs(p - page) <= 2)
+                  .map((p, idx, arr) => (
+                    <>
+                      {idx > 0 && arr[idx - 1] !== p - 1 && <li key={`ellipsis-${p}`} className="page-item disabled"><span className="page-link">…</span></li>}
+                      <li key={p} className={`page-item ${p === page ? 'active' : ''}`}>
+                        <button className="page-link" onClick={() => setPage(p)}>{p}</button>
+                      </li>
+                    </>
+                  ))}
+                <li className={`page-item ${page === totalPages ? 'disabled' : ''}`}>
+                  <button className="page-link" onClick={() => setPage(page + 1)}>›</button>
+                </li>
+              </ul>
+            </nav>
+          </div>
+        </div>
+      </div>
+
+      {/* Company Modal */}
+      {modalCompany && (
+        <CompanyModal
+          company={modalCompany}
+          onClose={() => setModalCompany(null)}
+          onUpdated={() => { loadCompanies(); if (loadStats) loadStats(); }}
+          toast={toast}
+        />
+      )}
+    </div>
+  );
+}

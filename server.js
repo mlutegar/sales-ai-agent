@@ -173,18 +173,11 @@ function initDb() {
       meeting_link TEXT DEFAULT '',
       created_at   TEXT DEFAULT (datetime('now'))
     );
-    CREATE INDEX IF NOT EXISTS idx_contacts_company  ON contacts(company_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_company  ON messages(company_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_contact  ON messages(contact_id);
-    CREATE INDEX IF NOT EXISTS idx_sentiment_company ON sentiment_logs(company_id);
-    CREATE INDEX IF NOT EXISTS idx_consent_company   ON consent_logs(company_id);
-    CREATE INDEX IF NOT EXISTS idx_opps_company      ON opportunities(company_id);
     CREATE INDEX IF NOT EXISTS idx_contacts_email    ON contacts(email);
     CREATE INDEX IF NOT EXISTS idx_contacts_name     ON contacts(name);
-    CREATE INDEX IF NOT EXISTS idx_companies_status  ON companies(status);
   `);
 
-  // Adicionar colunas company/contact nas tabelas existentes
+  // Adicionar colunas company/contact nas tabelas existentes (antes de criar índices dependentes)
   addColumnIfNotExists(db, 'messages', 'contact_id', 'INTEGER REFERENCES contacts(id)');
   addColumnIfNotExists(db, 'messages', 'company_id', 'INTEGER REFERENCES companies(id)');
   addColumnIfNotExists(db, 'sentiment_logs', 'contact_id', 'INTEGER REFERENCES contacts(id)');
@@ -193,6 +186,24 @@ function initDb() {
   addColumnIfNotExists(db, 'consent_logs', 'contact_id', 'INTEGER REFERENCES contacts(id)');
   addColumnIfNotExists(db, 'schedule_slots', 'company_id', 'INTEGER REFERENCES companies(id)');
   addColumnIfNotExists(db, 'schedule_slots', 'contact_id', 'INTEGER REFERENCES contacts(id)');
+
+  // Colunas faltantes na tabela companies (migração de schema antigo)
+  addColumnIfNotExists(db, 'companies', 'status',          "TEXT DEFAULT 'new'");
+  addColumnIfNotExists(db, 'companies', 'interest_score',  "INTEGER DEFAULT 0");
+  addColumnIfNotExists(db, 'companies', 'research_hook',   "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'companies', 'research_context',"TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'companies', 'opted_out',       "INTEGER DEFAULT 0");
+
+  // Criar índices que dependem de colunas adicionadas por migração
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_contacts_company  ON contacts(company_id);
+    CREATE INDEX IF NOT EXISTS idx_messages_company  ON messages(company_id);
+    CREATE INDEX IF NOT EXISTS idx_messages_contact  ON messages(contact_id);
+    CREATE INDEX IF NOT EXISTS idx_sentiment_company ON sentiment_logs(company_id);
+    CREATE INDEX IF NOT EXISTS idx_consent_company   ON consent_logs(company_id);
+    CREATE INDEX IF NOT EXISTS idx_opps_company      ON opportunities(company_id);
+    CREATE INDEX IF NOT EXISTS idx_companies_status  ON companies(status);
+  `);
   addColumnIfNotExists(db, 'companies', 'research_history', "TEXT DEFAULT '[]'");
   addColumnIfNotExists(db, 'companies', 'sequence_history', "TEXT DEFAULT '[]'");
 
@@ -1096,9 +1107,7 @@ app.post('/api/companies/bulk-sequence-stream', async (req, res) => {
     'Access-Control-Allow-Origin': '*',
   });
 
-  const send = (obj) => res.write('data: ' + JSON.stringify(obj) + '
-
-');
+  const send = (obj) => res.write('data: ' + JSON.stringify(obj) + '\n\n');
 
   const results = [];
   const errors  = [];
@@ -1148,27 +1157,14 @@ app.post('/api/companies/propensity', async (req, res) => {
 
   const block = companies.map(c =>
     'ID ' + c.id + ': ' + c.name + ' | Setor: ' + c.sector + ' | Cargo: ' + c.contact_role + ' | Notas: ' + c.notes.substring(0, 100)
-  ).join('
-');
+  ).join('\n');
 
-  const prompt = 'Produto sendo vendido: ' + product + '
-
-Avalie as seguintes empresas pela propensao de compra desse produto.
-
-Empresas:
-' + block + '
-
-Resposta APENAS em JSON valido:
-{"rankings":[{"company_id":N,"propensity_score":N,"reason":"frase curta","pain_points":["dor 1","dor 2","dor 3"]}]}
-
-Ordene do maior para o menor score. Inclua TODAS as ' + companies.length + ' empresas.';
+  const prompt = 'Produto sendo vendido: ' + product + '\n\nAvalie as seguintes empresas pela propensao de compra desse produto.\n\nEmpresas:\n' + block + '\n\nResposta APENAS em JSON valido:\n{"rankings":[{"company_id":N,"propensity_score":N,"reason":"frase curta","pain_points":["dor 1","dor 2","dor 3"]}]}\n\nOrdene do maior para o menor score. Inclua TODAS as ' + companies.length + ' empresas.';
 
   const raw = await callClaude('Voce e especialista em qualificacao de leads B2B com foco em propensao de compra.', prompt, 1500);
   let parsed;
   try {
-    const clean = raw.replace(/```json
-?/g, '').replace(/```
-?/g, '').trim();
+    const clean = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     parsed = JSON.parse(clean);
   } catch(e) {
     return res.status(500).json({ error: 'Erro ao processar resposta do LLM', raw });
@@ -1520,6 +1516,11 @@ function checkApis() {
 // ── Start ─────────────────────────────────────────────────────────────────────
 initDb();
 checkApis();
+
+// Catch-all route to serve React frontend for non-API requests
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 app.listen(PORT, () => {
   console.log(`Sales AI Agent rodando em http://localhost:${PORT}`);
