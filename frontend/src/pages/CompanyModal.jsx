@@ -217,6 +217,15 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
   // ── hand-off
   const [showHandoff, setShowHandoff] = useState(false);
 
+  const loadTimeline = useCallback(async () => {
+    if (!companyId) return;
+    try {
+      const res = await fetch(`${API}/api/companies/${companyId}/timeline`);
+      const data = await res.json();
+      setTimeline(data.timeline || data || []);
+    } catch {}
+  }, [companyId]);
+
   // ─── load company ──────────────────────────────────────────────────────────
   const loadCompany = useCallback(async () => {
     if (!companyId) return;
@@ -226,10 +235,13 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
       const data = await res.json();
       setCompany(data);
       setContacts(data.contacts || []);
+      setMessages(data.messages || []);
       setEditName(data.name || '');
       setEditSector(data.sector || '');
-      // sentiment history / consent log already in data
-      // hand-off check
+      
+      // Carrega a linha do tempo junto
+      loadTimeline();
+
       if (data.interest_score >= 7 && data.last_sentiment === 'interested') {
         setShowHandoff(true);
       }
@@ -237,7 +249,7 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
       toast('Erro ao carregar empresa.', 'danger');
     }
     setLoading(false);
-  }, [companyId]);
+  }, [companyId, loadTimeline]);
 
   useEffect(() => {
     loadCompany();
@@ -251,14 +263,10 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
       .catch(() => {});
   }, []);
 
-  // load timeline
+  // load timeline initial
   useEffect(() => {
-    if (!companyId) return;
-    fetch(`${API}/api/companies/${companyId}/timeline`)
-      .then(r => r.json())
-      .then(d => setTimeline(d.timeline || d || []))
-      .catch(() => {});
-  }, [companyId]);
+    loadTimeline();
+  }, [loadTimeline]);
 
   // ─── inline edit ───────────────────────────────────────────────────────────
   async function saveCompanyEdit() {
@@ -378,6 +386,27 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
       if (data.interest_score >= 7 && data.sentiment === 'interested') setShowHandoff(true);
     } catch {
       toast('Erro ao analisar sentimento.', 'danger');
+    }
+    setSentimentLoading(false);
+  }
+
+  async function simulateWhatsAppInbound() {
+    if (!responseText.trim()) { toast('Digite a resposta do prospect.', 'warning'); return; }
+    if (!responseContactId) { toast('Selecione o contato.', 'warning'); return; }
+    setSentimentLoading(true);
+    try {
+      const res = await fetch(`${API}/api/companies/${companyId}/simulator/inbound`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response_text: responseText, contact_id: responseContactId }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      toast(`WhatsApp Simulado! Sentimento: ${data.sentiment}`, 'success');
+      setResponseText('');
+      loadCompany(); // Recarrega os dados (timeline/mensagens) na tela!
+    } catch (err) {
+      toast(err.message || 'Erro ao simular.', 'danger');
     }
     setSentimentLoading(false);
   }
@@ -815,6 +844,16 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
                           {sentimentLoading
                             ? <span className="spinner-border spinner-border-sm" />
                             : <><i className="bi bi-bullseye me-1" />Analisar Sentimento</>
+                          }
+                        </button>
+                        <button
+                          className="btn btn-success btn-sm ms-2"
+                          disabled={sentimentLoading}
+                          onClick={simulateWhatsAppInbound}
+                        >
+                          {sentimentLoading
+                            ? <span className="spinner-border spinner-border-sm" />
+                            : <><i className="bi bi-whatsapp me-1" />Simular no WhatsApp</>
                           }
                         </button>
 

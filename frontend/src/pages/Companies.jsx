@@ -794,7 +794,7 @@ export default function Companies({ toast, loadStats }) {
       {/* Company Modal */}
       {modalCompany && (
         <CompanyModal
-          company={modalCompany}
+          companyId={modalCompany.id}
           onClose={() => setModalCompany(null)}
           onUpdated={() => { loadCompanies(); if (loadStats) loadStats(); }}
           toast={toast}

@@ -34,6 +34,87 @@ app.use(session({
   cookie: { maxAge: 8 * 60 * 60 * 1000 },
 }));
 
+// ── WhatsApp Webhook & API ────────────────────────────────────────────────────
+const WA_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'sales-ai-webhook-token';
+const WA_API_VERSION = 'v19.0'; // ou v25.0 dependendo da config
+
+async function sendWhatsAppMessage(contactPhone, content, dbRef = null) {
+  const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  
+  if (!phoneId || !token) {
+    console.warn("WhatsApp API não configurada. Simulando envio para", contactPhone);
+    return true; // Simulação para quando não há chave (ex: devs locais)
+  }
+
+  // Verifica se há janela aberta no BD para este contato (24h rule)
+  let windowOpen = false;
+  if (dbRef && dbRef.type === 'contact') {
+    const db = getDb();
+    const c = db.prepare('SELECT last_wa_interaction FROM contacts WHERE id = ?').get(dbRef.id);
+    if (c && c.last_wa_interaction) {
+      const lastInt = new Date(c.last_wa_interaction);
+      const diffHrs = (new Date() - lastInt) / (1000 * 60 * 60);
+      if (diffHrs < 24) windowOpen = true;
+    }
+  }
+
+  // Se a janela estiver FECHADA, nós NÃO enviamos automaticamente! 
+  // Na nossa arquitetura, envios fora da janela caem na "Aprovação Humana" no painel.
+  if (!windowOpen && dbRef && !dbRef.forceTemplate) {
+    console.log(`Janela de 24h fechada para ${contactPhone}. Mensagem retida para aprovação humana (Template necessário).`);
+    return false; // Retorna falso para a rota chamadora mudar o status para 'pending'
+  }
+
+  // Se a janela está aberta, manda mensagem de texto livre:
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: contactPhone,
+    type: 'text',
+    text: { preview_url: false, body: content }
+  };
+
+  // Se 'forceTemplate' estiver ativado (pelo Humano aprovando no painel), montamos o envio de Template.
+  if (dbRef && dbRef.forceTemplate) {
+    payload.type = 'template';
+    delete payload.text;
+    const isHelloWorld = (dbRef.templateName || 'hello_world') === 'hello_world';
+    payload.template = {
+      name: dbRef.templateName || 'hello_world',
+      language: { code: isHelloWorld ? 'en_US' : 'pt_BR' }
+    };
+    if (!isHelloWorld) {
+      payload.template.components = [
+        {
+          type: "body",
+          parameters: [
+            { type: "text", text: content } // Passando a msg gerada pela IA como variável do template
+          ]
+        }
+      ];
+    }
+  }
+
+  try {
+    const url = `https://graph.facebook.com/${WA_API_VERSION}/${phoneId}/messages`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    const result = await resp.json();
+    if (!resp.ok) console.error("Erro no envio WhatsApp:", result);
+    return resp.ok;
+  } catch (e) {
+    console.error("Exceção enviando WhatsApp:", e);
+    return false;
+  }
+}
+
 // ── Helpers de validação e formatação ────────────────────────────────────────
 function isValidEmailServer(email) {
   if (!email || email.trim() === '') return true; // campo opcional
@@ -104,7 +185,7 @@ function initDb() {
       role         TEXT    DEFAULT 'other',
       email        TEXT    DEFAULT '',
       linkedin     TEXT    DEFAULT '',
-      whatsapp     TEXT    DEFAULT '',
+      whatsapp         TEXT    DEFAULT '',
       is_primary   INTEGER DEFAULT 0,
       opted_out    INTEGER DEFAULT 0,
       created_at   TEXT    DEFAULT (datetime('now')),
@@ -193,6 +274,14 @@ function initDb() {
   addColumnIfNotExists(db, 'companies', 'research_hook',   "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'companies', 'research_context',"TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'companies', 'opted_out',       "INTEGER DEFAULT 0");
+
+  // WhatsApp API / Janela de 24h
+  addColumnIfNotExists(db, 'leads', 'last_wa_interaction', "TEXT");
+  addColumnIfNotExists(db, 'leads', 'wa_opt_out', "INTEGER DEFAULT 0");
+  addColumnIfNotExists(db, 'contacts', 'last_wa_interaction', "TEXT");
+  addColumnIfNotExists(db, 'contacts', 'wa_opt_out', "INTEGER DEFAULT 0");
+  addColumnIfNotExists(db, 'messages', 'is_template', "INTEGER DEFAULT 0");
+  addColumnIfNotExists(db, 'messages', 'template_name', "TEXT");
 
   // Criar índices que dependem de colunas adicionadas por migração
   db.exec(`
@@ -316,6 +405,65 @@ function requireLogin(req, res, next) {
   return res.redirect('/login');
 }
 
+// ── WhatsApp Webhook Routes ──────────────────────────────────────────────────
+app.get('/api/webhook/whatsapp', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode && token) {
+    if (mode === 'subscribe' && token === WA_VERIFY_TOKEN) {
+      console.log('Webhook do WhatsApp verificado!');
+      res.status(200).send(challenge);
+    } else {
+      res.sendStatus(403);
+    }
+  } else {
+    res.sendStatus(400);
+  }
+});
+
+app.post('/api/webhook/whatsapp', (req, res) => {
+  console.log('\n--- RECEBIDO POST NO WEBHOOK ---');
+  console.dir(req.body, { depth: null });
+  const body = req.body;
+
+  if (body.object) {
+    if (
+      body.entry &&
+      body.entry[0].changes &&
+      body.entry[0].changes[0] &&
+      body.entry[0].changes[0].value.messages &&
+      body.entry[0].changes[0].value.messages[0]
+    ) {
+      const msg = body.entry[0].changes[0].value.messages[0];
+      let phone = msg.from; // Número de quem enviou (ex: 5511999999999)
+      if (phone.length === 12 && phone.startsWith('55')) phone = phone.replace(/^55/, '55'); // Tratamento simples
+      
+      const db = getDb();
+      // Procura o contato correspondente (assumindo que o whatsapp salvo bata com o from da API)
+      const contact = db.prepare('SELECT id, company_id FROM contacts WHERE whatsapp LIKE ? LIMIT 1').get(`%${phone}%`);
+      
+      if (contact) {
+        // Mágica da Janela de 24h: Atualiza o horário de interação!
+        db.exec(`UPDATE contacts SET last_wa_interaction = datetime('now') WHERE id = ${contact.id}`);
+        console.log(`[WhatsApp] Janela de 24h RENOVADA para o contato ID ${contact.id} (${phone}).`);
+        
+        // Salva a mensagem recebida no banco para aparecer na timeline!
+        db.prepare(
+          "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, 'received', 1)"
+        ).run(contact.id, contact.company_id, msg.text.body, msg.text.body);
+      } else {
+        console.log(`[WhatsApp] Mensagem recebida de número desconhecido: ${phone}`);
+      }
+      db.close();
+    }
+    res.sendStatus(200);
+  } else {
+    res.sendStatus(404);
+  }
+});
+
 // ── Claude helper ─────────────────────────────────────────────────────────────
 const ROLE_PROFILES = {
   c_level:  { focus: 'ROI, estratégia e impacto no negócio',             tone: 'executivo e direto' },
@@ -423,7 +571,63 @@ async function enrichContact(contactId, companyName) {
 
 async function callClaude(systemPrompt, userPrompt, maxTokens = 800) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return '[ERRO: Configure ANTHROPIC_API_KEY no arquivo .env]';
+  
+  // MOCK MODE (Modo de Demonstração Offline)
+  // Caso a chave seja a padrão ("sk-ant-sua-chave-aqui") ou esteja vazia, simula as respostas do Claude com textos de alta qualidade
+  if (!apiKey || apiKey === 'sk-ant-sua-chave-aqui') {
+    console.log(`[Offline Demo] Utilizando simulação de IA local para o prompt.`);
+    
+    // Caso 1: Classificador de Sentimento
+    if (systemPrompt.includes('classificador de intenção')) {
+      const txt = userPrompt.toLowerCase();
+      let sentiment = 'interested';
+      let reasoning = 'O prospect demonstrou interesse claro em agendar uma conversa.';
+      let score = 9;
+      
+      if (txt.includes('dúvida') || txt.includes('como funciona') || txt.includes('?') || txt.includes('preco') || txt.includes('preço')) {
+        sentiment = 'technical_question';
+        reasoning = 'O prospect tem uma dúvida sobre o produto ou preço.';
+        score = 8;
+      } else if (txt.includes('não') || txt.includes('recuso') || txt.includes('obrigado') || txt.includes('sair')) {
+        sentiment = 'negative';
+        reasoning = 'O prospect recusou a abordagem.';
+        score = 2;
+      }
+      return JSON.stringify({ sentiment, reasoning, interest_score: score });
+    }
+    
+    // Caso 2: SDR Resposta Rápida (Rascunho)
+    if (systemPrompt.includes('SDR especialista em respostas rápidas')) {
+      if (userPrompt.includes('dúvida técnica')) {
+        return `Olá! Claro, nossa solução se integra facilmente com CRMs legados via API e no WhatsApp usamos a API Cloud oficial da Meta para total estabilidade. O que acha de fazermos uma conversa rápida de 15 minutos para eu te mostrar como funciona?`;
+      } else {
+        return `Excelente! Fico muito feliz com o interesse. O que acha de fazermos uma chamada rápida de 15 minutos amanhã às 14h ou na quinta às 10h para alinharmos os detalhes?`;
+      }
+    }
+
+    // Caso 3: Copywriter Sequência Multicanal
+    let channel = 'whatsapp';
+    if (userPrompt.includes('connection no LinkedIn') || userPrompt.includes('LinkedIn')) channel = 'linkedin';
+    if (userPrompt.includes('email de prospecção') || userPrompt.includes('email') || userPrompt.includes('Assunto:')) channel = 'email';
+    
+    const nameMatch = userPrompt.match(/Contato:\s*([^\n,]+)/);
+    const contactName = nameMatch ? nameMatch[1].trim() : 'Marina';
+    
+    const companyMatch = userPrompt.match(/Empresa:\s*([^\n]+)/);
+    const companyName = companyMatch ? companyMatch[1].trim() : 'Empresa de Teste';
+
+    const productMatch = userPrompt.match(/Produto:\s*([^\n]+)/);
+    const product = productMatch ? productMatch[1].trim() : 'solução de automação de vendas';
+
+    if (channel === 'linkedin') {
+      return `Olá ${contactName}, vi que você atua na ${companyName} e achei interessante o seu perfil. Nós ajudamos empresas de tecnologia a otimizarem seus fluxos comerciais com IA. Gostaria de conectar por aqui para trocar ideias sobre o mercado comercial B2B.`;
+    } else if (channel === 'email') {
+      return `Assunto: Otimização de processos comerciais na ${companyName}\n\nOlá ${contactName},\n\nTudo bem?\n\nVi que você é responsável pela área comercial na ${companyName} e decidi entrar em contato. Muitas empresas do setor de tecnologia sofrem com a perda de leads qualificados devido a follow-ups lentos.\n\nDesenvolvemos uma ${product} que ajuda a automatizar a triagem e o primeiro contato via WhatsApp, aumentando as taxas de conversão de leads.\n\nVocê teria 15 minutos nesta semana para uma demonstração rápida de como isso pode ajudar o seu time?\n\nAbraços,\nSDR Sales AI`;
+    } else {
+      return `Olá ${contactName}! Tudo bem?\n\nVi que você é o contato principal da ${companyName}.\n\nEstamos ajudando empresas do setor de tecnologia a automatizarem a triagem de leads com o nosso ${product}, melhorando a produtividade do time comercial.\n\nVocê teria 15 minutos para batermos um papo rápido e eu te mostrar como funciona na prática?`;
+    }
+  }
+
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -433,13 +637,16 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 800) {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-3-5-sonnet-20241022',
         max_tokens: maxTokens,
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }],
       }),
     });
     const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error ? data.error.message : 'Erro na requisição');
+    }
     return data.content[0].text;
   } catch (e) {
     return `[ERRO API: ${e.message}]`;
@@ -524,6 +731,11 @@ app.get('/api/companies', (req, res) => {
     GROUP BY c.id
     ORDER BY c.created_at DESC
   `).all();
+  
+  for (const row of rows) {
+    row.contacts = db.prepare('SELECT * FROM contacts WHERE company_id=? ORDER BY is_primary DESC, created_at ASC').all(row.id);
+  }
+
   db.close();
   res.json(rows);
 });
@@ -865,14 +1077,13 @@ app.get('/api/contacts', (req, res) => {
   res.json(rows);
 });
 
-// Timeline por empresa (Melhoria 7)
 app.get('/api/companies/:id/timeline', (req, res) => {
   const db = getDb();
 
   const logs = db.prepare("SELECT *, 'consent' as type FROM consent_logs WHERE company_id=? ORDER BY created_at DESC").all(req.params.id);
 
-  const msgs = db.prepare(`SELECT m.*, ct.name as contact_name, 'message' as type,
-    datetime('now') as created_at
+  // NOTA: Para mensagens, usamos o ID decrescente para ordenar, já que created_at não existe na tabela messages
+  const msgs = db.prepare(`SELECT m.*, ct.name as contact_name, 'message' as type
     FROM messages m LEFT JOIN contacts ct ON m.contact_id=ct.id
     WHERE m.company_id=? ORDER BY m.id DESC`).all(req.params.id);
 
@@ -882,7 +1093,45 @@ app.get('/api/companies/:id/timeline', (req, res) => {
 
   const slots = db.prepare("SELECT *, 'slot' as type FROM schedule_slots WHERE company_id=? ORDER BY created_at DESC").all(req.params.id);
 
-  const all = [...logs, ...msgs, ...sents, ...slots]
+  const mappedLogs = logs.map(l => ({
+    type: 'consent',
+    icon: 'shield-check',
+    title: l.action === 'company_added' ? 'Empresa cadastrada' : 'Consentimento atualizado',
+    description: l.details,
+    created_at: l.created_at
+  }));
+
+  const mappedMsgs = msgs.map(m => {
+    const statusLabel = m.status === 'pending' ? 'Pendente' : m.status === 'approved' ? 'Aprovada' : m.status === 'received' ? 'Recebida' : 'Enviada';
+    const icon = m.channel === 'whatsapp' ? 'whatsapp' : m.channel === 'email' ? 'envelope' : 'linkedin';
+    const direction = m.status === 'received' ? 'Recebido de' : 'Enviado para';
+    return {
+      type: 'message',
+      icon: icon,
+      title: `${m.channel.charAt(0).toUpperCase() + m.channel.slice(1)} (${statusLabel})`,
+      description: `${direction} ${m.contact_name || 'contato'}: "${m.content.substring(0, 100)}${m.content.length > 100 ? '...' : ''}"`,
+      // Como a tabela de mensagens não tem created_at, usamos a data atual simulada ou aproximada para ordenação
+      created_at: new Date().toISOString()
+    };
+  });
+
+  const mappedSents = sents.map(s => ({
+    type: 'sentiment',
+    icon: 'emoji-smile',
+    title: `Análise de Sentimento: ${s.sentiment.toUpperCase()}`,
+    description: `Mensagem de ${s.contact_name || 'contato'}: "${s.response_text}" | Score de Interesse: ${s.interest_score}/10`,
+    created_at: s.created_at
+  }));
+
+  const mappedSlots = slots.map(sl => ({
+    type: 'slot',
+    icon: 'calendar-event',
+    title: `Reunião agendada`,
+    description: `Horário: ${sl.time_slot} com o time comercial`,
+    created_at: sl.created_at
+  }));
+
+  const all = [...mappedLogs, ...mappedMsgs, ...mappedSents, ...mappedSlots]
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
   db.close();
@@ -982,6 +1231,10 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
   const socialProof = golden.map(g => `- ${g.title}: ${g.content.substring(0, 80)}...`).join('\n');
   db.close();
 
+  const painPoint = req.body.pain_point || '';
+  const painLine = painPoint ? ('Dor principal do lead: ' + painPoint) : '';
+  const painCTA  = painPoint ? 'IMPORTANTE: a mensagem deve abordar diretamente a dor mencionada acima como ponto de entrada.' : '';
+
   const results = [];
   for (const tpl of SEQUENCE_CHANNELS) {
     const channelDesc = {
@@ -1006,7 +1259,7 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
 
     const content = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', prompt, 400);
     const db3 = getDb();
-    const r = db3.prepare('INSERT INTO messages (lead_id, contact_id, company_id, channel, day, msg_type, content, ai_original, status) VALUES (?,?,?,?,?,?,?,?,?)').run(contact.id, contact.id, req.params.id, tpl.channel, tpl.day, tpl.type, content, content, 'pending');
+    const r = db3.prepare('INSERT INTO messages (lead_id, contact_id, company_id, channel, day, msg_type, content, ai_original, status) VALUES (?,?,?,?,?,?,?,?,?)').run(null, contact.id, req.params.id, tpl.channel, tpl.day, tpl.type, content, content, 'pending');
     db3.close();
     results.push({ id: r.lastInsertRowid, channel: tpl.channel, day: tpl.day, content, status: 'pending', approved: 0, contact_name: contact.name });
   }
@@ -1014,7 +1267,7 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
   const db4 = getDb();
   db4.prepare("UPDATE companies SET status='sequence_created' WHERE id=?").run(req.params.id);
   db4.close();
-  res.json({ sequence: results, contact });
+  res.json({ sequence: results, messages: results, contact });
 });
 
 // ── Geração de sequência em lote (multi-lead, multi-produto) ─────────────────
@@ -1056,7 +1309,7 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
 
     const content = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', prompt, 400);
     const dbW = getDb();
-    const r = dbW.prepare('INSERT INTO messages (lead_id, contact_id, company_id, channel, day, msg_type, content, ai_original, status) VALUES (?,?,?,?,?,?,?,?,?)').run(contact.id, contact.id, companyId, tpl.channel, tpl.day, tpl.type, content, content, 'pending');
+    const r = dbW.prepare('INSERT INTO messages (lead_id, contact_id, company_id, channel, day, msg_type, content, ai_original, status) VALUES (?,?,?,?,?,?,?,?,?)').run(null, contact.id, companyId, tpl.channel, tpl.day, tpl.type, content, content, 'pending');
     dbW.close();
     results.push({ id: r.lastInsertRowid, channel: tpl.channel, day: tpl.day, content, status: 'pending', approved: 0, contact_name: contact.name });
   }
@@ -1176,6 +1429,58 @@ app.post('/api/companies/propensity', async (req, res) => {
     if (info) { r.company_name = info.name; r.contact_name = info.contact_name; r.sector = info.sector; }
   });
   res.json({ product, rankings: parsed.rankings || [] });
+});
+
+app.post('/api/companies/:id/simulator/inbound', async (req, res) => {
+  const { response_text, contact_id } = req.body;
+  const companyId = req.params.id;
+  const db = getDb();
+  const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(contact_id);
+  if (!contact) { db.close(); return res.status(404).json({ error: 'Contato não encontrado' }); }
+
+  // 1. Abre a janela de 24h
+  db.prepare("UPDATE contacts SET last_wa_interaction = datetime('now') WHERE id=?").run(contact_id);
+
+  // 2. Insere a mensagem recebida no banco como recebida
+  db.prepare(
+    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, 'received', 1)"
+  ).run(contact_id, companyId, response_text, response_text);
+  db.close();
+
+  // 3. Roda a classificação de sentimento da IA e gera o rascunho de resposta automática
+  const prompt = `
+Mensagem recebida do prospect: "${response_text}"
+Classifique e responda APENAS em JSON válido:
+{"sentiment": "interested"|"technical_question"|"negative"|"out_of_scope",
+ "reasoning": "explicação em 1 frase",
+ "interest_score": 1-10}`;
+
+  const result = await callClaude('Você é classificador de intenção em vendas B2B.', prompt, 200);
+  let sentiment, reasoning, iscore;
+  try { const p = JSON.parse(result); sentiment = p.sentiment; reasoning = p.reasoning; iscore = parseInt(p.interest_score) || 5; }
+  catch { sentiment = 'out_of_scope'; reasoning = result; iscore = 5; }
+
+  const db2 = getDb();
+  db2.prepare('INSERT INTO sentiment_logs (lead_id, contact_id, company_id, response_text, sentiment, reasoning, interest_score) VALUES (?,?,?,?,?,?,?)').run(null, contact_id, companyId, response_text, sentiment, reasoning, iscore);
+  const statusMap = { interested: 'hot_lead', technical_question: 'needs_followup', negative: 'rejected', out_of_scope: 'contacted' };
+  db2.prepare('UPDATE companies SET status=?,interest_score=? WHERE id=?').run(statusMap[sentiment] || 'contacted', iscore, companyId);
+  db2.close();
+
+  // 4. Se for sentimento positivo, gera um rascunho de resposta e insere na fila de messages pendentes do CRM!
+  if (sentiment === 'interested' || sentiment === 'technical_question') {
+    const draftPrompt = sentiment === 'technical_question'
+      ? `O prospect enviou: "${response_text}"\nEle tem uma dúvida técnica. Escreva uma resposta curta (máx 80 palavras) que responda de forma objetiva e convide para uma conversa de 15 minutos para aprofundar. Tom consultivo.`
+      : `O prospect enviou: "${response_text}"\nEle demonstrou interesse. Escreva uma resposta curta (máx 60 palavras) que confirme o interesse e proponha uma reunião de 15 minutos. Tom entusiasmado mas profissional.`;
+    const draft_reply = await callClaude('Você é SDR especialista em respostas rápidas para prospects interessados.', draftPrompt, 200);
+
+    const db3 = getDb();
+    db3.prepare(
+      "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, 'pending', 0)"
+    ).run(contact_id, companyId, draft_reply, draft_reply);
+    db3.close();
+  }
+
+  res.json({ ok: true, sentiment, interest_score: iscore });
 });
 
 app.post('/api/companies/:id/response', async (req, res) => {
@@ -1298,8 +1603,66 @@ app.get('/api/companies/:id/opportunities', (req, res) => {
 });
 
 // Messages
-app.post('/api/messages/:id/approve', (req, res) => {
+app.post('/api/messages/:id/approve', async (req, res) => {
   const db = getDb();
+  const msg = db.prepare('SELECT * FROM messages WHERE id=?').get(req.params.id);
+  if (!msg) {
+    db.close();
+    return res.status(404).json({ error: 'Mensagem não encontrada' });
+  }
+
+  if (msg.channel === 'whatsapp') {
+    let whatsappNum = null;
+    let contactId = null;
+    let contactType = null;
+
+    if (msg.contact_id) {
+      const contact = db.prepare('SELECT id, whatsapp FROM contacts WHERE id=?').get(msg.contact_id);
+      if (contact) {
+        whatsappNum = contact.whatsapp;
+        contactId = contact.id;
+        contactType = 'contact';
+      }
+    } else if (msg.lead_id) {
+      const lead = db.prepare('SELECT id, whatsapp FROM leads WHERE id=?').get(msg.lead_id);
+      if (lead) {
+        whatsappNum = lead.whatsapp;
+        contactId = lead.id;
+        contactType = 'lead';
+      }
+    }
+
+    if (whatsappNum) {
+      const dbRef = {
+        type: contactType,
+        id: contactId,
+        forceTemplate: false
+      };
+
+      // Verifica se a janela de 24h está aberta
+      const table = contactType === 'contact' ? 'contacts' : 'leads';
+      const c = db.prepare(`SELECT last_wa_interaction FROM ${table} WHERE id = ?`).get(contactId);
+      let windowOpen = false;
+      if (c && c.last_wa_interaction) {
+        const lastInt = new Date(c.last_wa_interaction);
+        const diffHrs = (new Date() - lastInt) / (1000 * 60 * 60);
+        if (diffHrs < 24) windowOpen = true;
+      }
+
+      if (!windowOpen) {
+        // Se a janela estiver fechada, forçamos o hello_world (sandbox da Meta)
+        dbRef.forceTemplate = true;
+        dbRef.templateName = 'hello_world';
+      }
+
+      const success = await sendWhatsAppMessage(whatsappNum, msg.content, dbRef);
+      if (!success) {
+        db.close();
+        return res.status(500).json({ error: 'Erro ao enviar WhatsApp. O número do destinatário está verificado na Meta e o token está válido?' });
+      }
+    }
+  }
+
   db.prepare("UPDATE messages SET approved=1,status='approved' WHERE id=?").run(req.params.id);
   db.close();
   res.json({ ok: true });
