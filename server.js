@@ -653,6 +653,43 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 800) {
   }
 }
 
+// Variante com BUSCA WEB REAL (ferramenta nativa do Claude). Usada na pesquisa de
+// prospecção para fundamentar os ganchos em informações reais e atuais da empresa.
+// Em qualquer falha/indisponibilidade, faz fallback para callClaude (sem busca).
+async function callClaudeWithSearch(systemPrompt, userPrompt, maxTokens = 1500) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || apiKey === 'sk-ant-sua-chave-aqui') return callClaude(systemPrompt, userPrompt, maxTokens);
+  let messages = [{ role: 'user', content: userPrompt }];
+  try {
+    for (let iter = 0; iter < 5; iter++) {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: maxTokens,
+          system: systemPrompt,
+          tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
+          messages,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ? data.error.message : 'Erro na requisição');
+      // Loop server-side da ferramenta: se pausou, devolve o conteúdo e continua.
+      if (data.stop_reason === 'pause_turn') {
+        messages = [...messages, { role: 'assistant', content: data.content }];
+        continue;
+      }
+      const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+      return text || callClaude(systemPrompt, userPrompt, maxTokens);
+    }
+    return callClaude(systemPrompt, userPrompt, maxTokens);
+  } catch (e) {
+    console.warn('[web_search] indisponível, usando pesquisa sem busca:', e.message);
+    return callClaude(systemPrompt, userPrompt, maxTokens);
+  }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // ROTAS DE AUTENTICAÇÃO
 // ════════════════════════════════════════════════════════════════════════════
@@ -1232,23 +1269,27 @@ app.post('/api/companies/:id/research', async (req, res) => {
   db.close();
 
   const prompt = `
-Empresa-alvo: ${company.name} (setor: ${company.sector || 'não informado'})
-Contato principal: ${contact ? contact.name + ' (' + contact.role + ')' : 'não definido'}
+Pesquise na WEB informações REAIS e recentes sobre a empresa "${company.name}"${company.sector ? ' (setor: ' + company.sector + ')' : ''}${contact ? ' e, se possível, sobre o contato ' + contact.name + ' (' + contact.role + ')' : ''}. Procure por: notícias recentes, expansões, contratações, rodadas de investimento, lançamentos de produto, parcerias e desafios do setor.
+
 Produto sendo vendido: ${productValue}
 Perfil do cargo: foco em ${roleInfo.focus}, tom ${roleInfo.tone}
 ${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
 
-Gere um JSON com:
-- "research_context": 2-3 ganchos plausíveis sobre a empresa (expansões, desafios do setor, tendências)
-- "hook": frase de abertura hiperpersonalizada (máx 2 linhas), conectando um gancho ao produto
-- "pain_points": lista de 3 dores específicas do setor/porte da empresa
-- "value_proposition": proposta de valor adaptada ao perfil
+Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com exatamente estas chaves:
+- "research_context": array de 2-3 strings curtas (uma frase cada), cada uma com um fato REAL encontrado
+- "hook": uma única string (máx 2 linhas) conectando um gancho real ao produto
+- "pain_points": array de exatamente 3 strings (dores específicas do setor/porte)
+- "value_proposition": uma única string
+- "sources": array de URLs usados como fonte (strings)
 
-Responda APENAS com JSON válido, sem markdown.`;
+Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em tendências reais do setor e indique isso. Responda APENAS com JSON válido, sem markdown, sem comentários.`;
 
-  const result = await callClaude('Você é assistente de pesquisa de vendas B2B especializado em prospecção personalizada.', prompt, 900);
+  const result = await callClaudeWithSearch('Você é assistente de pesquisa de vendas B2B que usa busca na web para encontrar informações reais e atuais sobre empresas e seus executivos.', prompt, 2600);
   let hook, ctx;
-  try { const p = JSON.parse(result); hook = p.hook || result; ctx = JSON.stringify(p); }
+  let raw = (result || '').replace(/```json\s*|\s*```/g, '').trim();
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (jsonMatch) raw = jsonMatch[0];
+  try { const p = JSON.parse(raw); hook = p.hook || result; ctx = JSON.stringify(p); }
   catch { hook = result; ctx = result; }
 
   const db2 = getDb();
