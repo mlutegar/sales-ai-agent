@@ -766,6 +766,64 @@ app.post('/api/companies', (req, res) => {
   res.json({ id: companyId, contact_id: contactId });
 });
 
+// Mapeia cargo em texto livre (ex.: "Diretor Comercial") para a categoria do sistema.
+function roleFromText(text) {
+  const t = (text || '').toString().toLowerCase();
+  // siglas só como palavra inteira (evita "Coordenador" casar com "coo")
+  if (/\b(ceo|cfo|cto|cio|ciso|cdo|cmo|coo|vp)\b/.test(t) || /(diretor|diretora|presidente|vice|head|chief|founder|fundador|s[oó]cio|owner|propriet|superintendente)/.test(t)) return 'c_level';
+  if (/(gerente|gestor|gestora|coordenad|supervisor|manager|l[ií]der|\blead\b)/.test(t)) return 'manager';
+  if (/(engenhei|desenvolvedor|developer|\bdev\b|t[eé]cnico|anal[ií]sta de ti|\bti\b|software|infra)/.test(t)) return 'engineer';
+  return 'other';
+}
+
+// Importação em massa (planilha Excel/CSV): agrupa contatos pela mesma empresa,
+// cria a empresa uma vez e anexa os demais contatos a ela. Não chama IA.
+app.post('/api/companies/import-bulk', (req, res) => {
+  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  if (!rows.length) return res.status(400).json({ error: 'Nenhuma linha para importar' });
+  const db = getDb();
+  let companiesCreated = 0, contactsCreated = 0, skipped = 0;
+  const errors = [];
+
+  const findCompany   = db.prepare('SELECT id FROM companies WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))');
+  const insCompany    = db.prepare('INSERT INTO companies (name, sector) VALUES (?, ?)');
+  const logCompany    = db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?,?,?)');
+  const findContact   = db.prepare("SELECT id FROM contacts WHERE email != '' AND email=? AND company_id=?");
+  const countContacts = db.prepare('SELECT COUNT(*) as c FROM contacts WHERE company_id=?');
+  const insContact    = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary) VALUES (?,?,?,?,?,?,?)');
+  const logContact    = db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)');
+
+  for (const row of rows) {
+    const companyName = (row.company || '').toString().trim();
+    if (!companyName) { skipped++; continue; }
+
+    let comp = findCompany.get(companyName);
+    let companyId;
+    if (comp) {
+      companyId = comp.id;
+    } else {
+      companyId = insCompany.run(companyName, (row.sector || '').toString().trim()).lastInsertRowid;
+      logCompany.run(companyId, 'company_added', `Empresa "${companyName}" importada (planilha)`);
+      companiesCreated++;
+    }
+
+    const contactName = (row.contact_name || '').toString().trim();
+    if (!contactName) continue; // linha só de empresa, sem contato
+
+    let email = (row.email || '').toString().trim();
+    if (email && !isValidEmailServer(email)) { errors.push(`E-mail inválido ignorado: ${email}`); email = ''; }
+    if (email && findContact.get(email, companyId)) { skipped++; continue; } // contato duplicado nessa empresa
+
+    const isPrimary = countContacts.get(companyId).c === 0 ? 1 : 0;
+    const cr = insContact.run(companyId, contactName, roleFromText(row.role), email, '', normalizePhone(row.whatsapp), isPrimary);
+    logContact.run(companyId, cr.lastInsertRowid, 'contact_added', `Contato "${contactName}" importado (planilha)`);
+    contactsCreated++;
+  }
+
+  db.close();
+  res.json({ ok: true, companies_created: companiesCreated, contacts_created: contactsCreated, skipped, errors: errors.slice(0, 20) });
+});
+
 app.get('/api/companies/:id', (req, res) => {
   const db = getDb();
   const company = db.prepare('SELECT * FROM companies WHERE id=?').get(req.params.id);

@@ -110,9 +110,72 @@ function AddForm({ onAdded, toast }) {
 function CSVImport({ toast, onAdded }) {
   const [csvResult, setCsvResult] = useState('');
   const [enrichResult, setEnrichResult] = useState('');
+  const [excelResult, setExcelResult] = useState('');
+  const [excelLoading, setExcelLoading] = useState(false);
   const [autoEnrich, setAutoEnrich] = useState(true);
   const csvRef = useRef();
   const enrichRef = useRef();
+  const excelRef = useRef();
+
+  // Importa planilha Excel (.xlsx). Lê o cabeçalho por nome (qualquer ordem),
+  // mapeia as colunas e envia em massa — o backend agrupa contatos por empresa.
+  async function importExcel() {
+    const file = excelRef.current?.files[0];
+    if (!file) { toast('Selecione um arquivo Excel (.xlsx)', 'warning'); return; }
+    if (!window.XLSX) { toast('Leitor de Excel não carregou (verifique a conexão).', 'danger'); return; }
+    setExcelLoading(true);
+    setExcelResult('Lendo planilha...');
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = window.XLSX.read(buf, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const aoa = window.XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, defval: '' });
+      const norm = (s) => String(s ?? '').trim().toLowerCase();
+
+      // Acha a linha de cabeçalho (pula linhas em branco/título no topo)
+      let headerIdx = aoa.findIndex((r) => r.some((c) => ['empresa', 'nome', 'email', 'e-mail', 'contato'].includes(norm(c))));
+      if (headerIdx === -1) headerIdx = 0;
+      const headers = aoa[headerIdx].map(norm);
+      const col = (...names) => headers.findIndex((h) => names.includes(h));
+      const idx = {
+        company: col('empresa', 'company', 'cliente', 'empresa/cliente'),
+        contact: col('nome', 'contato', 'contact', 'nome do contato'),
+        role: col('cargo', 'title', 'função', 'funcao', 'titulo'),
+        email: col('email', 'e-mail'),
+        whatsapp: col('whatsapp', 'telefone', 'celular', 'fone'),
+        sector: col('setor', 'segmento', 'indústria', 'industria'),
+      };
+      if (idx.company === -1 && idx.contact === -1) {
+        setExcelResult('❌ Não encontrei colunas "Empresa"/"Nome" no cabeçalho.');
+        setExcelLoading(false); return;
+      }
+      const get = (r, k) => (idx[k] >= 0 ? String(r[idx[k]] ?? '').trim() : '');
+      const rows = [];
+      for (let i = headerIdx + 1; i < aoa.length; i++) {
+        const r = aoa[i];
+        const company = get(r, 'company');
+        const contact = get(r, 'contact');
+        if (!company && !contact) continue;
+        rows.push({ company, contact_name: contact, role: get(r, 'role'), email: get(r, 'email'), whatsapp: get(r, 'whatsapp'), sector: get(r, 'sector') });
+      }
+      if (!rows.length) { setExcelResult('❌ Nenhuma linha de dados encontrada.'); setExcelLoading(false); return; }
+
+      setExcelResult(`Importando ${rows.length} linha(s)...`);
+      const res = await fetch(`${API}/api/companies/import-bulk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows }),
+      });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      setExcelResult(`✅ ${d.companies_created} empresa(s), ${d.contacts_created} contato(s)${d.skipped ? `, ${d.skipped} ignorado(s)` : ''}`);
+      onAdded();
+    } catch (err) {
+      setExcelResult('❌ ' + (err.message || 'Erro ao importar'));
+    } finally {
+      setExcelLoading(false);
+    }
+  }
 
   async function importCSV() {
     const file = csvRef.current?.files[0];
@@ -191,6 +254,15 @@ function CSVImport({ toast, onAdded }) {
         <i className="bi bi-search me-1"></i>Importar e Enriquecer
       </button>
       {enrichResult && <div className="mt-2 small text-muted">{enrichResult}</div>}
+
+      <hr />
+      <h6 className="fw-bold mb-2"><i className="bi bi-file-earmark-excel me-1"></i>Importar Excel (.xlsx)</h6>
+      <p className="small text-muted mb-2">Lê o cabeçalho automaticamente (Empresa, Nome, Cargo, Email, WhatsApp). Agrupa contatos da mesma empresa.</p>
+      <input type="file" ref={excelRef} accept=".xlsx,.xls" className="form-control form-control-sm mb-2" />
+      <button className="btn btn-outline-primary btn-sm w-100" onClick={importExcel} disabled={excelLoading}>
+        <i className="bi bi-upload me-1"></i>{excelLoading ? 'Importando...' : 'Importar Excel'}
+      </button>
+      {excelResult && <div className="mt-2 small text-muted">{excelResult}</div>}
     </>
   );
 }
