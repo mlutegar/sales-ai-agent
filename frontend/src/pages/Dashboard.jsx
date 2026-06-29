@@ -56,22 +56,37 @@ export default function Dashboard({ toast }) {
           <div className="col-12">
             <div className="card p-3">
               <h6 className="fw-bold mb-3"><i className="bi bi-filter me-1"></i>Funil de Status</h6>
-              <div className="d-flex gap-2 flex-wrap align-items-center">
+              <div className="d-flex gap-2 flex-wrap align-items-stretch">
                 {statusOrder.map((s, idx) => {
                   const count = statusCounts[s] || 0
+                  const color = statusColors[s] || '#6c757d'
+                  const active = count > 0
                   return (
                     <React.Fragment key={s}>
-                      <div className="funnel-card" style={{ background: statusColors[s] || '#6c757d' }}>
-                        <div className="funnel-num">{count}</div>
-                        <div className="funnel-label">{STATUS_LABEL[s] || s}</div>
+                      <div style={{
+                        flex: '1 1 0', minWidth: 92, textAlign: 'center', borderRadius: 10,
+                        padding: '14px 8px', background: active ? color : '#f1f3f5',
+                        color: active ? '#fff' : '#adb5bd', border: active ? 'none' : '1px solid #e9ecef',
+                        boxShadow: active ? '0 1px 3px rgba(0,0,0,.12)' : 'none',
+                      }}>
+                        <div style={{ fontSize: '1.7rem', fontWeight: 700, lineHeight: 1 }}>{count}</div>
+                        <div style={{ fontSize: '.72rem', marginTop: 5 }}>{STATUS_LABEL[s] || s}</div>
                       </div>
                       {idx < statusOrder.length - 1 && (
-                        <div className="text-muted fs-4">→</div>
+                        <div className="d-flex align-items-center text-muted">→</div>
                       )}
                     </React.Fragment>
                   )
                 })}
               </div>
+              {((statusCounts.needs_followup || 0) + (statusCounts.rejected || 0) + (statusCounts.opted_out || 0)) > 0 && (
+                <div className="d-flex gap-3 mt-3 pt-2 border-top small text-muted flex-wrap">
+                  <span className="fw-semibold">Fora do funil:</span>
+                  {statusCounts.needs_followup > 0 && <span><span className="badge bg-warning text-dark me-1">{statusCounts.needs_followup}</span>Aguard. follow-up</span>}
+                  {statusCounts.rejected > 0 && <span><span className="badge bg-secondary me-1">{statusCounts.rejected}</span>Rejeitados</span>}
+                  {statusCounts.opted_out > 0 && <span><span className="badge bg-dark me-1">{statusCounts.opted_out}</span>Opt-out</span>}
+                </div>
+              )}
             </div>
           </div>
           

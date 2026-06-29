@@ -88,11 +88,28 @@ function MessageCard({ msg, contacts, toast }) {
 
   const contactName = contacts.find(c => c.id === msg.contact_id)?.name || '';
 
+  // Mensagem RECEBIDA do cliente: balão de entrada, sem selo "Aprovado" e sem ações.
+  if (msg.status === 'received') {
+    return (
+      <div className="border rounded p-2 mb-2" style={{ background: '#e9fbef', borderColor: '#a3e4bf', borderLeft: '4px solid #25d366' }}>
+        <div className="d-flex align-items-center gap-1 mb-1 flex-wrap">
+          <span className="badge" style={{ background: '#25d366', color: '#fff', fontSize: '.65rem' }}>
+            <i className="bi bi-chat-left-text me-1" />Resposta do cliente
+          </span>
+          {channelBadge(msg.channel)}
+          {contactName && <span className="text-muted small">{contactName}</span>}
+        </div>
+        <div style={{ whiteSpace: 'pre-wrap', fontSize: '.9rem', padding: '2px' }}>{msg.content}</div>
+      </div>
+    );
+  }
+
   return (
     <div className="border rounded p-2 mb-2" style={{ background: '#fff' }}>
       <div className="d-flex align-items-center gap-1 mb-1 flex-wrap">
         {channelBadge(msg.channel)}
         {contactName && <span className="text-muted small">{contactName}</span>}
+        {!approved && <span className="badge bg-warning text-dark" style={{ fontSize: '.65rem' }}><i className="bi bi-stars me-1" />Sugestão da IA</span>}
         {approved && <span className="badge bg-success" style={{ fontSize: '.65rem' }}>Aprovado</span>}
         {sent && <span className="badge bg-primary" style={{ fontSize: '.65rem' }}>Enviado</span>}
       </div>
@@ -217,6 +234,15 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
   // ── hand-off
   const [showHandoff, setShowHandoff] = useState(false);
 
+  const loadTimeline = useCallback(async () => {
+    if (!companyId) return;
+    try {
+      const res = await fetch(`${API}/api/companies/${companyId}/timeline`);
+      const data = await res.json();
+      setTimeline(data.timeline || data || []);
+    } catch {}
+  }, [companyId]);
+
   // ─── load company ──────────────────────────────────────────────────────────
   const loadCompany = useCallback(async () => {
     if (!companyId) return;
@@ -224,12 +250,17 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
     try {
       const res = await fetch(`${API}/api/companies/${companyId}`);
       const data = await res.json();
-      setCompany(data);
+      // a API retorna { company:{...}, contacts, messages, sentiments, ... } — achatamos
+      // os campos da empresa para o topo (status/score/name) mantendo os arrays acessíveis.
+      setCompany({ ...(data.company || {}), ...data });
       setContacts(data.contacts || []);
-      setEditName(data.name || '');
-      setEditSector(data.sector || '');
-      // sentiment history / consent log already in data
-      // hand-off check
+      setMessages(data.messages || []);
+      setEditName(data.company?.name || '');
+      setEditSector(data.company?.sector || '');
+      
+      // Carrega a linha do tempo junto
+      loadTimeline();
+
       if (data.interest_score >= 7 && data.last_sentiment === 'interested') {
         setShowHandoff(true);
       }
@@ -237,7 +268,7 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
       toast('Erro ao carregar empresa.', 'danger');
     }
     setLoading(false);
-  }, [companyId]);
+  }, [companyId, loadTimeline]);
 
   useEffect(() => {
     loadCompany();
@@ -251,14 +282,10 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
       .catch(() => {});
   }, []);
 
-  // load timeline
+  // load timeline initial
   useEffect(() => {
-    if (!companyId) return;
-    fetch(`${API}/api/companies/${companyId}/timeline`)
-      .then(r => r.json())
-      .then(d => setTimeline(d.timeline || d || []))
-      .catch(() => {});
-  }, [companyId]);
+    loadTimeline();
+  }, [loadTimeline]);
 
   // ─── inline edit ───────────────────────────────────────────────────────────
   async function saveCompanyEdit() {
@@ -298,8 +325,9 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
     try {
       await fetch(`${API}/api/companies/${companyId}`, { method: 'DELETE' });
       toast('Empresa excluída.', 'success');
-      onClose();
+      if (onCompanyUpdated) onCompanyUpdated();
       if (loadStats) loadStats();
+      onClose();
     } catch {
       toast('Erro ao excluir.', 'danger');
     }
@@ -382,6 +410,30 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
     setSentimentLoading(false);
   }
 
+  async function simulateWhatsAppInbound() {
+    if (!responseText.trim()) { toast('Digite a resposta do prospect.', 'warning'); return; }
+    if (!responseContactId) { toast('Selecione o contato.', 'warning'); return; }
+    setSentimentLoading(true);
+    try {
+      const res = await fetch(`${API}/api/companies/${companyId}/simulator/inbound`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response_text: responseText, contact_id: responseContactId }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      const SENT_LABEL = { interested: '🔥 Interessado → Hot Lead', technical_question: 'Dúvida técnica → Aguard. follow-up', negative: 'Negativo → Rejeitado', out_of_scope: 'Fora de escopo → Contactado' };
+      toast(`Resposta classificada: ${SENT_LABEL[data.sentiment] || data.sentiment} (score ${data.interest_score})`, 'success');
+      setResponseText('');
+      loadCompany();              // recarrega o modal (timeline/mensagens/status)
+      if (onCompanyUpdated) onCompanyUpdated(); // atualiza a lista de empresas por trás (badge do status)
+      if (loadStats) loadStats(); // atualiza os contadores (Hot Leads etc.)
+    } catch (err) {
+      toast(err.message || 'Erro ao simular.', 'danger');
+    }
+    setSentimentLoading(false);
+  }
+
   // ─── contacts ──────────────────────────────────────────────────────────────
   async function addContact() {
     if (!newContact.name.trim()) { toast('Nome do contato obrigatório.', 'warning'); return; }
@@ -409,6 +461,8 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
       await fetch(`${API}/api/companies/${companyId}/contacts/${contactId}`, { method: 'DELETE' });
       setContacts(prev => prev.filter(c => c.id !== contactId));
       toast('Contato removido.', 'info');
+      if (onCompanyUpdated) onCompanyUpdated();
+      if (loadStats) loadStats();
     } catch {
       toast('Erro ao remover contato.', 'danger');
     }
@@ -817,6 +871,16 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
                             : <><i className="bi bi-bullseye me-1" />Analisar Sentimento</>
                           }
                         </button>
+                        <button
+                          className="btn btn-success btn-sm ms-2"
+                          disabled={sentimentLoading}
+                          onClick={simulateWhatsAppInbound}
+                        >
+                          {sentimentLoading
+                            ? <span className="spinner-border spinner-border-sm" />
+                            : <><i className="bi bi-whatsapp me-1" />Simular no WhatsApp</>
+                          }
+                        </button>
 
                         {sentimentResult && (
                           <div className="mt-3">
@@ -1092,7 +1156,12 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
                         {company && (
                           <table className="table table-sm table-borderless mb-0">
                             <tbody>
-                              <tr><td className="text-muted">Status</td><td>{company.status || '—'}</td></tr>
+                              <tr><td className="text-muted">Status</td><td>{(() => {
+                                const S = { new: ['secondary', 'Novo'], researched: ['info', 'Pesquisado'], sequence_created: ['primary', 'Sequência criada'], contacted: ['primary', 'Contactado'], hot_lead: ['danger', '🔥 Hot Lead'], needs_followup: ['warning text-dark', 'Aguard. follow-up'], meeting_set: ['success', '✅ Reunião'], opted_out: ['secondary', 'Opt-out'], rejected: ['secondary', 'Rejeitado'] };
+                                if (!company.status) return '—';
+                                const v = S[company.status] || ['secondary', company.status];
+                                return <span className={`badge bg-${v[0]}`}>{v[1]}</span>;
+                              })()}</td></tr>
                               <tr><td className="text-muted">Setor</td><td>{company.sector || '—'}</td></tr>
                               <tr>
                                 <td className="text-muted">Score</td>
@@ -1165,16 +1234,17 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
                         <i className="bi bi-graph-up me-1" />Histórico de Sentimentos
                       </div>
                       <div className="card-body">
-                        {(company?.sentiment_history || []).length === 0 ? (
+                        {(company?.sentiments || []).length === 0 ? (
                           <p className="text-muted small">Nenhum registro.</p>
                         ) : (
-                          (company.sentiment_history || []).map((s, i) => (
-                            <div key={i} className="d-flex align-items-center gap-2 mb-1 small">
-                              <span className="text-muted">{new Date(s.created_at).toLocaleDateString('pt-BR')}</span>
+                          (company.sentiments || []).map((s, i) => (
+                            <div key={i} className="d-flex align-items-center gap-2 mb-1 small flex-wrap">
+                              <span className="text-muted">{s.created_at ? new Date(s.created_at).toLocaleDateString('pt-BR') : ''}</span>
                               {sentimentBadge(s.sentiment)}
-                              {s.score !== undefined && (
-                                <span className="badge bg-info">Score: {s.score}</span>
+                              {s.interest_score != null && (
+                                <span className="badge bg-info">Score: {s.interest_score}</span>
                               )}
+                              {s.response_text && <span className="text-muted">"{s.response_text.slice(0, 40)}"</span>}
                             </div>
                           ))
                         )}

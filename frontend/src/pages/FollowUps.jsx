@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { api, esc, ROLE_LABEL } from '../api.js'
 
-export default function FollowUps({ toast, loadStats }) {
+export default function FollowUps({ toast, loadStats, dataVersion }) {
   const [days, setDays] = useState('7')
   const [pending, setPending] = useState([])
   const [loading, setLoading] = useState(false)
@@ -22,8 +22,17 @@ export default function FollowUps({ toast, loadStats }) {
     }
   }
 
+  // Recarrega ao trocar o filtro de dias e sempre que houver uma mutação global
+  // (ex.: empresa/contato excluído em outra aba) via dataVersion.
   useEffect(() => {
     loadFollowupPending()
+  }, [days, dataVersion])
+
+  // Recarrega quando o usuário volta o foco para a janela/aba do navegador.
+  useEffect(() => {
+    const onFocus = () => loadFollowupPending()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
   }, [days])
 
   const genFollowup = async (id) => {
