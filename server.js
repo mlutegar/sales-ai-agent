@@ -741,16 +741,29 @@ app.get('/api/companies', (req, res) => {
 });
 
 app.post('/api/companies', (req, res) => {
-  const { name, sector } = req.body;
+  const { name, sector, contact_name, contact_role, contact_email, contact_linkedin, contact_whatsapp } = req.body;
   if (!name) return res.status(400).json({ error: 'Nome da empresa é obrigatório' });
   const db = getDb();
   const dup = db.prepare('SELECT id FROM companies WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))').get(name);
   if (dup) { db.close(); return res.status(409).json({ error: 'Empresa já cadastrada', existing_id: dup.id }); }
+  // Valida e-mail do primeiro contato antes de criar a empresa (evita órfã).
+  if (contact_name && contact_name.trim() && contact_email && !isValidEmailServer(contact_email)) {
+    db.close();
+    return res.status(400).json({ error: 'E-mail do contato inválido' });
+  }
   const r = db.prepare('INSERT INTO companies (name, sector) VALUES (?, ?)').run(name, sector || '');
   const companyId = r.lastInsertRowid;
   db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?, ?, ?)').run(companyId, 'company_added', `Empresa "${name}" adicionada ao sistema`);
+  // Cria o primeiro contato (enviado pelo formulário "Nova Empresa") se informado.
+  let contactId = null;
+  if (contact_name && contact_name.trim()) {
+    const cr = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary) VALUES (?,?,?,?,?,?,1)')
+      .run(companyId, contact_name.trim(), contact_role || 'other', contact_email || '', contact_linkedin || '', normalizePhone(contact_whatsapp));
+    contactId = cr.lastInsertRowid;
+    db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(companyId, contactId, 'contact_added', `Contato "${contact_name.trim()}" adicionado`);
+  }
   db.close();
-  res.json({ id: companyId });
+  res.json({ id: companyId, contact_id: contactId });
 });
 
 app.get('/api/companies/:id', (req, res) => {
