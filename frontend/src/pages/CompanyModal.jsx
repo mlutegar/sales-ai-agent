@@ -88,11 +88,28 @@ function MessageCard({ msg, contacts, toast }) {
 
   const contactName = contacts.find(c => c.id === msg.contact_id)?.name || '';
 
+  // Mensagem RECEBIDA do cliente: balão de entrada, sem selo "Aprovado" e sem ações.
+  if (msg.status === 'received') {
+    return (
+      <div className="border rounded p-2 mb-2" style={{ background: '#e9fbef', borderColor: '#a3e4bf', borderLeft: '4px solid #25d366' }}>
+        <div className="d-flex align-items-center gap-1 mb-1 flex-wrap">
+          <span className="badge" style={{ background: '#25d366', color: '#fff', fontSize: '.65rem' }}>
+            <i className="bi bi-chat-left-text me-1" />Resposta do cliente
+          </span>
+          {channelBadge(msg.channel)}
+          {contactName && <span className="text-muted small">{contactName}</span>}
+        </div>
+        <div style={{ whiteSpace: 'pre-wrap', fontSize: '.9rem', padding: '2px' }}>{msg.content}</div>
+      </div>
+    );
+  }
+
   return (
     <div className="border rounded p-2 mb-2" style={{ background: '#fff' }}>
       <div className="d-flex align-items-center gap-1 mb-1 flex-wrap">
         {channelBadge(msg.channel)}
         {contactName && <span className="text-muted small">{contactName}</span>}
+        {!approved && <span className="badge bg-warning text-dark" style={{ fontSize: '.65rem' }}><i className="bi bi-stars me-1" />Sugestão da IA</span>}
         {approved && <span className="badge bg-success" style={{ fontSize: '.65rem' }}>Aprovado</span>}
         {sent && <span className="badge bg-primary" style={{ fontSize: '.65rem' }}>Enviado</span>}
       </div>
@@ -233,11 +250,13 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
     try {
       const res = await fetch(`${API}/api/companies/${companyId}`);
       const data = await res.json();
-      setCompany(data);
+      // a API retorna { company:{...}, contacts, messages, sentiments, ... } — achatamos
+      // os campos da empresa para o topo (status/score/name) mantendo os arrays acessíveis.
+      setCompany({ ...(data.company || {}), ...data });
       setContacts(data.contacts || []);
       setMessages(data.messages || []);
-      setEditName(data.name || '');
-      setEditSector(data.sector || '');
+      setEditName(data.company?.name || '');
+      setEditSector(data.company?.sector || '');
       
       // Carrega a linha do tempo junto
       loadTimeline();
@@ -403,9 +422,12 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      toast(`WhatsApp Simulado! Sentimento: ${data.sentiment}`, 'success');
+      const SENT_LABEL = { interested: '🔥 Interessado → Hot Lead', technical_question: 'Dúvida técnica → Aguard. follow-up', negative: 'Negativo → Rejeitado', out_of_scope: 'Fora de escopo → Contactado' };
+      toast(`Resposta classificada: ${SENT_LABEL[data.sentiment] || data.sentiment} (score ${data.interest_score})`, 'success');
       setResponseText('');
-      loadCompany(); // Recarrega os dados (timeline/mensagens) na tela!
+      loadCompany();              // recarrega o modal (timeline/mensagens/status)
+      if (onCompanyUpdated) onCompanyUpdated(); // atualiza a lista de empresas por trás (badge do status)
+      if (loadStats) loadStats(); // atualiza os contadores (Hot Leads etc.)
     } catch (err) {
       toast(err.message || 'Erro ao simular.', 'danger');
     }
@@ -1134,7 +1156,12 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
                         {company && (
                           <table className="table table-sm table-borderless mb-0">
                             <tbody>
-                              <tr><td className="text-muted">Status</td><td>{company.status || '—'}</td></tr>
+                              <tr><td className="text-muted">Status</td><td>{(() => {
+                                const S = { new: ['secondary', 'Novo'], researched: ['info', 'Pesquisado'], sequence_created: ['primary', 'Sequência criada'], contacted: ['primary', 'Contactado'], hot_lead: ['danger', '🔥 Hot Lead'], needs_followup: ['warning text-dark', 'Aguard. follow-up'], meeting_set: ['success', '✅ Reunião'], opted_out: ['secondary', 'Opt-out'], rejected: ['secondary', 'Rejeitado'] };
+                                if (!company.status) return '—';
+                                const v = S[company.status] || ['secondary', company.status];
+                                return <span className={`badge bg-${v[0]}`}>{v[1]}</span>;
+                              })()}</td></tr>
                               <tr><td className="text-muted">Setor</td><td>{company.sector || '—'}</td></tr>
                               <tr>
                                 <td className="text-muted">Score</td>
@@ -1207,16 +1234,17 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
                         <i className="bi bi-graph-up me-1" />Histórico de Sentimentos
                       </div>
                       <div className="card-body">
-                        {(company?.sentiment_history || []).length === 0 ? (
+                        {(company?.sentiments || []).length === 0 ? (
                           <p className="text-muted small">Nenhum registro.</p>
                         ) : (
-                          (company.sentiment_history || []).map((s, i) => (
-                            <div key={i} className="d-flex align-items-center gap-2 mb-1 small">
-                              <span className="text-muted">{new Date(s.created_at).toLocaleDateString('pt-BR')}</span>
+                          (company.sentiments || []).map((s, i) => (
+                            <div key={i} className="d-flex align-items-center gap-2 mb-1 small flex-wrap">
+                              <span className="text-muted">{s.created_at ? new Date(s.created_at).toLocaleDateString('pt-BR') : ''}</span>
                               {sentimentBadge(s.sentiment)}
-                              {s.score !== undefined && (
-                                <span className="badge bg-info">Score: {s.score}</span>
+                              {s.interest_score != null && (
+                                <span className="badge bg-info">Score: {s.interest_score}</span>
                               )}
+                              {s.response_text && <span className="text-muted">"{s.response_text.slice(0, 40)}"</span>}
                             </div>
                           ))
                         )}
