@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node --experimental-sqlite server.js",
-    "dev": "nodemon --exec \"node --experimental-sqlite\" server.js"
+    "dev": "nodemon --exec \"node --experimental-sqlite\" server.js",
+    "seed": "node --experimental-sqlite seed_demo.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
