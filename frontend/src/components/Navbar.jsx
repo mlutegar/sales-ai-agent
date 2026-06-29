@@ -6,10 +6,10 @@ export default function Navbar({ activeTab, onTabChange, pendingReview }) {
 
   const tabs = [
     { key: 'companies',     icon: 'bi-building',          label: 'Empresas' },
-    { key: 'followup',      icon: 'bi-clock-history',     label: 'Follow-ups', badge: pendingReview },
+    { key: 'followup',      icon: 'bi-clock-history',     label: 'Follow-ups' },
     { key: 'opportunities', icon: 'bi-funnel',             label: 'Oportunidades' },
     { key: 'dashboard',     icon: 'bi-bar-chart-line',    label: 'Dashboard' },
-    { key: 'rlhf',          icon: 'bi-stars',              label: 'RLHF / Curadoria' },
+    { key: 'rlhf',          icon: 'bi-stars',              label: 'RLHF / Curadoria', badge: pendingReview },
     { key: 'rag',           icon: 'bi-file-earmark-text', label: 'RAG / Docs' },
     { key: 'golden',        icon: 'bi-trophy',             label: 'Casos de Ouro' },
     { key: 'agenda',        icon: 'bi-calendar-check',    label: 'Agenda' },
