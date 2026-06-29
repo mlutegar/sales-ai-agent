@@ -519,7 +519,7 @@ async function enrichWithClaudeGuess(contactName, companyName) {
       'Você infere padrões de e-mail profissional para prospecção B2B. Seja conservador e preciso.',
       prompt, 150
     );
-    const p = JSON.parse(result);
+    const p = JSON.parse(extractJsonLoose(result));
     if (p.email && p.email.includes('@')) {
       return { email: p.email, phone: '', linkedin: '', source: 'claude_guess' };
     }
@@ -567,6 +567,14 @@ async function enrichContact(contactId, companyName) {
     db.close();
     return { ok: false, status: 'not_found' };
   }
+}
+
+// Extrai JSON de uma resposta da IA que pode vir embrulhada em ```json``` ou com
+// texto antes/depois (o sonnet-4-6 costuma cercar o JSON com markdown).
+function extractJsonLoose(s) {
+  let raw = (s || '').replace(/```json\s*|\s*```/g, '').trim();
+  const m = raw.match(/\{[\s\S]*\}/);
+  return m ? m[0] : raw;
 }
 
 async function callClaude(systemPrompt, userPrompt, maxTokens = 800) {
@@ -1018,7 +1026,7 @@ app.post('/api/companies/bulk-research', async (req, res) => {
 
         const result = await callClaude('Você é assistente de pesquisa de vendas B2B especializado em prospecção personalizada.', prompt, 900);
         let hook, ctx;
-        try { const p = JSON.parse(result); hook = p.hook || result; ctx = JSON.stringify(p); }
+        try { const p = JSON.parse(extractJsonLoose(result)); hook = p.hook || result; ctx = JSON.stringify(p); }
         catch { hook = result; ctx = result; }
 
         const db2 = getDb();
@@ -1569,7 +1577,7 @@ Classifique e responda APENAS em JSON válido:
 
   const result = await callClaude('Você é classificador de intenção em vendas B2B.', prompt, 200);
   let sentiment, reasoning, iscore;
-  try { const p = JSON.parse(result); sentiment = p.sentiment; reasoning = p.reasoning; iscore = parseInt(p.interest_score) || 5; }
+  try { const p = JSON.parse(extractJsonLoose(result)); sentiment = p.sentiment; reasoning = p.reasoning; iscore = parseInt(p.interest_score) || 5; }
   catch { sentiment = 'out_of_scope'; reasoning = result; iscore = 5; }
 
   const db2 = getDb();
@@ -1610,7 +1618,7 @@ Classifique e responda APENAS em JSON válido:
 
   const result = await callClaude('Você é classificador de intenção em vendas B2B.', prompt, 200);
   let sentiment, reasoning, iscore;
-  try { const p = JSON.parse(result); sentiment = p.sentiment; reasoning = p.reasoning; iscore = parseInt(p.interest_score) || 5; }
+  try { const p = JSON.parse(extractJsonLoose(result)); sentiment = p.sentiment; reasoning = p.reasoning; iscore = parseInt(p.interest_score) || 5; }
   catch { sentiment = 'out_of_scope'; reasoning = result; iscore = 5; }
 
   const db2 = getDb();
