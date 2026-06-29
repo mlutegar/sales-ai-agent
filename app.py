@@ -6,8 +6,13 @@ import csv
 import logging
 import threading
 import time
-from datetime import datetime
-from flask import Flask, render_template, request, jsonify, g, Response
+import re
+import urllib.request
+import urllib.parse
+from datetime import datetime, timedelta
+from flask import Flask, render_template, request, jsonify, g, Response, session, redirect, url_for
+from werkzeug.security import generate_password_hash, check_password_hash
+from functools import wraps
 from dotenv import load_dotenv
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -21,7 +26,19 @@ log = logging.getLogger(__name__)
 load_dotenv()
 
 app = Flask(__name__)
+app.secret_key = os.getenv('SECRET_KEY', 'sales-ai-secret-2025')
 DATABASE = 'prototype.db'
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('user_id'):
+            if request.path.startswith('/api/'):
+                return jsonify({'error': 'Não autenticado'}), 401
+            return redirect(url_for('login_page'))
+        return f(*args, **kwargs)
+    return decorated
 
 ROLE_PROFILES = {
     'c_level': {'focus': 'ROI, estratégia e impacto no negócio', 'tone': 'executivo e direto'},
@@ -168,29 +185,32 @@ def init_db():
     # Adiciona tabelas CRM (companies, contacts, opportunities) se não existirem
     db.executescript('''
         CREATE TABLE IF NOT EXISTS companies (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            name       TEXT    NOT NULL UNIQUE,
-            sector     TEXT    DEFAULT '',
-            website    TEXT    DEFAULT '',
-            notes      TEXT    DEFAULT '',
-            created_at TEXT    DEFAULT (datetime('now'))
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT    NOT NULL UNIQUE,
+            sector        TEXT    DEFAULT '',
+            website       TEXT    DEFAULT '',
+            notes         TEXT    DEFAULT '',
+            import_source TEXT    DEFAULT NULL,
+            created_at    TEXT    DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS contacts (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id  INTEGER NOT NULL,
-            name        TEXT    NOT NULL,
-            role        TEXT    NOT NULL DEFAULT 'other',
-            email       TEXT    DEFAULT '',
-            linkedin    TEXT    DEFAULT '',
-            whatsapp    TEXT    DEFAULT '',
-            country     TEXT    DEFAULT 'BR',
-            status      TEXT    DEFAULT 'new',
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id     INTEGER NOT NULL,
+            name           TEXT    NOT NULL,
+            role           TEXT    NOT NULL DEFAULT 'other',
+            email          TEXT    DEFAULT '',
+            linkedin       TEXT    DEFAULT '',
+            whatsapp       TEXT    DEFAULT '',
+            country        TEXT    DEFAULT 'BR',
+            status         TEXT    DEFAULT 'new',
             interest_score INTEGER DEFAULT 0,
             research_hook    TEXT,
             research_context TEXT,
-            opted_out   INTEGER DEFAULT 0,
-            is_primary  INTEGER DEFAULT 0,
-            created_at  TEXT    DEFAULT (datetime('now')),
+            import_source  TEXT    DEFAULT NULL,
+            import_notes   TEXT    DEFAULT NULL,
+            opted_out      INTEGER DEFAULT 0,
+            is_primary     INTEGER DEFAULT 0,
+            created_at     TEXT    DEFAULT (datetime('now')),
             FOREIGN KEY (company_id) REFERENCES companies(id)
         );
         CREATE TABLE IF NOT EXISTS opportunities (
@@ -215,6 +235,42 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_sentiments_lead ON sentiment_logs(lead_id);
         CREATE INDEX IF NOT EXISTS idx_interactions_lead ON lead_interactions(lead_id);
         CREATE INDEX IF NOT EXISTS idx_patterns_ch_role ON learned_patterns(channel, role);
+    ''')
+    db.commit()
+
+    # Migrações seguras para colunas adicionadas após criação inicial do banco
+    for migration_sql in [
+        "ALTER TABLE companies ADD COLUMN import_source TEXT DEFAULT NULL",
+        "ALTER TABLE contacts ADD COLUMN import_source TEXT DEFAULT NULL",
+        "ALTER TABLE contacts ADD COLUMN import_notes TEXT DEFAULT NULL",
+    ]:
+        try:
+            db.execute(migration_sql)
+            db.commit()
+        except Exception:
+            pass  # coluna já existe
+
+    # Tabelas adicionais
+    db.executescript('''
+        CREATE TABLE IF NOT EXISTS users (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            username   TEXT    UNIQUE NOT NULL,
+            password   TEXT    NOT NULL,
+            name       TEXT    DEFAULT '',
+            created_at TEXT    DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS contact_suggestions (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            name       TEXT    DEFAULT '',
+            role       TEXT    DEFAULT '',
+            email      TEXT    DEFAULT '',
+            linkedin   TEXT    DEFAULT '',
+            status     TEXT    DEFAULT 'pending',
+            source     TEXT    DEFAULT 'claude',
+            created_at TEXT    DEFAULT (datetime('now')),
+            FOREIGN KEY (company_id) REFERENCES companies(id)
+        );
     ''')
     db.commit()
 
@@ -323,6 +379,57 @@ def _migrate_leads_to_contacts():
         db.close()
 
 
+# ── Admin user init ──────────────────────────────────────────────────────────
+
+def _init_admin_user():
+    """Cria usuário admin padrão se não existir."""
+    db = sqlite3.connect(DATABASE)
+    try:
+        exists = db.execute('SELECT id FROM users WHERE username=?', ('admin',)).fetchone()
+        if not exists:
+            db.execute(
+                'INSERT INTO users (username, password, name) VALUES (?,?,?)',
+                ('admin', generate_password_hash('admin123'), 'Administrador')
+            )
+            db.commit()
+            log.info('Usuário admin criado com senha padrão admin123')
+    except Exception as e:
+        log.warning(f'_init_admin_user: {e}')
+    finally:
+        db.close()
+
+
+# ── Rotas de Autenticação ────────────────────────────────────────────────────
+
+@app.route('/login', methods=['GET'])
+def login_page():
+    if session.get('user_id'):
+        return redirect('/')
+    return render_template('login.html')
+
+
+@app.route('/login', methods=['POST'])
+def login_action():
+    username = request.form.get('username', '').strip()
+    password = request.form.get('password', '')
+    if not username or not password:
+        return redirect('/login?error=Preencha+usuário+e+senha')
+    db = get_db()
+    user = db.execute('SELECT * FROM users WHERE username=?', (username,)).fetchone()
+    if not user or not check_password_hash(user['password'], password):
+        return redirect('/login?error=Usuário+ou+senha+inválidos')
+    session['user_id'] = user['id']
+    session['username'] = user['username']
+    session['name'] = user['name']
+    return redirect('/')
+
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/login')
+
+
 # ── Compliance footer por país ──────────────────────────────────────────────
 
 COMPLIANCE_TEXTS = {
@@ -403,6 +510,18 @@ def call_claude(system_prompt, user_prompt, max_tokens=800):
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
+
+@app.before_request
+def require_auth():
+    """Protege todas as rotas exceto login."""
+    public = ['/login', '/static']
+    if any(request.path.startswith(p) for p in public):
+        return None
+    if not session.get('user_id'):
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'Não autenticado'}), 401
+        return redirect('/login')
+
 
 @app.route('/')
 def index():
@@ -519,7 +638,7 @@ def get_company(cid):
     ).fetchall()
     return jsonify({
         'company': dict(comp),
-        'contacts': [dict(c) for c in contacts],
+        'contacts': [{**dict(c), 'completeness_score': _completeness_score(c)[0], 'completeness_missing': _completeness_score(c)[1]} for c in contacts],
         'messages': [dict(m) for m in msgs],
         'slots': [dict(s) for s in slots],
         'consent_logs': [dict(l) for l in logs],
@@ -765,6 +884,10 @@ def create_contact(cid):
     ctid = cur.lastrowid
     db.execute('INSERT INTO consent_logs (lead_id,action,details) VALUES (?,?,?)',
                (ctid, 'added', f'Contato adicionado à empresa {comp["name"]}'))
+    # Marca sugestão como adicionada se vier do modal de busca (Melhoria 2)
+    suggestion_id = data.get('suggestion_id')
+    if suggestion_id:
+        db.execute("UPDATE contact_suggestions SET status='added' WHERE id=?", (suggestion_id,))
     db.commit()
     return jsonify({'id': ctid})
 
@@ -797,6 +920,143 @@ def set_primary_contact(cid, ctid):
     db.execute('UPDATE contacts SET is_primary=1 WHERE id=? AND company_id=?', (ctid, cid))
     db.commit()
     return jsonify({'ok': True})
+
+
+@app.route('/api/companies/<int:cid>/find-new-contacts', methods=['POST'])
+def find_new_contacts(cid):
+    """Busca novos contatos da empresa. Ordem: Apollo → LinkedIn scraping → Claude."""
+    db = get_db()
+    data = request.json or {}
+    ref_ctid = data.get('reference_contact_id')
+    preferred_role = data.get('preferred_role')  # c_level | manager | engineer | None
+
+    # Busca dados da empresa
+    company = db.execute('SELECT * FROM companies WHERE id=?', (cid,)).fetchone()
+    if not company:
+        return jsonify({'error': 'Empresa não encontrada'}), 404
+
+    # Busca contato de referência (opcional)
+    ref_contact = None
+    if ref_ctid:
+        ref_contact = db.execute(
+            'SELECT * FROM contacts WHERE id=? AND company_id=?', (ref_ctid, cid)
+        ).fetchone()
+
+    # Contatos já cadastrados — evita duplicatas
+    existing = db.execute('SELECT name, role FROM contacts WHERE company_id=?', (cid,)).fetchall()
+    existing_names = [r['name'].lower() for r in existing]
+    existing_roles_str = ', '.join([f"{r['name']} ({r['role']})" for r in existing]) if existing else 'nenhum'
+
+    # Sugestões anteriores já geradas (histórico) — também exclui
+    prev_suggestions = db.execute(
+        "SELECT name FROM contact_suggestions WHERE company_id=? AND status != 'dismissed'", (cid,)
+    ).fetchall()
+    prev_names = [r['name'].lower() for r in prev_suggestions]
+    excluded_names = set(existing_names + prev_names)
+
+    # Extrai domínio do site
+    website = company['website'] or ''
+    domain = ''
+    if website:
+        domain = website.replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0]
+    if not domain:
+        domain = re.sub(r'[^a-z0-9]', '', company['name'].lower()) + '.com.br'
+
+    suggestions = None
+    source_used = 'claude'
+
+    # 1. Tenta Apollo.io
+    apollo_results = _search_apollo_people(company['name'], preferred_role=preferred_role)
+    if apollo_results:
+        filtered = [s for s in apollo_results if s['name'].lower() not in excluded_names]
+        if filtered:
+            suggestions = filtered[:3]
+            source_used = 'apollo'
+
+    # 2. Tenta LinkedIn scraping
+    if not suggestions:
+        li_results = _search_linkedin_scrape(company['name'], preferred_role=preferred_role)
+        if li_results:
+            filtered = [s for s in li_results if s['name'].lower() not in excluded_names]
+            if filtered:
+                suggestions = filtered[:3]
+                source_used = 'linkedin'
+
+    # 3. Fallback: Claude
+    if not suggestions:
+        ref_info = f"\nContato de referência: {ref_contact['name']} — {ref_contact['role']}" if ref_contact else ''
+        role_hint = ''
+        if preferred_role:
+            role_labels = {'c_level': 'C-Level/Diretores', 'manager': 'Gerentes/Coordenadores', 'engineer': 'Engenheiros/TI'}
+            role_hint = f"\nFiltro de cargo desejado: {role_labels.get(preferred_role, preferred_role)}"
+
+        system_prompt = """Você é um especialista em inteligência comercial B2B.
+Dado os dados de uma empresa, sugira novos contatos de decisão que provavelmente trabalham lá.
+Responda APENAS com JSON válido, sem markdown, sem explicações fora do JSON."""
+
+        user_prompt = f"""Empresa: {company['name']}
+Setor: {company['sector'] or 'não informado'}
+Site: {website or 'não informado'}
+Domínio de email: {domain}
+Contatos já cadastrados no CRM: {existing_roles_str}{ref_info}{role_hint}
+
+Sugira 3 novos profissionais relevantes para prospecção B2B nesta empresa (DIFERENTES dos já cadastrados).
+Para cada um, retorne um perfil realista e distinto.
+
+Retorne exatamente neste formato:
+{{
+  "suggestions": [
+    {{
+      "name": "Nome Sobrenome",
+      "role": "Cargo",
+      "email": "nome@{domain}",
+      "linkedin": "https://linkedin.com/in/nome-sobrenome",
+      "rationale": "Por que esse perfil é relevante para prospecção"
+    }}
+  ]
+}}"""
+
+        result = call_claude(system_prompt, user_prompt, max_tokens=600)
+        try:
+            parsed = json.loads(result)
+            suggestions = parsed.get('suggestions', [])
+        except Exception:
+            try:
+                match = re.search(r'\{.*\}', result, re.DOTALL)
+                suggestions = json.loads(match.group()).get('suggestions', []) if match else []
+            except Exception:
+                suggestions = []
+
+        for s in suggestions:
+            s['source'] = 'claude'
+
+    # Salva sugestões no histórico (Melhoria 2)
+    for s in (suggestions or []):
+        db.execute(
+            'INSERT INTO contact_suggestions (company_id, name, role, email, linkedin, source) VALUES (?,?,?,?,?,?)',
+            (cid, s.get('name', ''), s.get('role', ''), s.get('email', ''), s.get('linkedin', ''), s.get('source', 'claude'))
+        )
+    db.commit()
+
+    # Busca IDs das sugestões recém-criadas para retornar ao frontend
+    saved = db.execute(
+        "SELECT id, name FROM contact_suggestions WHERE company_id=? ORDER BY id DESC LIMIT ?",
+        (cid, len(suggestions or []))
+    ).fetchall()
+    id_map = {r['name']: r['id'] for r in saved}
+    for s in (suggestions or []):
+        s['suggestion_id'] = id_map.get(s.get('name', ''))
+
+    return jsonify({
+        'suggestions': suggestions or [],
+        'source': source_used,
+        'company': {
+            'id': company['id'],
+            'name': company['name'],
+            'sector': company['sector'],
+            'website': company['website'],
+        }
+    })
 
 
 @app.route('/api/contacts/enrich', methods=['POST'])
@@ -2099,35 +2359,12 @@ def crm_import():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def seed_db():
+    """Popula apenas os documentos de referência do produto (sem leads mock)."""
     db = sqlite3.connect(DATABASE)
-    count = db.execute('SELECT COUNT(*) FROM leads').fetchone()[0]
+    count = db.execute('SELECT COUNT(*) FROM documents').fetchone()[0]
     if count > 0:
         db.close()
         return
-    leads = [
-        ('Rodrigo Mendes',      'Nubank',           'c_level', 'Fintech',               'rodrigo.mendes@nubank.com.br',         'linkedin.com/in/rodrigomendes',    '11999990001'),
-        ('Ana Paula Ferreira',  'Totvs',            'manager', 'Software B2B',           'anapaula@totvs.com.br',                'linkedin.com/in/anapaulaferreira', '11999990002'),
-        ('Carlos Eduardo Lima', 'Ambev',            'c_level', 'Bens de Consumo',        'carlos.lima@ambev.com.br',             'linkedin.com/in/carloslima',       '11999990003'),
-        ('Juliana Rocha',       'iFood',            'manager', 'Marketplace / Logistica','juliana.rocha@ifood.com.br',           'linkedin.com/in/juliana-rocha',    '11999990004'),
-        ('Thiago Barbosa',      'Embraer',          'engineer','Aeroespacial',           'thiago.barbosa@embraer.com.br',        'linkedin.com/in/thiagobarbosa',    '12999990005'),
-        ('Fernanda Castro',     'Magazine Luiza',   'c_level', 'Varejo / E-commerce',    'fernanda.castro@magazineluiza.com.br', 'linkedin.com/in/fernandacastro',   '11999990006'),
-        ('Rafael Souza',        'Stone',            'engineer','Fintech / Pagamentos',   'rafael.souza@stone.com.br',            'linkedin.com/in/rafaelsouza',      '11999990007'),
-        ('Mariana Oliveira',    'Localiza',         'manager', 'Mobilidade / Locacao',   'mariana.oliveira@localiza.com.br',     'linkedin.com/in/marianaoliveira', '31999990008'),
-        ('Bruno Alves',         'Bradesco',         'c_level', 'Banco / Financeiro',     'bruno.alves@bradesco.com.br',          'linkedin.com/in/brunoalves',       '11999990009'),
-        ('Patricia Nunes',      'Raizen',           'engineer','Energia / Agronegocio',  'patricia.nunes@raizen.com.br',         'linkedin.com/in/patricianunes',    '11999990010'),
-        ('Ricardo Nunes',       'Magazine Luiza',   'c_level', 'Varejo / E-commerce',    'ricardo.nunes@magazineluiza.com.br',   'linkedin.com/in/ricardohnunes',    '11999990011'),
-        ('Camila Teixeira',     'Rappi',            'manager', 'Delivery / Marketplace', 'camila.teixeira@rappi.com',            'linkedin.com/in/camilateixeira',   '11999990012'),
-        ('Diego Martins',       'Loggi',            'engineer','Logistica / Tech',       'diego.martins@loggi.com',              'linkedin.com/in/diegomartins',     '11999990013'),
-        ('Luciana Barros',      'Itau Unibanco',    'c_level', 'Banco / Financeiro',     'luciana.barros@itau-unibanco.com.br',  'linkedin.com/in/lucianabarros',    '11999990014'),
-        ('Felipe Cardoso',      'Vtex',             'engineer','E-commerce / SaaS',      'felipe.cardoso@vtex.com',              'linkedin.com/in/felipecardoso',    '11999990015'),
-    ]
-    db.executemany(
-        'INSERT INTO leads (name,company,role,sector,email,linkedin,whatsapp) VALUES (?,?,?,?,?,?,?)',
-        leads
-    )
-    for i, l in enumerate(leads, start=1):
-        db.execute('INSERT INTO consent_logs (lead_id,action,details) VALUES (?,?,?)',
-                   (i, 'added', 'Lead pré-configurado (seed)'))
     docs = [
         (
             'Manual do Produto — Sales AI Agent v2.1',
@@ -2536,8 +2773,243 @@ def companies_bulk_sequence():
     return jsonify({'results': results, 'errors': errors, 'total': len(results)})
 
 
+# ── Melhoria 1: Apollo.io + LinkedIn scraping para find-new-contacts ─────────
+
+def _search_apollo_people(company_name, excluded_roles=None, preferred_role=None):
+    """Busca pessoas na empresa via Apollo.io People Search."""
+    api_key = os.getenv('APOLLO_API_KEY', '')
+    if not api_key:
+        return None
+    try:
+        titles = []
+        if preferred_role == 'c_level':
+            titles = ['CEO', 'CFO', 'CTO', 'COO', 'VP', 'Diretor', 'Director']
+        elif preferred_role == 'manager':
+            titles = ['Gerente', 'Manager', 'Head', 'Coordenador', 'Coordinator']
+        elif preferred_role == 'engineer':
+            titles = ['Engineer', 'Engenheiro', 'Analista', 'Developer', 'Tech Lead']
+
+        payload = {
+            'api_key': api_key,
+            'organization_name': company_name,
+            'page': 1,
+            'per_page': 5,
+        }
+        if titles:
+            payload['person_titles'] = titles
+
+        data_bytes = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(
+            'https://api.apollo.io/api/v1/mixed_people/search',
+            data=data_bytes,
+            headers={'Content-Type': 'application/json', 'Cache-Control': 'no-cache'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+
+        people = result.get('people', [])
+        suggestions = []
+        for p in people:
+            name = p.get('name', '')
+            role = p.get('title', '')
+            if not name:
+                continue
+            # Filtra excluídos
+            if excluded_roles and role.lower() in [r.lower() for r in excluded_roles]:
+                continue
+            email = p.get('email', '') or ''
+            linkedin = p.get('linkedin_url', '') or ''
+            suggestions.append({
+                'name': name,
+                'role': role,
+                'email': email,
+                'linkedin': linkedin,
+                'rationale': f'Perfil encontrado via Apollo.io — {role} na empresa.',
+                'source': 'apollo',
+            })
+        return suggestions if suggestions else None
+    except Exception as e:
+        log.warning(f'Apollo search error: {e}')
+        return None
+
+
+def _search_linkedin_scrape(company_name, preferred_role=None):
+    """Busca contatos via Google + LinkedIn (scraping leve)."""
+    try:
+        role_query = ''
+        if preferred_role == 'c_level':
+            role_query = ' CEO OR CTO OR Diretor'
+        elif preferred_role == 'manager':
+            role_query = ' Gerente OR Manager'
+        elif preferred_role == 'engineer':
+            role_query = ' Engenheiro OR Engineer OR Analista'
+
+        query = f'site:linkedin.com/in "{company_name}"{role_query}'
+        url = 'https://www.google.com/search?q=' + urllib.parse.quote(query) + '&num=5'
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36'
+        })
+        time.sleep(0.5)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            html = resp.read().decode('utf-8', errors='ignore')
+
+        # Extrai snippets de resultados do Google
+        snippets = re.findall(r'linkedin\.com/in/([a-z0-9\-]+)[^"]*?"[^>]*?>([^<]+)</a>', html, re.IGNORECASE)
+        suggestions = []
+        for slug, title_raw in snippets[:3]:
+            title_clean = re.sub(r'\s+', ' ', title_raw).strip()
+            if len(title_clean) < 3:
+                continue
+            # Tenta extrair nome e cargo do título
+            parts = title_clean.split(' - ')
+            name = parts[0].strip() if parts else title_clean
+            role = parts[1].strip() if len(parts) > 1 else 'Profissional'
+            if len(name) > 60 or not name:
+                continue
+            suggestions.append({
+                'name': name,
+                'role': role,
+                'email': '',
+                'linkedin': f'https://linkedin.com/in/{slug}',
+                'rationale': f'Perfil encontrado via LinkedIn — {company_name}.',
+                'source': 'linkedin',
+            })
+        return suggestions if suggestions else None
+    except Exception as e:
+        log.warning(f'LinkedIn scrape error: {e}')
+        return None
+
+
+# ── Melhoria 2: Histórico de sugestões — dismiss ─────────────────────────────
+
+@app.route('/api/companies/<int:cid>/suggestions/<int:sid>/dismiss', methods=['POST'])
+def dismiss_suggestion(cid, sid):
+    db = get_db()
+    db.execute("UPDATE contact_suggestions SET status='dismissed' WHERE id=? AND company_id=?", (sid, cid))
+    db.commit()
+    return jsonify({'ok': True})
+
+
+# ── Melhoria 5: Score de completude dos contatos ──────────────────────────────
+
+def _completeness_score(ct):
+    """Retorna score 0-100 e lista de campos faltantes."""
+    fields = [
+        ('email', ct['email'], 'E-mail'),
+        ('linkedin', ct['linkedin'], 'LinkedIn'),
+        ('whatsapp', ct['whatsapp'], 'WhatsApp'),
+        ('research_hook', ct['research_hook'], 'Gancho de pesquisa'),
+    ]
+    filled = sum(1 for _, v, _ in fields if v and str(v).strip())
+    missing = [label for _, v, label in fields if not (v and str(v).strip())]
+    return int(filled / len(fields) * 100), missing
+
+
+# ── Melhoria 6: Follow-up alerts ─────────────────────────────────────────────
+
+@app.route('/api/followup-alerts')
+def followup_alerts():
+    db = get_db()
+    threshold_days = int(request.args.get('days', 7))
+    cutoff = (datetime.now() - timedelta(days=threshold_days)).strftime('%Y-%m-%d %H:%M:%S')
+
+    contacts = db.execute("""
+        SELECT ct.id, ct.name, ct.status, ct.company_id,
+               c.name as company_name,
+               MAX(li.created_at) as last_interaction
+        FROM contacts ct
+        JOIN companies c ON c.id = ct.company_id
+        LEFT JOIN lead_interactions li ON li.lead_id = ct.id
+        WHERE ct.opted_out = 0
+          AND ct.status NOT IN ('opted_out','lost','meeting_set','closed')
+        GROUP BY ct.id
+        HAVING (last_interaction IS NULL OR last_interaction < ?)
+        ORDER BY last_interaction ASC
+        LIMIT 50
+    """, (cutoff,)).fetchall()
+
+    alerts = []
+    for ct in contacts:
+        last = ct['last_interaction']
+        if last:
+            days_ago = (datetime.now() - datetime.strptime(last[:19], '%Y-%m-%d %H:%M:%S')).days
+        else:
+            days_ago = 999
+        alerts.append({
+            'contact_id': ct['id'],
+            'contact_name': ct['name'],
+            'company_id': ct['company_id'],
+            'company_name': ct['company_name'],
+            'status': ct['status'],
+            'days_since_last': days_ago,
+            'last_interaction': last,
+        })
+
+    return jsonify({'alerts': alerts, 'total': len(alerts)})
+
+
+# ── Melhoria 7: Exportar contatos CSV ────────────────────────────────────────
+
+@app.route('/api/companies/<int:cid>/contacts/export')
+def export_company_contacts(cid):
+    db = get_db()
+    company = db.execute('SELECT name FROM companies WHERE id=?', (cid,)).fetchone()
+    if not company:
+        return jsonify({'error': 'Empresa não encontrada'}), 404
+    contacts = db.execute(
+        'SELECT * FROM contacts WHERE company_id=? ORDER BY is_primary DESC, name',
+        (cid,)
+    ).fetchall()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Nome', 'Cargo', 'Email', 'LinkedIn', 'WhatsApp', 'Status', 'Score', 'Empresa', 'Criado em'])
+    for ct in contacts:
+        writer.writerow([
+            ct['name'], ct['role'], ct['email'] or '', ct['linkedin'] or '',
+            ct['whatsapp'] or '', ct['status'], ct['interest_score'],
+            company['name'], ct['created_at'],
+        ])
+
+    company_slug = re.sub(r'[^\w]', '-', company['name'].lower())
+    return Response(
+        '﻿' + output.getvalue(),
+        mimetype='text/csv; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename=contatos-{company_slug}.csv'}
+    )
+
+
+@app.route('/api/contacts/export')
+def export_all_contacts():
+    db = get_db()
+    contacts = db.execute("""
+        SELECT ct.*, c.name as company_name
+        FROM contacts ct
+        JOIN companies c ON c.id = ct.company_id
+        ORDER BY c.name, ct.name
+    """).fetchall()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Nome', 'Cargo', 'Email', 'LinkedIn', 'WhatsApp', 'Status', 'Score', 'Empresa', 'Criado em'])
+    for ct in contacts:
+        writer.writerow([
+            ct['name'], ct['role'], ct['email'] or '', ct['linkedin'] or '',
+            ct['whatsapp'] or '', ct['status'], ct['interest_score'],
+            ct['company_name'], ct['created_at'],
+        ])
+
+    return Response(
+        '﻿' + output.getvalue(),
+        mimetype='text/csv; charset=utf-8',
+        headers={'Content-Disposition': 'attachment; filename=todos-contatos.csv'}
+    )
+
+
 init_db()
 seed_db()
+_init_admin_user()
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
