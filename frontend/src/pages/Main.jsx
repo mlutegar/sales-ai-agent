@@ -16,6 +16,10 @@ import { api } from '../api.js'
 export default function Main({ toast }) {
   const [tab, setTab] = useState('companies')
   const [stats, setStats] = useState(null)
+  // Sinal global de atualização: incrementa após qualquer mutação (ex.: excluir
+  // empresa/contato) para que abas com dados derivados (follow-ups) recarreguem.
+  const [dataVersion, setDataVersion] = useState(0)
+  const refreshData = useCallback(() => setDataVersion((v) => v + 1), [])
 
   const loadStats = useCallback(async () => {
     try {
@@ -26,7 +30,7 @@ export default function Main({ toast }) {
 
   useEffect(() => { loadStats() }, [loadStats])
 
-  const sharedProps = { toast, loadStats }
+  const sharedProps = { toast, loadStats, dataVersion, refreshData }
 
   return (
     <div style={{ background: '#f5f7fa', minHeight: '100vh', fontSize: '.93rem' }}>

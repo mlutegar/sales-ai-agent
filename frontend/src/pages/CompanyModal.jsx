@@ -306,8 +306,9 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
     try {
       await fetch(`${API}/api/companies/${companyId}`, { method: 'DELETE' });
       toast('Empresa excluída.', 'success');
-      onClose();
+      if (onCompanyUpdated) onCompanyUpdated();
       if (loadStats) loadStats();
+      onClose();
     } catch {
       toast('Erro ao excluir.', 'danger');
     }
@@ -438,6 +439,8 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
       await fetch(`${API}/api/companies/${companyId}/contacts/${contactId}`, { method: 'DELETE' });
       setContacts(prev => prev.filter(c => c.id !== contactId));
       toast('Contato removido.', 'info');
+      if (onCompanyUpdated) onCompanyUpdated();
+      if (loadStats) loadStats();
     } catch {
       toast('Erro ao remover contato.', 'danger');
     }

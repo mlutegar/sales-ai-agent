@@ -477,7 +477,7 @@ function GlobalContactSearch() {
 }
 
 // ── Main Companies Component ───────────────────────────────────────────────────
-export default function Companies({ toast, loadStats }) {
+export default function Companies({ toast, loadStats, refreshData }) {
   const [companies, setCompanies] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState([]);
@@ -553,6 +553,8 @@ export default function Companies({ toast, loadStats }) {
       if (d.error) throw new Error(d.error);
       toast('Contato removido', 'success');
       loadCompanies();
+      if (loadStats) loadStats();
+      if (refreshData) refreshData();
     } catch (err) {
       toast(err.message || 'Erro ao remover', 'danger');
     }
@@ -796,7 +798,8 @@ export default function Companies({ toast, loadStats }) {
         <CompanyModal
           companyId={modalCompany.id}
           onClose={() => setModalCompany(null)}
-          onUpdated={() => { loadCompanies(); if (loadStats) loadStats(); }}
+          onCompanyUpdated={() => { loadCompanies(); if (loadStats) loadStats(); if (refreshData) refreshData(); }}
+          loadStats={loadStats}
           toast={toast}
         />
       )}
