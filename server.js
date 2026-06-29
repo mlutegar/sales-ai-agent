@@ -756,7 +756,7 @@ app.get('/api/stats', (req, res) => {
     pending_review:      db.prepare("SELECT COUNT(*) as c FROM messages WHERE approved=0 AND status='pending'").get().c,
     docs_count:          db.prepare('SELECT COUNT(*) as c FROM documents').get().c,
     golden_cases:        db.prepare('SELECT COUNT(*) as c FROM golden_cases').get().c,
-    avg_score:           db.prepare('SELECT ROUND(AVG(score),1) as a FROM messages WHERE score IS NOT NULL').get().a,
+    avg_score:           db.prepare('SELECT ROUND(AVG(interest_score),1) as a FROM companies WHERE interest_score IS NOT NULL AND interest_score > 0').get().a,
     total_opportunities: db.prepare('SELECT COUNT(*) as c FROM opportunities').get().c,
     pipeline_value:      db.prepare("SELECT COALESCE(SUM(value),0) as v FROM opportunities WHERE stage NOT IN ('lost')").get().v,
     enriched_contacts:   db.prepare("SELECT COUNT(*) as c FROM contacts WHERE email IS NOT NULL AND email!=''").get().c,
