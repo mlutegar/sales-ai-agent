@@ -5,3 +5,11 @@ prototype.db
 *.db
 .sessions/
 node_modules/
+
+# Logs
+*.log
+
+# Planilhas/temporários
+*.xlsx
+temp_*
+
