@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Sales AI Agent - Node.js backend",
   "main": "server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
     "start": "node --experimental-sqlite server.js",
     "dev": "nodemon --exec \"node --experimental-sqlite\" server.js",
