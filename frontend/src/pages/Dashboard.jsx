@@ -90,7 +90,7 @@ export default function Dashboard({ toast }) {
             </div>
           </div>
           
-          <div className="col-md-6">
+          <div className="col-12 col-md-6">
             <div className="card p-3">
               <h6 className="fw-bold mb-3"><i className="bi bi-pie-chart me-1"></i>Distribuição por Setor</h6>
               <div>
@@ -115,7 +115,7 @@ export default function Dashboard({ toast }) {
             </div>
           </div>
           
-          <div className="col-md-3">
+          <div className="col-6 col-md-3">
             <div className="card p-3 text-center h-100">
               <h6 className="fw-bold mb-3"><i className="bi bi-star me-1"></i>Score Médio de Interesse</h6>
               <div className="display-3 fw-bold text-warning flex-grow-1 d-flex align-items-center justify-content-center">
@@ -125,7 +125,7 @@ export default function Dashboard({ toast }) {
             </div>
           </div>
           
-          <div className="col-md-3">
+          <div className="col-6 col-md-3">
             <div className="card p-3 h-100">
               <h6 className="fw-bold mb-3"><i className="bi bi-trophy me-1"></i>Top 5 por Interesse</h6>
               <div>
@@ -134,7 +134,7 @@ export default function Dashboard({ toast }) {
                 ) : (
                   top5.map((c, i) => (
                     <div key={c.id} className="d-flex justify-content-between align-items-center mb-1 small">
-                      <span className="text-truncate" style={{maxWidth: '120px'}} title={c.name}>
+                      <span className="text-truncate top5-name" style={{maxWidth: '120px'}} title={c.name}>
                         <span className="text-muted me-1">{i + 1}.</span>
                         {esc(c.name)}
                       </span>

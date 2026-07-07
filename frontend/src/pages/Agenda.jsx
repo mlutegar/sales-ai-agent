@@ -57,7 +57,7 @@ export default function Agenda({ toast, loadStats }) {
       <div id="tab-agenda">
         <div className="row g-3">
           
-          <div className="col-md-4">
+          <div className="col-12 col-md-4">
             <div className="card p-3">
               <h6 className="fw-bold mb-3"><i className="bi bi-calendar-plus me-1"></i>Novo Horário Disponível</h6>
               <div className="mb-2">
@@ -98,7 +98,7 @@ export default function Agenda({ toast, loadStats }) {
             </div>
           </div>
           
-          <div className="col-md-8">
+          <div className="col-12 col-md-8">
             <div className="card p-3">
               <div className="d-flex justify-content-between mb-2">
                 <h6 className="fw-bold mb-0">Slots de Agenda</h6>
@@ -114,35 +114,35 @@ export default function Agenda({ toast, loadStats }) {
                       <thead className="table-light">
                         <tr>
                           <th>Data/Hora</th>
-                          <th>Duração</th>
+                          <th className="d-none d-md-table-cell">Duração</th>
                           <th>Status</th>
                           <th>Empresa</th>
-                          <th>Contato</th>
-                          <th>Link</th>
+                          <th className="d-none d-sm-table-cell">Contato</th>
+                          <th className="d-none d-md-table-cell">Link</th>
                           <th>Ação</th>
                         </tr>
                       </thead>
                       <tbody>
                         {slots.map(s => (
                           <tr key={s.id}>
-                            <td>{s.date_time}</td>
-                            <td>{s.duration_min} min</td>
+                            <td style={{fontSize: '.85rem'}}>{s.date_time}</td>
+                            <td className="d-none d-md-table-cell">{s.duration_min} min</td>
                             <td>
                               {s.booked ? (
                                 <span className="badge bg-success">Agendado</span>
                               ) : (
-                                <span className="badge bg-secondary">Disponível</span>
+                                <span className="badge bg-secondary">Livre</span>
                               )}
                             </td>
                             <td>{s.company_name ? esc(s.company_name) : '—'}</td>
-                            <td>{s.contact_name ? esc(s.contact_name) : '—'}</td>
-                            <td>
+                            <td className="d-none d-sm-table-cell">{s.contact_name ? esc(s.contact_name) : '—'}</td>
+                            <td className="d-none d-md-table-cell">
                               {s.meeting_link ? (
                                 <a href={esc(s.meeting_link)} target="_blank" rel="noreferrer" className="small">Abrir</a>
                               ) : '—'}
                             </td>
                             <td>
-                              <button className="btn btn-outline-danger btn-sm" onClick={() => delSlot(s.id)}>
+                              <button className="btn btn-outline-danger btn-sm btn-xs-touch" onClick={() => delSlot(s.id)}>
                                 <i className="bi bi-trash"></i>
                               </button>
                             </td>

@@ -90,9 +90,9 @@ export default function FollowUps({ toast, loadStats, dataVersion }) {
                   <thead className="table-light">
                     <tr>
                       <th>Lead</th>
-                      <th>Empresa</th>
-                      <th>Setor</th>
-                      <th>Dias sem resp.</th>
+                      <th className="d-none d-sm-table-cell">Empresa</th>
+                      <th className="d-none d-md-table-cell">Setor</th>
+                      <th>Dias</th>
                       <th>Canal</th>
                       <th>Ação</th>
                     </tr>
@@ -104,17 +104,17 @@ export default function FollowUps({ toast, loadStats, dataVersion }) {
                           {esc(r.name)}{' '}
                           <span className="badge bg-secondary">{ROLE_LABEL[r.role] || r.role}</span>
                         </td>
-                        <td>{esc(r.company || '')}</td>
-                        <td>{esc(r.sector || '')}</td>
+                        <td className="d-none d-sm-table-cell">{esc(r.company || '')}</td>
+                        <td className="d-none d-md-table-cell">{esc(r.sector || '')}</td>
                         <td>
                           <span className={`badge ${r.days_since >= 7 ? 'bg-danger' : 'bg-warning text-dark'}`}>
-                            {r.days_since} dias
+                            {r.days_since}d
                           </span>
                         </td>
                         <td>
-                          <select 
-                            className="form-select form-select-sm" 
-                            style={{width: '110px'}}
+                          <select
+                            className="form-select form-select-sm"
+                            style={{minWidth: '85px', width: '100%'}}
                             value={channels[r.id] || 'email'}
                             onChange={(e) => handleChannelChange(r.id, e.target.value)}
                           >

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 const API = '';
 
@@ -180,7 +181,9 @@ function MessageCard({ msg, contacts, toast }) {
 }
 
 // ─── Main Component ─────────────────────────────────────────────────────────
-export default function CompanyModal({ companyId, onClose, toast, loadStats, onCompanyUpdated }) {
+export default function CompanyModal({ companyId, onClose, toast, loadStats, onCompanyUpdated, onOpenWhatsApp }) {
+  const navigate = useNavigate();
+
   // ── company state
   const [company, setCompany] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -233,6 +236,13 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
 
   // ── hand-off
   const [showHandoff, setShowHandoff] = useState(false);
+
+  // ── flags/etiquetas
+  const [flagCatalog, setFlagCatalog] = useState([]);
+  useEffect(() => {
+    fetch(`${API}/api/flags`).then(r => r.json())
+      .then(d => setFlagCatalog(Array.isArray(d) ? d : [])).catch(() => setFlagCatalog([]));
+  }, []);
 
   const loadTimeline = useCallback(async () => {
     if (!companyId) return;
@@ -316,6 +326,25 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
       if (loadStats) loadStats();
     } catch {
       toast('Erro ao registrar opt-out.', 'danger');
+    }
+  }
+
+  // ─── flags/etiquetas ─────────────────────────────────────────────────────────
+  async function toggleFlag(flagKey, isActive) {
+    try {
+      const url = `${API}/api/companies/${companyId}/flags${isActive ? '/' + flagKey : ''}`;
+      const res = await fetch(url, {
+        method: isActive ? 'DELETE' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: isActive ? undefined : JSON.stringify({ flag: flagKey }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setCompany(prev => ({ ...prev, flags: data.flags || [] }));
+      toast('Etiqueta atualizada.', 'success');
+      if (onCompanyUpdated) onCompanyUpdated();
+    } catch (err) {
+      toast(err.message || 'Erro ao atualizar etiqueta.', 'danger');
     }
   }
 
@@ -530,7 +559,7 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
         style={{ zIndex: 1050 }}
         role="dialog"
       >
-        <div className="modal-dialog modal-xl modal-dialog-scrollable">
+        <div className="modal-dialog modal-xl modal-dialog-scrollable modal-fullscreen-md-down">
           <div className="modal-content">
 
             {/* ── HEADER ── */}
@@ -591,7 +620,7 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
                 <div className="row g-3">
 
                   {/* ══ LEFT COLUMN ══════════════════════════════════════ */}
-                  <div className="col-md-7">
+                  <div className="col-12 col-md-7">
 
                     {/* ── Research card ── */}
                     <div className="card mb-3">
@@ -733,6 +762,39 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
                                 ))}
                               </div>
                             )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* ── Etiquetas / Flags card ── */}
+                    <div className="card mb-3">
+                      <div className="card-header fw-bold">
+                        <i className="bi bi-tags me-1" />Etiquetas
+                      </div>
+                      <div className="card-body">
+                        <div className="d-flex flex-wrap gap-1">
+                          {flagCatalog.length === 0 && (
+                            <span className="text-muted small">Nenhuma etiqueta disponível.</span>
+                          )}
+                          {flagCatalog.map((f) => {
+                            const on = (company.flags || []).includes(f.key);
+                            return (
+                              <button
+                                key={f.key}
+                                type="button"
+                                className={`btn btn-sm me-1 mb-1 ${on ? f.badge : 'btn-outline-secondary'}`}
+                                onClick={() => toggleFlag(f.key, on)}
+                              >
+                                <i className={`bi bi-${on ? 'check-circle-fill' : 'circle'} me-1`} />{f.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {(company.flags || []).includes('nao_contatar') && (
+                          <div className="alert alert-danger py-1 px-2 mt-2 mb-0 small">
+                            <i className="bi bi-exclamation-triangle me-1" />
+                            Empresa marcada como <strong>Não contatar</strong> — a geração de abordagem está bloqueada.
                           </div>
                         )}
                       </div>
@@ -881,6 +943,16 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
                             : <><i className="bi bi-whatsapp me-1" />Simular no WhatsApp</>
                           }
                         </button>
+                        <button
+                          className="btn btn-outline-success btn-sm ms-2"
+                          onClick={() => {
+                            onClose()
+                            if (onOpenWhatsApp) onOpenWhatsApp(companyId)
+                          }}
+                          title="Ir para a conversa WhatsApp deste cliente"
+                        >
+                          <i className="bi bi-whatsapp me-1" />Ver WhatsApp
+                        </button>
 
                         {sentimentResult && (
                           <div className="mt-3">
@@ -919,7 +991,7 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
                   {/* ══ END LEFT COLUMN ══════════════════════════════════ */}
 
                   {/* ══ RIGHT COLUMN ═════════════════════════════════════ */}
-                  <div className="col-md-5">
+                  <div className="col-12 col-md-5">
 
                     {/* ── Contacts card ── */}
                     <div className="card mb-3">

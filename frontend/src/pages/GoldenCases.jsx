@@ -64,7 +64,7 @@ export default function GoldenCases({ toast, loadStats }) {
       <div id="tab-golden">
         <div className="row g-3">
           
-          <div className="col-md-4">
+          <div className="col-12 col-md-4">
             <div className="card p-3">
               <h6 className="fw-bold mb-3"><i className="bi bi-trophy me-1"></i>Novo Caso de Ouro</h6>
               <div className="mb-2">
@@ -121,7 +121,7 @@ export default function GoldenCases({ toast, loadStats }) {
             </div>
           </div>
           
-          <div className="col-md-8">
+          <div className="col-12 col-md-8">
             <div className="card p-3">
               <div className="d-flex justify-content-between mb-2">
                 <h6 className="fw-bold mb-0">Biblioteca de Casos de Ouro</h6>

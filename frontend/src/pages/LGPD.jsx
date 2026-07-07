@@ -46,9 +46,9 @@ export default function LGPD({ toast }) {
                 <tr>
                   <th>Data</th>
                   <th>Empresa</th>
-                  <th>Contato</th>
+                  <th className="d-none d-sm-table-cell">Contato</th>
                   <th>Ação</th>
-                  <th>Detalhes</th>
+                  <th className="d-none d-md-table-cell">Detalhes</th>
                 </tr>
               </thead>
               <tbody>
@@ -63,15 +63,15 @@ export default function LGPD({ toast }) {
                 ) : (
                   logs.map(l => (
                     <tr key={l.id}>
-                      <td className="small">{l.created_at}</td>
+                      <td className="small" style={{whiteSpace:'nowrap'}}>{l.created_at}</td>
                       <td>{esc(l.company_name || '—')}</td>
-                      <td>{esc(l.contact_name || '—')}</td>
+                      <td className="d-none d-sm-table-cell">{esc(l.contact_name || '—')}</td>
                       <td>
-                        <span className={`badge ${actionBadge[l.action] || 'bg-secondary'}`}>
+                        <span className={`badge ${actionBadge[l.action] || 'bg-secondary'}`} style={{fontSize: '.72rem'}}>
                           {l.action}
                         </span>
                       </td>
-                      <td className="small">{esc(l.details)}</td>
+                      <td className="d-none d-md-table-cell small">{esc(l.details)}</td>
                     </tr>
                   ))
                 )}

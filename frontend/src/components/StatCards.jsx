@@ -19,8 +19,8 @@ export default function StatCards({ stats }) {
     <div className="container-fluid px-4">
       <div className="row g-3 mb-4">
         {cards.map(c => (
-          <div key={c.id} className="col">
-            <div className="card p-3 text-center" style={{ border: 'none', borderRadius: 12 }}>
+          <div key={c.id} className="stat-card-col col-4 col-md-auto col-lg">
+            <div className="card p-2 p-md-3 text-center" style={{ border: 'none', borderRadius: 12 }}>
               <div className={`display-6 fw-bold ${c.color}`} style={c.style}>{c.value ?? '—'}</div>
               <div className="text-muted small">{c.label}</div>
             </div>

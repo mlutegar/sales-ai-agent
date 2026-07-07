@@ -245,6 +245,15 @@ function initDb() {
       details    TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS learned_patterns (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel     TEXT,
+      role        TEXT,
+      pattern     TEXT,
+      confidence  REAL    DEFAULT 0.5,
+      sample_size INTEGER DEFAULT 0,
+      created_at  TEXT    DEFAULT (datetime('now'))
+    );
     CREATE TABLE IF NOT EXISTS schedule_slots (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
       date_time    TEXT NOT NULL,
@@ -254,9 +263,51 @@ function initDb() {
       meeting_link TEXT DEFAULT '',
       created_at   TEXT DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS company_flags (
+      company_id INTEGER NOT NULL,
+      flag       TEXT    NOT NULL,
+      created_at TEXT    DEFAULT (datetime('now')),
+      PRIMARY KEY (company_id, flag),
+      FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+    );
     CREATE INDEX IF NOT EXISTS idx_contacts_email    ON contacts(email);
     CREATE INDEX IF NOT EXISTS idx_contacts_name     ON contacts(name);
+    CREATE INDEX IF NOT EXISTS idx_company_flags_flag ON company_flags(flag);
   `);
+
+  // Migração: remover NOT NULL de messages.lead_id se necessário (schema antigo tinha NOT NULL)
+  try {
+    const msgCols = db.prepare("PRAGMA table_info(messages)").all();
+    const leadIdCol = msgCols.find(c => c.name === 'lead_id');
+    if (leadIdCol && leadIdCol.notnull) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS messages_v2 (
+          id               INTEGER PRIMARY KEY AUTOINCREMENT,
+          lead_id          INTEGER,
+          contact_id       INTEGER REFERENCES contacts(id),
+          company_id       INTEGER REFERENCES companies(id),
+          channel          TEXT    NOT NULL,
+          day              INTEGER NOT NULL,
+          msg_type         TEXT,
+          content          TEXT,
+          ai_original      TEXT,
+          human_correction TEXT,
+          score            INTEGER,
+          status           TEXT    DEFAULT 'pending',
+          approved         INTEGER DEFAULT 0,
+          is_template      INTEGER DEFAULT 0,
+          template_name    TEXT
+        );
+        INSERT INTO messages_v2 (id,lead_id,contact_id,company_id,channel,day,msg_type,content,ai_original,human_correction,score,status,approved)
+          SELECT id,lead_id,contact_id,company_id,channel,day,msg_type,content,ai_original,human_correction,score,status,approved FROM messages;
+        DROP TABLE messages;
+        ALTER TABLE messages_v2 RENAME TO messages;
+      `);
+      console.log('✅ Migração messages.lead_id → nullable concluída');
+    }
+  } catch(e) {
+    console.error('⚠️  Migração messages lead_id falhou (não crítico):', e.message);
+  }
 
   // Adicionar colunas company/contact nas tabelas existentes (antes de criar índices dependentes)
   addColumnIfNotExists(db, 'messages', 'contact_id', 'INTEGER REFERENCES contacts(id)');
@@ -280,8 +331,12 @@ function initDb() {
   addColumnIfNotExists(db, 'leads', 'wa_opt_out', "INTEGER DEFAULT 0");
   addColumnIfNotExists(db, 'contacts', 'last_wa_interaction', "TEXT");
   addColumnIfNotExists(db, 'contacts', 'wa_opt_out', "INTEGER DEFAULT 0");
-  addColumnIfNotExists(db, 'messages', 'is_template', "INTEGER DEFAULT 0");
-  addColumnIfNotExists(db, 'messages', 'template_name', "TEXT");
+  addColumnIfNotExists(db, 'messages', 'is_template',  "INTEGER DEFAULT 0");
+  addColumnIfNotExists(db, 'messages', 'template_name',"TEXT");
+  addColumnIfNotExists(db, 'messages', 'created_at',   "TEXT");
+  addColumnIfNotExists(db, 'messages', 'score_comment',"TEXT");
+  addColumnIfNotExists(db, 'messages', 'prompt_used',  "TEXT");
+  addColumnIfNotExists(db, 'messages', 'comment_scope',"TEXT DEFAULT 'global'");
 
   // Criar índices que dependem de colunas adicionadas por migração
   db.exec(`
@@ -301,10 +356,31 @@ function initDb() {
   addColumnIfNotExists(db, 'opportunities', 'lost_competitor', "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'opportunities', 'lost_notes',      "TEXT DEFAULT ''");
 
+  // ── Notifications & auto-reply ──────────────────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+      contact_id INTEGER REFERENCES contacts(id)  ON DELETE SET NULL,
+      message_id INTEGER REFERENCES messages(id)  ON DELETE SET NULL,
+      type       TEXT    DEFAULT 'message',
+      title      TEXT    NOT NULL,
+      body       TEXT    DEFAULT '',
+      read       INTEGER DEFAULT 0,
+      created_at TEXT    DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(read);
+  `);
+  addColumnIfNotExists(db, 'companies', 'auto_reply_mode', "TEXT DEFAULT 'off'");
+
   // Colunas de enriquecimento de contatos
   addColumnIfNotExists(db, 'contacts', 'enrich_status', "TEXT DEFAULT 'pending'");
   addColumnIfNotExists(db, 'contacts', 'enrich_source', "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'contacts', 'enrich_at',     "TEXT DEFAULT ''");
+
+  // Rastreamento de origem da importação
+  addColumnIfNotExists(db, 'contacts',  'import_source', "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'companies', 'import_source', "TEXT DEFAULT ''");
 
   // Seed usuário admin padrão
   const adminUser = db.prepare('SELECT id FROM users WHERE username = ?').get('admin');
@@ -425,43 +501,104 @@ app.get('/api/webhook/whatsapp', (req, res) => {
 
 app.post('/api/webhook/whatsapp', (req, res) => {
   console.log('\n--- RECEBIDO POST NO WEBHOOK ---');
-  console.dir(req.body, { depth: null });
   const body = req.body;
 
-  if (body.object) {
-    if (
-      body.entry &&
-      body.entry[0].changes &&
-      body.entry[0].changes[0] &&
-      body.entry[0].changes[0].value.messages &&
-      body.entry[0].changes[0].value.messages[0]
-    ) {
-      const msg = body.entry[0].changes[0].value.messages[0];
-      let phone = msg.from; // Número de quem enviou (ex: 5511999999999)
-      if (phone.length === 12 && phone.startsWith('55')) phone = phone.replace(/^55/, '55'); // Tratamento simples
-      
+  if (!body.object) return res.sendStatus(404);
+
+  const change = body.entry?.[0]?.changes?.[0];
+  const msg    = change?.value?.messages?.[0];
+  if (!msg || msg.type !== 'text') return res.sendStatus(200);
+
+  // Responde Meta imediatamente (evita timeout/retry)
+  res.sendStatus(200);
+
+  // Processa de forma assíncrona
+  (async () => {
+    try {
+      const phone = msg.from;
+      const text  = msg.text.body;
+
       const db = getDb();
-      // Procura o contato correspondente (assumindo que o whatsapp salvo bata com o from da API)
-      const contact = db.prepare('SELECT id, company_id FROM contacts WHERE whatsapp LIKE ? LIMIT 1').get(`%${phone}%`);
-      
-      if (contact) {
-        // Mágica da Janela de 24h: Atualiza o horário de interação!
-        db.exec(`UPDATE contacts SET last_wa_interaction = datetime('now') WHERE id = ${contact.id}`);
-        console.log(`[WhatsApp] Janela de 24h RENOVADA para o contato ID ${contact.id} (${phone}).`);
-        
-        // Salva a mensagem recebida no banco para aparecer na timeline!
-        db.prepare(
-          "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, 'received', 1)"
-        ).run(contact.id, contact.company_id, msg.text.body, msg.text.body);
-      } else {
-        console.log(`[WhatsApp] Mensagem recebida de número desconhecido: ${phone}`);
+      const contact = db.prepare(
+        'SELECT c.*, co.auto_reply_mode, co.name as company_name FROM contacts c JOIN companies co ON c.company_id=co.id WHERE c.whatsapp LIKE ? LIMIT 1'
+      ).get(`%${phone}%`);
+
+      if (!contact) {
+        console.log(`[WhatsApp Webhook] Número desconhecido: ${phone}`);
+        db.close();
+        return;
       }
+
+      // 1. Abre janela de 24h
+      db.prepare("UPDATE contacts SET last_wa_interaction=datetime('now') WHERE id=?").run(contact.id);
+
+      // 2. Salva mensagem recebida
+      const ins = db.prepare(
+        "INSERT INTO messages (contact_id,company_id,channel,day,msg_type,content,ai_original,status,approved,created_at) VALUES (?,?,'whatsapp',1,'text',?,?,'received',1,datetime('now'))"
+      ).run(contact.id, contact.company_id, text, text);
+      const messageId = ins.lastInsertRowid;
       db.close();
+
+      // 3. Classificação de sentimento via IA
+      const sentPrompt = `
+Mensagem recebida do prospect: "${text}"
+Classifique e responda APENAS em JSON válido:
+{"sentiment":"interested"|"technical_question"|"negative"|"out_of_scope"|"wants_meeting",
+ "reasoning":"explicação em 1 frase",
+ "interest_score":1-10}
+Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou agendar algo.`;
+
+      const sentResult = await callClaude('Você é classificador de intenção em vendas B2B.', sentPrompt, 200);
+      let sentiment = 'out_of_scope', reasoning = '', iscore = 5;
+      try {
+        const p = JSON.parse(extractJsonLoose(sentResult));
+        sentiment = p.sentiment; reasoning = p.reasoning; iscore = parseInt(p.interest_score) || 5;
+      } catch {}
+
+      const db2 = getDb();
+      db2.prepare('INSERT INTO sentiment_logs (contact_id,company_id,response_text,sentiment,reasoning,interest_score) VALUES (?,?,?,?,?,?)')
+        .run(contact.id, contact.company_id, text, sentiment, reasoning, iscore);
+
+      const statusMap = { interested:'hot_lead', technical_question:'needs_followup', negative:'rejected', out_of_scope:'contacted', wants_meeting:'hot_lead' };
+      db2.prepare('UPDATE companies SET status=?,interest_score=? WHERE id=?').run(statusMap[sentiment]||'contacted', iscore, contact.company_id);
+
+      // 4. Cria notificação
+      const sentLabels = { interested:'🔥 Interessado', technical_question:'🤔 Dúvida técnica', negative:'👎 Negativo', out_of_scope:'↗ Fora de escopo', wants_meeting:'📅 Quer agendar reunião' };
+      const notifType  = sentiment === 'wants_meeting' ? 'meeting_request' : 'message';
+      const notifTitle = sentiment === 'wants_meeting'
+        ? `📅 ${contact.company_name} quer marcar reunião`
+        : `💬 Nova resposta de ${contact.company_name} (${sentLabels[sentiment]||sentiment})`;
+      db2.prepare('INSERT INTO notifications (company_id,contact_id,message_id,type,title,body) VALUES (?,?,?,?,?,?)')
+        .run(contact.company_id, contact.id, messageId, notifType, notifTitle, text);
+
+      // 5. Auto-reply — só se não for wants_meeting e auto_reply_mode ativo
+      const autoMode = contact.auto_reply_mode || 'off';
+      if (sentiment !== 'wants_meeting' && autoMode !== 'off') {
+        const shouldReply = autoMode === 'all' ||
+          (autoMode === 'except_meeting' && sentiment !== 'wants_meeting');
+
+        if (shouldReply && (sentiment === 'interested' || sentiment === 'technical_question')) {
+          const draftPrompt = sentiment === 'technical_question'
+            ? `O prospect enviou: "${text}"\nDúvida técnica. Responda de forma objetiva (máx 80 palavras) e convide para conversa de 15 minutos. Tom consultivo.`
+            : `O prospect enviou: "${text}"\nDemonstrou interesse. Confirme o interesse e proponha reunião de 15 minutos (máx 60 palavras). Tom entusiasmado mas profissional.`;
+          const draft = await callClaude('Você é SDR especialista em respostas rápidas.', draftPrompt, 200);
+
+          // Salva draft e envia automaticamente
+          db2.prepare(
+            "INSERT INTO messages (contact_id,company_id,channel,day,msg_type,content,ai_original,status,approved,created_at) VALUES (?,?,'whatsapp',1,'text',?,?,'sent',1,datetime('now'))"
+          ).run(contact.id, contact.company_id, draft, draft);
+
+          await sendWhatsAppMessage(phone, draft);
+          console.log(`[WhatsApp Webhook] Auto-reply enviado para ${phone}`);
+        }
+      }
+
+      db2.close();
+      console.log(`[WhatsApp Webhook] ✅ Processado: ${contact.company_name} | sentimento: ${sentiment}`);
+    } catch (err) {
+      console.error('[WhatsApp Webhook] Erro no processamento assíncrono:', err.message);
     }
-    res.sendStatus(200);
-  } else {
-    res.sendStatus(404);
-  }
+  })();
 });
 
 // ── Claude helper ─────────────────────────────────────────────────────────────
@@ -478,28 +615,57 @@ const SEQUENCE_CHANNELS = [
   { day: 5, channel: 'whatsapp', type: 'follow_up' },
 ];
 
+// ── Flags/Etiquetas de empresa ────────────────────────────────────────────────
+// Catálogo de etiquetas aplicáveis a empresas. `blocks_outreach: true` faz a
+// automação (geração de sequência) ser bloqueada para a empresa.
+const COMPANY_FLAGS = [
+  { key: 'nao_contatar',        label: 'Não contatar',         badge: 'bg-danger',            blocks_outreach: true },
+  { key: 'empresa_ja_atendida', label: 'Empresa já atendida',  badge: 'bg-warning text-dark', blocks_outreach: false },
+  { key: 'cliente_ativo',       label: 'Cliente ativo',        badge: 'bg-success',           blocks_outreach: false },
+];
+const FLAG_KEYS = new Set(COMPANY_FLAGS.map(f => f.key));
+const BLOCKING_FLAG_KEYS = new Set(COMPANY_FLAGS.filter(f => f.blocks_outreach).map(f => f.key));
+
+function companyFlagKeys(db, id) {
+  return new Set(db.prepare('SELECT flag FROM company_flags WHERE company_id=?').all(id).map(r => r.flag));
+}
+function companyIsBlocked(db, id) {
+  for (const k of companyFlagKeys(db, id)) if (BLOCKING_FLAG_KEYS.has(k)) return true;
+  return false;
+}
+
 // ── Enriquecimento de contatos ────────────────────────────────────────────────
 
 async function enrichWithApollo(contactName, companyName) {
   const apiKey = process.env.APOLLO_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) return { error: 'APOLLO_API_KEY não configurada' };
   try {
     const res = await fetch('https://api.apollo.io/api/v1/people/match', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', 'X-Api-Key': apiKey },
       body: JSON.stringify({
-        api_key: apiKey,
         name: contactName,
         organization_name: companyName,
         reveal_personal_emails: false,
         reveal_phone_number: true,
       }),
     });
-    if (res.status === 429) { console.warn('Apollo: rate limit atingido'); return null; }
-    if (!res.ok) return null;
+    if (res.status === 429) {
+      console.warn('[Apollo] Rate limit atingido (429)');
+      return { error: 'Apollo: rate limit atingido (429)' };
+    }
+    if (!res.ok) {
+      let body = '';
+      try { body = await res.text(); } catch {}
+      console.warn(`[Apollo] Erro HTTP ${res.status}: ${body}`);
+      return { error: `Apollo retornou HTTP ${res.status}: ${body}` };
+    }
     const data = await res.json();
     const person = data.person;
-    if (!person) return null;
+    if (!person) {
+      console.log(`[Apollo] Nenhuma pessoa encontrada para "${contactName}" na empresa "${companyName}"`);
+      return { error: 'Apollo: nenhum resultado encontrado para esse contato/empresa' };
+    }
     return {
       email:    person.email || '',
       phone:    (person.phone_numbers && person.phone_numbers[0]) ? person.phone_numbers[0].raw_number : '',
@@ -507,8 +673,8 @@ async function enrichWithApollo(contactName, companyName) {
       source:   'apollo',
     };
   } catch (e) {
-    console.warn('Apollo erro:', e.message);
-    return null;
+    console.warn('[Apollo] Erro de rede:', e.message);
+    return { error: `Apollo: erro de rede — ${e.message}` };
   }
 }
 
@@ -527,6 +693,56 @@ async function enrichWithClaudeGuess(contactName, companyName) {
   return null;
 }
 
+// Busca um contato para uma empresa que ainda não tem nenhum (por organização, sem nome)
+async function findContactsForCompany(companyName, sector) {
+  const apiKey = process.env.APOLLO_API_KEY;
+  if (!apiKey) return { error: 'APOLLO_API_KEY não configurada' };
+
+  try {
+    const res = await fetch('https://api.apollo.io/api/v1/people/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', 'X-Api-Key': apiKey },
+      body: JSON.stringify({
+        organization_name: companyName,
+        person_titles: ['CEO', 'Diretor', 'Diretor Comercial', 'Gerente', 'Sócio', 'VP', 'Head', 'Presidente'],
+        page: 1,
+        per_page: 3,
+      }),
+    });
+
+    if (res.status === 429) {
+      console.warn('[Apollo] Rate limit atingido (429)');
+      return { error: 'Apollo: rate limit atingido (429)' };
+    }
+    if (!res.ok) {
+      let body = '';
+      try { body = await res.text(); } catch {}
+      console.warn(`[Apollo] mixed_people/search HTTP ${res.status}: ${body}`);
+      return { error: `Apollo retornou HTTP ${res.status}: ${body}` };
+    }
+
+    const data = await res.json();
+    const people = (data.people || data.contacts || []);
+    if (people.length === 0) {
+      console.log(`[Apollo] Nenhum contato encontrado para a empresa "${companyName}"`);
+      return { error: `Apollo: nenhum contato encontrado para "${companyName}"` };
+    }
+
+    const p = people[0];
+    return {
+      name:    p.name || ((p.first_name || '') + ' ' + (p.last_name || '')).trim() || '',
+      role:    (p.title || p.headline || '').slice(0, 100),
+      email:   p.email || '',
+      phone:   (p.phone_numbers && p.phone_numbers[0]) ? p.phone_numbers[0].raw_number : '',
+      linkedin: p.linkedin_url || '',
+      source:  'apollo',
+    };
+  } catch (e) {
+    console.warn('[Apollo] people/search erro de rede:', e.message);
+    return { error: `Apollo: erro de rede — ${e.message}` };
+  }
+}
+
 async function enrichContact(contactId, companyName) {
   let db = getDb();
   const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(contactId);
@@ -538,34 +754,40 @@ async function enrichContact(contactId, companyName) {
   db.prepare("UPDATE contacts SET enrich_status='pending', enrich_at=datetime('now') WHERE id=?").run(contactId);
   db.close();
 
-  let result = await enrichWithApollo(contact.name, companyName);
-  if (!result) result = await enrichWithClaudeGuess(contact.name, companyName);
+  const result = await enrichWithApollo(contact.name, companyName);
 
   db = getDb();
-  if (result && result.email) {
+  // Se retornou erro (chave errada, rate limit, etc.) — não tenta Claude, apenas reporta
+  if (!result || result.error) {
+    const errorMsg = result ? result.error : 'Resposta inesperada do Apollo';
+    console.warn(`[enrichContact] Falha Apollo para "${contact.name}" / "${companyName}": ${errorMsg}`);
+    db.prepare("UPDATE contacts SET enrich_status='not_found', enrich_source='apollo_error', enrich_at=datetime('now') WHERE id=?").run(contactId);
+    db.close();
+    return { ok: false, status: 'apollo_error', error: errorMsg };
+  }
+
+  if (result.email) {
     db.prepare(`
       UPDATE contacts
       SET email    = CASE WHEN (email IS NULL OR email='')    THEN ? ELSE email    END,
           whatsapp = CASE WHEN (whatsapp IS NULL OR whatsapp='') AND ?!='' THEN ? ELSE whatsapp END,
           linkedin = CASE WHEN (linkedin IS NULL OR linkedin='') AND ?!='' THEN ? ELSE linkedin END,
-          enrich_status = ?,
-          enrich_source = ?,
+          enrich_status = 'found',
+          enrich_source = 'apollo',
           enrich_at = datetime('now')
       WHERE id = ?
     `).run(
       result.email,
       result.phone || '', result.phone || '',
       result.linkedin || '', result.linkedin || '',
-      result.source === 'apollo' ? 'found' : 'guessed',
-      result.source,
       contactId
     );
     db.close();
-    return { ok: true, status: result.source === 'apollo' ? 'found' : 'guessed', email: result.email, phone: result.phone || '', linkedin: result.linkedin || '', source: result.source };
+    return { ok: true, status: 'found', email: result.email, phone: result.phone || '', linkedin: result.linkedin || '', source: 'apollo' };
   } else {
-    db.prepare("UPDATE contacts SET enrich_status='not_found', enrich_source='', enrich_at=datetime('now') WHERE id=?").run(contactId);
+    db.prepare("UPDATE contacts SET enrich_status='not_found', enrich_source='apollo', enrich_at=datetime('now') WHERE id=?").run(contactId);
     db.close();
-    return { ok: false, status: 'not_found' };
+    return { ok: false, status: 'not_found', error: 'Apollo encontrou o contato mas sem e-mail disponível' };
   }
 }
 
@@ -770,19 +992,55 @@ app.get('/api/companies', (req, res) => {
   const rows = db.prepare(`
     SELECT c.*,
       COUNT(ct.id) as contact_count,
-      GROUP_CONCAT(ct.name || ' (' || ct.role || ')', '||') as contacts_summary
+      GROUP_CONCAT(ct.name || ' (' || ct.role || ')', '||') as contacts_summary,
+      (SELECT GROUP_CONCAT(cf.flag) FROM company_flags cf WHERE cf.company_id=c.id) as flags
     FROM companies c
     LEFT JOIN contacts ct ON ct.company_id = c.id
     GROUP BY c.id
     ORDER BY c.created_at DESC
   `).all();
-  
+
   for (const row of rows) {
     row.contacts = db.prepare('SELECT * FROM contacts WHERE company_id=? ORDER BY is_primary DESC, created_at ASC').all(row.id);
+    row.flags = row.flags ? row.flags.split(',') : [];
   }
 
   db.close();
   res.json(rows);
+});
+
+// ── Flags/Etiquetas ───────────────────────────────────────────────────────────
+// Catálogo de etiquetas disponíveis para empresas.
+app.get('/api/flags', (req, res) => {
+  res.json(COMPANY_FLAGS);
+});
+
+// Aplica uma etiqueta a uma empresa.
+app.post('/api/companies/:id/flags', (req, res) => {
+  const flag = (req.body.flag || '').toString().trim();
+  if (!FLAG_KEYS.has(flag)) return res.status(400).json({ error: 'Etiqueta inválida' });
+  const db = getDb();
+  const comp = db.prepare('SELECT id, name FROM companies WHERE id=?').get(req.params.id);
+  if (!comp) { db.close(); return res.status(404).json({ error: 'Empresa não encontrada' }); }
+  db.prepare('INSERT OR IGNORE INTO company_flags (company_id, flag) VALUES (?,?)').run(comp.id, flag);
+  db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?,?,?)')
+    .run(comp.id, 'flag_added', `Etiqueta "${flag}" aplicada`);
+  const flags = [...companyFlagKeys(db, comp.id)];
+  db.close();
+  res.json({ ok: true, flags });
+});
+
+// Remove uma etiqueta de uma empresa.
+app.delete('/api/companies/:id/flags/:flag', (req, res) => {
+  const db = getDb();
+  const comp = db.prepare('SELECT id FROM companies WHERE id=?').get(req.params.id);
+  if (!comp) { db.close(); return res.status(404).json({ error: 'Empresa não encontrada' }); }
+  db.prepare('DELETE FROM company_flags WHERE company_id=? AND flag=?').run(comp.id, req.params.flag);
+  db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?,?,?)')
+    .run(comp.id, 'flag_removed', `Etiqueta "${req.params.flag}" removida`);
+  const flags = [...companyFlagKeys(db, comp.id)];
+  db.close();
+  res.json({ ok: true, flags });
 });
 
 app.post('/api/companies', (req, res) => {
@@ -826,16 +1084,19 @@ function roleFromText(text) {
 app.post('/api/companies/import-bulk', (req, res) => {
   const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
   if (!rows.length) return res.status(400).json({ error: 'Nenhuma linha para importar' });
+  const importSource = (req.body.import_source || '').toString().trim(); // ex: "lista de leads com dados faltando.xlsx"
   const db = getDb();
-  let companiesCreated = 0, contactsCreated = 0, skipped = 0;
+  let companiesCreated = 0, contactsCreated = 0, skipped = 0, companiesWithoutContact = 0;
+  const newCompanyIds = [];
   const errors = [];
 
   const findCompany   = db.prepare('SELECT id FROM companies WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))');
-  const insCompany    = db.prepare('INSERT INTO companies (name, sector) VALUES (?, ?)');
+  const insCompany    = db.prepare('INSERT INTO companies (name, sector, import_source) VALUES (?, ?, ?)');
   const logCompany    = db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?,?,?)');
   const findContact   = db.prepare("SELECT id FROM contacts WHERE email != '' AND email=? AND company_id=?");
+  const findContactByName = db.prepare('SELECT id FROM contacts WHERE LOWER(TRIM(name))=LOWER(TRIM(?)) AND company_id=?');
   const countContacts = db.prepare('SELECT COUNT(*) as c FROM contacts WHERE company_id=?');
-  const insContact    = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary) VALUES (?,?,?,?,?,?,?)');
+  const insContact    = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, import_source) VALUES (?,?,?,?,?,?,?,?)');
   const logContact    = db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)');
 
   for (const row of rows) {
@@ -844,29 +1105,36 @@ app.post('/api/companies/import-bulk', (req, res) => {
 
     let comp = findCompany.get(companyName);
     let companyId;
+    const isNew = !comp;
     if (comp) {
       companyId = comp.id;
     } else {
-      companyId = insCompany.run(companyName, (row.sector || '').toString().trim()).lastInsertRowid;
-      logCompany.run(companyId, 'company_added', `Empresa "${companyName}" importada (planilha)`);
+      companyId = insCompany.run(companyName, (row.sector || '').toString().trim(), importSource).lastInsertRowid;
+      logCompany.run(companyId, 'company_added', `Empresa "${companyName}" importada (${importSource || 'planilha'})`);
       companiesCreated++;
+      newCompanyIds.push(companyId);
     }
 
     const contactName = (row.contact_name || '').toString().trim();
-    if (!contactName) continue; // linha só de empresa, sem contato
+    if (!contactName) {
+      if (isNew) companiesWithoutContact++;
+      continue;
+    }
 
+    // Deduplicar por email (se tiver) ou por nome+empresa
     let email = (row.email || '').toString().trim();
     if (email && !isValidEmailServer(email)) { errors.push(`E-mail inválido ignorado: ${email}`); email = ''; }
-    if (email && findContact.get(email, companyId)) { skipped++; continue; } // contato duplicado nessa empresa
+    if (email && findContact.get(email, companyId)) { skipped++; continue; }
+    if (!email && findContactByName.get(contactName, companyId)) { skipped++; continue; }
 
     const isPrimary = countContacts.get(companyId).c === 0 ? 1 : 0;
-    const cr = insContact.run(companyId, contactName, roleFromText(row.role), email, '', normalizePhone(row.whatsapp), isPrimary);
-    logContact.run(companyId, cr.lastInsertRowid, 'contact_added', `Contato "${contactName}" importado (planilha)`);
+    const cr = insContact.run(companyId, contactName, roleFromText(row.role), email, '', normalizePhone(row.whatsapp), isPrimary, importSource);
+    logContact.run(companyId, cr.lastInsertRowid, 'contact_added', `Contato "${contactName}" importado (${importSource || 'planilha'})`);
     contactsCreated++;
   }
 
   db.close();
-  res.json({ ok: true, companies_created: companiesCreated, contacts_created: contactsCreated, skipped, errors: errors.slice(0, 20) });
+  res.json({ ok: true, companies_created: companiesCreated, contacts_created: contactsCreated, skipped, companies_without_contact: companiesWithoutContact, errors: errors.slice(0, 20) });
 });
 
 app.get('/api/companies/:id', (req, res) => {
@@ -881,6 +1149,7 @@ app.get('/api/companies/:id', (req, res) => {
   let research_history = [], sequence_history = [];
   try { research_history = JSON.parse(company.research_history || '[]'); } catch {}
   try { sequence_history = JSON.parse(company.sequence_history || '[]'); } catch {}
+  company.flags = [...companyFlagKeys(db, req.params.id)];
   db.close();
   res.json({ company, contacts, messages, sentiments, consent_logs, slots, research_history, sequence_history });
 });
@@ -1048,7 +1317,7 @@ app.post('/api/companies/:id/queue-draft', (req, res) => {
   const company = db.prepare('SELECT id FROM companies WHERE id=?').get(req.params.id);
   if (!company) { db.close(); return res.status(404).json({ error: 'Empresa não encontrada' }); }
   const r = db.prepare(
-    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved) VALUES (?,?,?,?,?,?,?,'pending',0)"
+    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at) VALUES (?,?,?,?,?,?,?,'pending',0,datetime('now'))"
   ).run(contact_id || null, req.params.id, 'email', 0, 'draft_reply', content, content);
   db.close();
   res.json({ id: r.lastInsertRowid });
@@ -1097,9 +1366,6 @@ app.post('/api/contacts/bulk-enrich', async (req, res) => {
   db.close();
 
   if (!contacts.length) return res.json({ total: 0, found: 0, guessed: 0, not_found: 0, results: [] });
-
-  const painLine = painPoint ? ('Dor principal do lead: ' + painPoint) : '';
-  const painCTA  = painPoint ? 'IMPORTANTE: a mensagem deve abordar diretamente a dor mencionada acima como ponto de entrada.' : '';
 
   const results = [];
   for (const ct of contacts) {
@@ -1180,6 +1446,61 @@ app.post('/api/contacts/import-and-enrich', async (req, res) => {
       }
     })();
   }
+});
+
+// Encontrar e cadastrar um contato para uma empresa sem contatos
+app.post('/api/companies/:id/find-contact', async (req, res) => {
+  const db = getDb();
+  const company = db.prepare('SELECT * FROM companies WHERE id=?').get(req.params.id);
+  db.close();
+  if (!company) return res.status(404).json({ error: 'Empresa não encontrada' });
+
+  const result = await findContactsForCompany(company.name, company.sector);
+  if (!result || result.error || !result.name) {
+    const errorMsg = result ? result.error : 'Sem resposta do Apollo';
+    console.warn(`[find-contact] Falha para empresa "${company.name}": ${errorMsg}`);
+    return res.json({ ok: false, status: 'not_found', error: errorMsg });
+  }
+
+  const db2 = getDb();
+  // Verifica se já existe algum contato com esse nome na empresa
+  const existing = db2.prepare('SELECT id FROM contacts WHERE company_id=? AND LOWER(TRIM(name))=LOWER(TRIM(?))').get(company.id, result.name);
+  if (existing) {
+    db2.close();
+    return res.json({ ok: false, status: 'already_exists', message: `Contato "${result.name}" já cadastrado.` });
+  }
+
+  const roleKey = roleFromText(result.role);
+  const cr = db2.prepare(
+    "INSERT INTO contacts (company_id, name, role, email, whatsapp, linkedin, is_primary, enrich_status, enrich_source) VALUES (?,?,?,?,?,?,1,?,?)"
+  ).run(
+    company.id,
+    result.name,
+    roleKey,
+    result.email || '',
+    result.phone || '',
+    result.linkedin || '',
+    result.source === 'apollo' ? 'found' : 'guessed',
+    result.source,
+  );
+  db2.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(
+    company.id, cr.lastInsertRowid, 'contact_added',
+    `Contato "${result.name}" encontrado via enriquecimento automático (${result.source})`
+  );
+  db2.close();
+
+  res.json({
+    ok: true,
+    source: result.source,
+    contact: {
+      id: cr.lastInsertRowid,
+      name: result.name,
+      role: roleKey,
+      email: result.email || '',
+      whatsapp: result.phone || '',
+      linkedin: result.linkedin || '',
+    },
+  });
 });
 
 // Busca global de contatos
@@ -1319,6 +1640,7 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
   const company = db.prepare('SELECT * FROM companies WHERE id=?').get(req.params.id);
   if (!company) { db.close(); return res.status(404).json({ error: 'Empresa não encontrada' }); }
   if (company.opted_out) { db.close(); return res.status(403).json({ error: 'Empresa está na blacklist' }); }
+  if (companyIsBlocked(db, req.params.id)) { db.close(); return res.status(403).json({ error: "Empresa com flag 'não contatar' — abordagem bloqueada" }); }
 
   let contact;
   if (req.body.contact_id) {
@@ -1379,7 +1701,7 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
 
     const content = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', prompt, 400);
     const db3 = getDb();
-    const r = db3.prepare('INSERT INTO messages (lead_id, contact_id, company_id, channel, day, msg_type, content, ai_original, status) VALUES (?,?,?,?,?,?,?,?,?)').run(null, contact.id, req.params.id, tpl.channel, tpl.day, tpl.type, content, content, 'pending');
+    const r = db3.prepare("INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, created_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'))").run(contact.id, req.params.id, tpl.channel, tpl.day, tpl.type, content, content, 'pending');
     db3.close();
     results.push({ id: r.lastInsertRowid, channel: tpl.channel, day: tpl.day, content, status: 'pending', approved: 0, contact_name: contact.name });
   }
@@ -1391,48 +1713,110 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
 });
 
 // ── Geração de sequência em lote (multi-lead, multi-produto) ─────────────────
+const SEQ_SYSTEM = 'Você é copywriter B2B especialista em sequências multicanal.';
+const CHANNEL_DESC = {
+  linkedin: 'mensagem de conexão no LinkedIn (máx 300 chars, tom informal)',
+  email:    'email de prospecção (inclua assunto na 1ª linha como "Assunto: ...", corpo máx 150 palavras)',
+  whatsapp: 'mensagem WhatsApp (casual, máx 100 palavras)',
+};
+
+// Monta o bloco de "observações / estilo aprendido" (RLHF) que é injetado no prompt.
+// Reúne: regras de estilo (learned_patterns), exemplos aprovados e correções/comentários humanos.
+function buildLearnedContext(db, channel, role) {
+  const parts = [];
+  try {
+    const patterns = db.prepare(
+      `SELECT pattern FROM learned_patterns
+       WHERE channel=? AND (role=? OR role IS NULL OR role='')
+       ORDER BY confidence DESC LIMIT 5`
+    ).all(channel, role);
+    if (patterns.length) {
+      parts.push('Regras de estilo aprendidas com o humano:\n' + patterns.map(p => `- ${p.pattern}`).join('\n'));
+    }
+
+    const examples = db.prepare(
+      `SELECT content FROM messages
+       WHERE channel=? AND approved=1 AND score>=4 AND content IS NOT NULL
+       ORDER BY score DESC, id DESC LIMIT 2`
+    ).all(channel);
+    if (examples.length) {
+      parts.push('Exemplos aprovados (siga este estilo):\n' + examples.map(e => `"""${(e.content || '').slice(0, 300)}"""`).join('\n'));
+    }
+
+    // Observações são globais por padrão, mas podem ser marcadas como "só deste canal".
+    // Inclui as globais + as específicas do canal atual. Notas baixas vêm primeiro (feedback mais informativo).
+    const notes = db.prepare(
+      `SELECT channel, score, human_correction, score_comment FROM messages
+       WHERE ((human_correction IS NOT NULL AND human_correction != '')
+           OR (score_comment IS NOT NULL AND score_comment != ''))
+         AND (comment_scope IS NULL OR comment_scope='global' OR comment_scope=?)
+       ORDER BY (CASE WHEN score IS NOT NULL THEN 0 ELSE 1 END), score ASC, id DESC
+       LIMIT 8`
+    ).all(channel);
+    const obs = [];
+    for (const n of notes) {
+      const ch = n.channel || 'geral';
+      if (n.score_comment) {
+        obs.push(n.score != null && n.score <= 2
+          ? `- EVITE (nota ${n.score}, ${ch}): ${n.score_comment}`
+          : `- Observação (${ch}): ${n.score_comment}`);
+      }
+      if (n.human_correction) obs.push(`- Preferiu reescrever assim (${ch}): "${(n.human_correction || '').slice(0, 200)}"`);
+    }
+    if (obs.length) parts.push('Observações do avaliador humano:\n' + obs.slice(0, 8).join('\n'));
+  } catch (_) { /* tabela/coluna ausente: sem contexto */ }
+
+  if (!parts.length) return '';
+  return '--- SUAS OBSERVAÇÕES / ESTILO APRENDIDO (siga à risca) ---\n' + parts.join('\n\n') + '\n--- FIM DAS OBSERVAÇÕES ---';
+}
+
+// Monta o userPrompt de uma mensagem da sequência. Usado na geração real e no preview.
+function buildSequenceUserPrompt({ companyName, sector, contactName, role, hook, productValue, day, channel, socialProof, learned }) {
+  const roleInfo = ROLE_PROFILES[role] || ROLE_PROFILES.other;
+  return `
+Empresa: ${companyName} (setor: ${sector || 'não definido'})
+Contato: ${contactName}, cargo ${role}
+Gancho: ${hook}
+Produto: ${productValue}
+Tom: ${roleInfo.tone} | Foco: ${roleInfo.focus}
+Canal / Dia ${day}: ${CHANNEL_DESC[channel]}
+${socialProof ? 'Casos de sucesso:\n' + socialProof : ''}
+${learned ? '\n' + learned + '\n' : ''}
+Escreva APENAS o texto da mensagem, sem explicações.
+CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO tente vender diretamente.`;
+}
+
 async function generateSequenceForCompany(companyId, productValue, painPoint = '') {
   const db = getDb();
   const company = db.prepare('SELECT * FROM companies WHERE id=?').get(companyId);
   if (!company) { db.close(); throw new Error('Empresa não encontrada'); }
   if (company.opted_out) { db.close(); throw new Error('Empresa na blacklist'); }
+  if (companyIsBlocked(db, companyId)) { db.close(); throw new Error("Flag 'não contatar' — abordagem bloqueada"); }
 
   let contact = db.prepare('SELECT * FROM contacts WHERE company_id=? AND is_primary=1').get(companyId);
   if (!contact) contact = db.prepare('SELECT * FROM contacts WHERE company_id=? LIMIT 1').get(companyId);
   if (!contact) { db.close(); throw new Error('Sem contatos cadastrados'); }
 
-  const roleInfo = ROLE_PROFILES[contact.role] || ROLE_PROFILES.other;
   const hook = company.research_hook || `Olá ${contact.name},`;
   const golden = db.prepare('SELECT title, content FROM golden_cases WHERE score>=4 LIMIT 3').all();
   const socialProof = golden.map(g => `- ${g.title}: ${g.content.substring(0, 80)}...`).join('\n');
-  db.close();
 
   const results = [];
   for (const tpl of SEQUENCE_CHANNELS) {
-    const channelDesc = {
-      linkedin: 'mensagem de conexão no LinkedIn (máx 300 chars, tom informal)',
-      email:    'email de prospecção (inclua assunto na 1ª linha como "Assunto: ...", corpo máx 150 palavras)',
-      whatsapp: 'mensagem WhatsApp (casual, máx 100 palavras)',
-    }[tpl.channel];
+    const learned = buildLearnedContext(db, tpl.channel, contact.role);
+    const prompt = buildSequenceUserPrompt({
+      companyName: company.name, sector: company.sector, contactName: contact.name, role: contact.role,
+      hook, productValue, day: tpl.day, channel: tpl.channel, socialProof, learned,
+    });
 
-    const prompt = `
-Empresa: ${company.name} (setor: ${company.sector || 'não definido'})
-Contato: ${contact.name}, cargo ${contact.role}
-Gancho: ${hook}
-Produto: ${productValue}
-Tom: ${roleInfo.tone} | Foco: ${roleInfo.focus}
-Canal / Dia ${tpl.day}: ${channelDesc}
-${socialProof ? 'Casos de sucesso:\n' + socialProof : ''}
-
-Escreva APENAS o texto da mensagem, sem explicações.
-CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO tente vender diretamente.`;
-
-    const content = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', prompt, 400);
+    const content = await callClaude(SEQ_SYSTEM, prompt, 400);
+    const promptUsed = `[SYSTEM]\n${SEQ_SYSTEM}\n\n[USER]\n${prompt}`;
     const dbW = getDb();
-    const r = dbW.prepare('INSERT INTO messages (lead_id, contact_id, company_id, channel, day, msg_type, content, ai_original, status) VALUES (?,?,?,?,?,?,?,?,?)').run(null, contact.id, companyId, tpl.channel, tpl.day, tpl.type, content, content, 'pending');
+    const r = dbW.prepare("INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, created_at, prompt_used) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?)").run(contact.id, companyId, tpl.channel, tpl.day, tpl.type, content, content, 'pending', promptUsed);
     dbW.close();
     results.push({ id: r.lastInsertRowid, channel: tpl.channel, day: tpl.day, content, status: 'pending', approved: 0, contact_name: contact.name });
   }
+  db.close();
 
   const dbU = getDb();
   dbU.prepare("UPDATE companies SET status='sequence_created' WHERE id=?").run(companyId);
@@ -1562,18 +1946,22 @@ app.post('/api/companies/:id/simulator/inbound', async (req, res) => {
   db.prepare("UPDATE contacts SET last_wa_interaction = datetime('now') WHERE id=?").run(contact_id);
 
   // 2. Insere a mensagem recebida no banco como recebida
-  db.prepare(
-    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, 'received', 1)"
+  const receivedIns = db.prepare(
+    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, 'received', 1, datetime('now'))"
   ).run(contact_id, companyId, response_text, response_text);
+  const receivedMsgId = receivedIns.lastInsertRowid;
   db.close();
 
   // 3. Roda a classificação de sentimento da IA e gera o rascunho de resposta automática
+  //    Espelha o mesmo prompt/lógica do webhook real (server.js /api/webhook/whatsapp),
+  //    inclusive o sentimento "wants_meeting".
   const prompt = `
 Mensagem recebida do prospect: "${response_text}"
 Classifique e responda APENAS em JSON válido:
-{"sentiment": "interested"|"technical_question"|"negative"|"out_of_scope",
+{"sentiment": "interested"|"technical_question"|"negative"|"out_of_scope"|"wants_meeting",
  "reasoning": "explicação em 1 frase",
- "interest_score": 1-10}`;
+ "interest_score": 1-10}
+Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou agendar algo.`;
 
   const result = await callClaude('Você é classificador de intenção em vendas B2B.', prompt, 200);
   let sentiment, reasoning, iscore;
@@ -1582,25 +1970,126 @@ Classifique e responda APENAS em JSON válido:
 
   const db2 = getDb();
   db2.prepare('INSERT INTO sentiment_logs (lead_id, contact_id, company_id, response_text, sentiment, reasoning, interest_score) VALUES (?,?,?,?,?,?,?)').run(null, contact_id, companyId, response_text, sentiment, reasoning, iscore);
-  const statusMap = { interested: 'hot_lead', technical_question: 'needs_followup', negative: 'rejected', out_of_scope: 'contacted' };
+  const statusMap = { interested: 'hot_lead', technical_question: 'needs_followup', negative: 'rejected', out_of_scope: 'contacted', wants_meeting: 'hot_lead' };
   db2.prepare('UPDATE companies SET status=?,interest_score=? WHERE id=?').run(statusMap[sentiment] || 'contacted', iscore, companyId);
+
+  // Cria notificação — mesmo comportamento do webhook real
+  const company = db2.prepare('SELECT name, auto_reply_mode FROM companies WHERE id=?').get(companyId);
+  const companyName = company?.name || 'Empresa';
+  const sentLabels = { interested: '🔥 Interessado', technical_question: '🤔 Dúvida técnica', negative: '👎 Negativo', out_of_scope: '↗ Fora de escopo', wants_meeting: '📅 Quer agendar reunião' };
+  const notifType  = sentiment === 'wants_meeting' ? 'meeting_request' : 'message';
+  const notifTitle = sentiment === 'wants_meeting'
+    ? `📅 ${companyName} quer marcar reunião`
+    : `💬 Nova resposta de ${companyName} (${sentLabels[sentiment] || sentiment})`;
+  db2.prepare('INSERT INTO notifications (company_id,contact_id,message_id,type,title,body) VALUES (?,?,?,?,?,?)')
+    .run(companyId, contact_id, receivedMsgId, notifType, notifTitle, response_text);
   db2.close();
 
-  // 4. Se for sentimento positivo, gera um rascunho de resposta e insere na fila de messages pendentes do CRM!
+  // 4. Auto-reply — respeita o auto_reply_mode da empresa, igual ao webhook real.
+  //    Bot ativo → grava como 'sent'. Bot off → grava rascunho 'pending' para revisão manual.
+  let autoReplyStatus = null;
   if (sentiment === 'interested' || sentiment === 'technical_question') {
+    const autoMode = company?.auto_reply_mode || 'off';
+    const botActive = autoMode === 'all' || autoMode === 'except_meeting';
     const draftPrompt = sentiment === 'technical_question'
       ? `O prospect enviou: "${response_text}"\nEle tem uma dúvida técnica. Escreva uma resposta curta (máx 80 palavras) que responda de forma objetiva e convide para uma conversa de 15 minutos para aprofundar. Tom consultivo.`
       : `O prospect enviou: "${response_text}"\nEle demonstrou interesse. Escreva uma resposta curta (máx 60 palavras) que confirme o interesse e proponha uma reunião de 15 minutos. Tom entusiasmado mas profissional.`;
     const draft_reply = await callClaude('Você é SDR especialista em respostas rápidas para prospects interessados.', draftPrompt, 200);
 
+    const status   = botActive ? 'sent' : 'pending';
+    const approved = botActive ? 1 : 0;
+    autoReplyStatus = status;
     const db3 = getDb();
     db3.prepare(
-      "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, 'pending', 0)"
-    ).run(contact_id, companyId, draft_reply, draft_reply);
+      "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, ?, ?, datetime('now'))"
+    ).run(contact_id, companyId, draft_reply, draft_reply, status, approved);
     db3.close();
   }
 
-  res.json({ ok: true, sentiment, interest_score: iscore });
+  res.json({ ok: true, sentiment, interest_score: iscore, auto_reply_status: autoReplyStatus });
+});
+
+// Simula a resposta do BOT (IA em treinamento) para a última mensagem recebida.
+// ACRESCENTA ao chat — nunca apaga o histórico (diferente de "Gerar Sequência").
+app.post('/api/companies/:id/simulator/bot-reply', async (req, res) => {
+  const { contact_id } = req.body;
+  const companyId = req.params.id;
+  const db = getDb();
+  const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(contact_id);
+  if (!contact) { db.close(); return res.status(404).json({ error: 'Contato não encontrado' }); }
+  const company = db.prepare('SELECT auto_reply_mode FROM companies WHERE id=?').get(companyId);
+
+  // Última mensagem recebida do prospect (contexto para a resposta do bot)
+  const lastReceived = db.prepare(
+    "SELECT content FROM messages WHERE company_id=? AND contact_id=? AND channel='whatsapp' AND status='received' ORDER BY id DESC LIMIT 1"
+  ).get(companyId, contact_id);
+  db.close();
+
+  const lastMsg = lastReceived?.content;
+  if (!lastMsg) {
+    return res.status(400).json({ error: 'Nenhuma mensagem recebida para responder. Simule uma resposta do prospect primeiro.' });
+  }
+
+  const draftPrompt = `O prospect enviou: "${lastMsg}"\nEscreva a resposta do vendedor (bot) via WhatsApp: curta (máx 80 palavras), objetiva, tom consultivo e profissional. Se fizer sentido, convide para uma conversa de 15 minutos. Escreva APENAS o texto da mensagem.`;
+  const draft_reply = await callClaude('Você é SDR especialista em respostas rápidas para prospects.', draftPrompt, 200);
+
+  // Bot ativo → 'sent'; bot off → 'pending' (revisão). Mesma semântica do inbound.
+  const autoMode = company?.auto_reply_mode || 'off';
+  const botActive = autoMode === 'all' || autoMode === 'except_meeting';
+  const status   = botActive ? 'sent' : 'pending';
+  const approved = botActive ? 1 : 0;
+
+  const db2 = getDb();
+  const ins = db2.prepare(
+    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, ?, ?, datetime('now'))"
+  ).run(contact_id, companyId, draft_reply.trim(), draft_reply.trim(), status, approved);
+  db2.close();
+
+  res.json({ ok: true, id: ins.lastInsertRowid, content: draft_reply.trim(), status });
+});
+
+// Gera uma resposta realista do prospect via IA, baseada na última mensagem WhatsApp enviada
+app.post('/api/companies/:id/simulator/generate-prospect-reply', async (req, res) => {
+  const { contact_id, tone } = req.body; // tone: 'interested' | 'skeptical' | 'negative' | 'random'
+  const db = getDb();
+  const company = db.prepare('SELECT * FROM companies WHERE id=?').get(req.params.id);
+  if (!company) { db.close(); return res.status(404).json({ error: 'Empresa não encontrada' }); }
+
+  const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(contact_id);
+  if (!contact) { db.close(); return res.status(404).json({ error: 'Contato não encontrado' }); }
+
+  // Busca a última mensagem WhatsApp enviada para este contato
+  const lastSent = db.prepare(
+    "SELECT content FROM messages WHERE company_id=? AND contact_id=? AND channel='whatsapp' AND status IN ('pending','approved','sent') ORDER BY id DESC LIMIT 1"
+  ).get(req.params.id, contact_id);
+  db.close();
+
+  const lastMsg = lastSent?.content || '(sem mensagem prévia)';
+  const toneMap = {
+    interested: 'O prospect é receptivo e demonstra interesse genuíno, quer saber mais.',
+    skeptical:  'O prospect é cético, tem dúvidas técnicas ou sobre ROI, pede mais detalhes antes de se comprometer.',
+    negative:   'O prospect não tem interesse no momento, já tem solução ou não é o decisor.',
+    random:     'Escolha aleatoriamente um perfil realista de resposta (pode ser qualquer um dos anteriores).',
+  };
+  const toneInstruction = toneMap[tone] || toneMap.random;
+
+  const prompt = `
+Empresa: ${company.name} (setor: ${company.sector || 'não definido'})
+Contato: ${contact.name}, cargo: ${contact.role}
+
+Mensagem de prospecção recebida pelo prospect:
+"${lastMsg}"
+
+Sua tarefa: escreva a resposta que esse prospect enviaria de volta via WhatsApp.
+Perfil do prospect nessa simulação: ${toneInstruction}
+Regras:
+- Escreva APENAS o texto da resposta, sem aspas nem explicações
+- Tom informal, como WhatsApp real (pode ter erros de digitação leves, abreviações)
+- Máx 60 palavras
+- NÃO invente informações da empresa`;
+
+  const reply = await callClaude('Você é um prospect B2B respondendo uma mensagem de prospecção via WhatsApp.', prompt, 150);
+  res.json({ generated_reply: reply.trim() });
 });
 
 app.post('/api/companies/:id/response', async (req, res) => {
@@ -1789,10 +2278,28 @@ app.post('/api/messages/:id/approve', async (req, res) => {
 });
 
 app.post('/api/messages/:id/score', (req, res) => {
-  const score = parseInt(req.body.score);
-  if (!score || score < 1 || score > 5) return res.status(400).json({ error: 'Score 1–5' });
+  const hasScore   = req.body.score !== undefined && req.body.score !== null && req.body.score !== '';
+  const hasComment = req.body.comment !== undefined;
+  const sets = [], vals = [];
+  if (hasScore) {
+    const score = parseInt(req.body.score);
+    if (!score || score < 1 || score > 5) return res.status(400).json({ error: 'Score 1–5' });
+    sets.push('score=?'); vals.push(score);
+  }
+  if (hasComment) { sets.push('score_comment=?'); vals.push(String(req.body.comment || '')); }
+  if (!sets.length) return res.status(400).json({ error: 'Nada para atualizar' });
   const db = getDb();
-  db.prepare('UPDATE messages SET score=? WHERE id=?').run(score, req.params.id);
+  // Escopo do comentário: 'global' (todos os canais) ou 'channel' (só o canal desta mensagem)
+  if (hasComment && req.body.scope !== undefined) {
+    let scope = 'global';
+    if (req.body.scope === 'channel') {
+      const m = db.prepare('SELECT channel FROM messages WHERE id=?').get(req.params.id);
+      scope = (m && m.channel) ? m.channel : 'global';
+    }
+    sets.push('comment_scope=?'); vals.push(scope);
+  }
+  vals.push(req.params.id);
+  db.prepare(`UPDATE messages SET ${sets.join(',')} WHERE id=?`).run(...vals);
   db.close();
   res.json({ ok: true });
 });
@@ -1895,11 +2402,56 @@ app.get('/api/schedule/slots', (req, res) => {
   db.close();
 });
 
-app.post('/api/schedule/slots', (req, res) => {
+app.post('/api/schedule/slots', async (req, res) => {
+  const { date_time, duration_min, meeting_link, company_id, contact_id, booked } = req.body;
   const db = getDb();
-  const r = db.prepare('INSERT INTO schedule_slots (date_time,duration_min,meeting_link) VALUES (?,?,?)').run(req.body.date_time, req.body.duration_min || 15, req.body.meeting_link || '');
+  const r = db.prepare(
+    'INSERT INTO schedule_slots (date_time,duration_min,meeting_link,booked,company_id,contact_id) VALUES (?,?,?,?,?,?)'
+  ).run(date_time, duration_min || 15, meeting_link || '', booked ? 1 : 0, company_id || null, contact_id || null);
+
+  if (booked && company_id) {
+    db.prepare("UPDATE companies SET status='meeting_set' WHERE id=?").run(company_id);
+    db.prepare('INSERT INTO consent_logs (company_id,contact_id,action,details) VALUES (?,?,?,?)')
+      .run(company_id, contact_id || null, 'meeting_booked', `Reunião agendada: ${date_time}`);
+  }
+
+  // Busca telefone do contato para enviar confirmação via WhatsApp
+  let contactPhone = null;
+  let contactName  = null;
+  if (booked && contact_id) {
+    const ct = db.prepare('SELECT name, whatsapp FROM contacts WHERE id=?').get(contact_id);
+    contactPhone = ct?.whatsapp || null;
+    contactName  = ct?.name    || 'prezado(a)';
+  }
   db.close();
-  res.json({ id: r.lastInsertRowid });
+
+  // Envia mensagem de confirmação ao cliente
+  if (booked && contactPhone) {
+    try {
+      const dtFormatted = new Date(date_time).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+      const confirmMsg  = [
+        `Olá, ${contactName}! 😊`,
+        ``,
+        `Nossa reunião está confirmada para *${dtFormatted}* (${duration_min || 30} min).`,
+        meeting_link ? `🔗 Link: ${meeting_link}` : null,
+        ``,
+        `Qualquer dúvida, é só me chamar aqui. Até lá! 👋`,
+      ].filter(l => l !== null).join('\n');
+
+      await sendWhatsAppMessage(contactPhone, confirmMsg);
+
+      // Salva a mensagem enviada no histórico da conversa
+      const db2 = getDb();
+      db2.prepare(
+        "INSERT INTO messages (contact_id,company_id,channel,day,msg_type,content,ai_original,status,approved,created_at) VALUES (?,?,'whatsapp',1,'meeting_confirm',?,?,'sent',1,datetime('now'))"
+      ).run(contact_id, company_id, confirmMsg, confirmMsg);
+      db2.close();
+    } catch (e) {
+      console.error('[Agenda] Erro ao enviar confirmação WhatsApp:', e.message);
+    }
+  }
+
+  res.json({ id: r.lastInsertRowid, date_time });
 });
 
 app.post('/api/schedule/slots/:id/book', (req, res) => {
@@ -1922,6 +2474,152 @@ app.delete('/api/schedule/slots/:id', (req, res) => {
   db.prepare('DELETE FROM schedule_slots WHERE id=?').run(req.params.id);
   db.close();
   res.json({ ok: true });
+});
+
+// ── WhatsApp Inbox ────────────────────────────────────────────────────────────
+// Retorna todas as empresas que têm mensagens WhatsApp, com última mensagem e contagem de não lidas
+app.get('/api/whatsapp/inbox', (req, res) => {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT
+      co.id            AS company_id,
+      co.name          AS company_name,
+      co.status        AS company_status,
+      co.auto_reply_mode,
+      ct.id            AS contact_id,
+      ct.name          AS contact_name,
+      ct.whatsapp      AS contact_phone,
+      m.content        AS last_message,
+      m.status         AS last_status,
+      m.id             AS last_msg_id,
+      m.created_at     AS last_at,
+      (SELECT COUNT(*) FROM messages
+         WHERE company_id=co.id AND channel='whatsapp' AND status='received'
+           AND id > COALESCE((SELECT MAX(id) FROM messages WHERE company_id=co.id AND channel='whatsapp' AND status!='received'),0)
+      ) AS unread
+    FROM companies co
+    JOIN (
+      SELECT company_id, MAX(id) AS max_id
+      FROM messages
+      WHERE channel='whatsapp'
+      GROUP BY company_id
+    ) latest ON latest.company_id = co.id
+    JOIN messages m ON m.id = latest.max_id
+    LEFT JOIN contacts ct ON ct.company_id = co.id AND ct.is_primary = 1
+    ORDER BY m.id DESC
+  `).all();
+  db.close();
+  res.json(rows);
+});
+
+// Retorna todas as mensagens WhatsApp de uma empresa
+app.get('/api/whatsapp/:companyId/messages', (req, res) => {
+  const db = getDb();
+  const msgs = db.prepare(`
+    SELECT m.*, ct.name as contact_name
+    FROM messages m
+    LEFT JOIN contacts ct ON m.contact_id = ct.id
+    WHERE m.company_id=? AND m.channel='whatsapp'
+    ORDER BY m.id ASC
+  `).all(req.params.companyId);
+  const company  = db.prepare('SELECT * FROM companies WHERE id=?').get(req.params.companyId);
+  const contacts = db.prepare('SELECT * FROM contacts WHERE company_id=?').all(req.params.companyId);
+  db.close();
+  res.json({ messages: msgs, company, contacts });
+});
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+app.get('/api/notifications', (req, res) => {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT n.*, co.name as company_name, ct.name as contact_name, ct.whatsapp as contact_phone
+    FROM notifications n
+    LEFT JOIN companies co ON n.company_id = co.id
+    LEFT JOIN contacts  ct ON n.contact_id  = ct.id
+    ORDER BY n.created_at DESC
+    LIMIT 100
+  `).all();
+  const unread = db.prepare('SELECT COUNT(*) as c FROM notifications WHERE read=0').get().c;
+  db.close();
+  res.json({ notifications: rows, unread });
+});
+
+app.post('/api/notifications/:id/read', (req, res) => {
+  const db = getDb();
+  db.prepare('UPDATE notifications SET read=1 WHERE id=?').run(req.params.id);
+  db.close();
+  res.json({ ok: true });
+});
+
+app.post('/api/notifications/read-all', (req, res) => {
+  const db = getDb();
+  db.prepare('UPDATE notifications SET read=1 WHERE read=0').run();
+  db.close();
+  res.json({ ok: true });
+});
+
+// Confirma reunião a partir de uma notificação de wants_meeting
+app.post('/api/notifications/:id/confirm-meeting', async (req, res) => {
+  const { slot_id } = req.body;
+  if (!slot_id) return res.status(400).json({ error: 'slot_id obrigatório' });
+
+  const db = getDb();
+  const notif = db.prepare('SELECT * FROM notifications WHERE id=?').get(req.params.id);
+  if (!notif) { db.close(); return res.status(404).json({ error: 'Notificação não encontrada' }); }
+
+  const slot = db.prepare('SELECT * FROM schedule_slots WHERE id=?').get(slot_id);
+  if (!slot) { db.close(); return res.status(404).json({ error: 'Horário não encontrado' }); }
+  if (slot.booked) { db.close(); return res.status(409).json({ error: 'Horário já reservado' }); }
+
+  const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(notif.contact_id);
+
+  // Reserva o slot
+  db.prepare('UPDATE schedule_slots SET booked=1,company_id=?,contact_id=? WHERE id=?')
+    .run(notif.company_id, notif.contact_id, slot_id);
+  db.prepare("UPDATE companies SET status='meeting_set' WHERE id=?").run(notif.company_id);
+  db.prepare('INSERT INTO consent_logs (company_id,contact_id,action,details) VALUES (?,?,?,?)')
+    .run(notif.company_id, notif.contact_id, 'meeting_booked', `Reunião agendada: ${slot.date_time}`);
+
+  // Marca notificação como lida
+  db.prepare('UPDATE notifications SET read=1 WHERE id=?').run(req.params.id);
+  db.close();
+
+  // Envia confirmação via WhatsApp
+  if (contact?.whatsapp) {
+    const dtFormatted = new Date(slot.date_time).toLocaleString('pt-BR', { dateStyle:'short', timeStyle:'short' });
+    const confirmMsg = `Olá ${contact.name}! ✅ Reunião confirmada para ${dtFormatted}${slot.meeting_link ? `\nLink: ${slot.meeting_link}` : ''}. Até lá!`;
+    await sendWhatsAppMessage(contact.whatsapp, confirmMsg);
+
+    // Salva confirmação como mensagem enviada
+    const db2 = getDb();
+    db2.prepare(
+      "INSERT INTO messages (contact_id,company_id,channel,day,msg_type,content,ai_original,status,approved,created_at) VALUES (?,?,'whatsapp',1,'text',?,?,'sent',1,datetime('now'))"
+    ).run(contact.id, notif.company_id, confirmMsg, confirmMsg);
+    db2.close();
+  }
+
+  res.json({ ok: true, date_time: slot.date_time, meeting_link: slot.meeting_link });
+});
+
+// ── Auto-reply mode per company ───────────────────────────────────────────────
+
+app.get('/api/companies/:id/auto-reply', (req, res) => {
+  const db = getDb();
+  const row = db.prepare('SELECT auto_reply_mode FROM companies WHERE id=?').get(req.params.id);
+  db.close();
+  if (!row) return res.status(404).json({ error: 'Empresa não encontrada' });
+  res.json({ auto_reply_mode: row.auto_reply_mode || 'off' });
+});
+
+app.patch('/api/companies/:id/auto-reply', (req, res) => {
+  const { auto_reply_mode } = req.body;
+  const valid = ['off', 'all', 'except_meeting'];
+  if (!valid.includes(auto_reply_mode)) return res.status(400).json({ error: 'Modo inválido' });
+  const db = getDb();
+  db.prepare('UPDATE companies SET auto_reply_mode=? WHERE id=?').run(auto_reply_mode, req.params.id);
+  db.close();
+  res.json({ ok: true, auto_reply_mode });
 });
 
 // LGPD consent logs
@@ -1949,6 +2647,65 @@ app.get('/api/rlhf/queue', (req, res) => {
     ORDER BY m.id DESC
   `).all());
   db.close();
+});
+
+// Prompt exato usado numa mensagem (com fallback: remonta se a mensagem for antiga)
+app.get('/api/messages/:id/prompt', (req, res) => {
+  const db = getDb();
+  try {
+    const m = db.prepare(
+      `SELECT m.*, co.name as company_name, co.sector as company_sector, co.research_hook as hook,
+              ct.name as contact_name, ct.role as contact_role
+       FROM messages m
+       LEFT JOIN companies co ON m.company_id = co.id
+       LEFT JOIN contacts ct ON m.contact_id = ct.id
+       WHERE m.id=?`
+    ).get(req.params.id);
+    if (!m) { db.close(); return res.status(404).json({ error: 'Mensagem não encontrada' }); }
+
+    if (m.prompt_used) {
+      db.close();
+      return res.json({ prompt_used: m.prompt_used, system: SEQ_SYSTEM, reconstructed: false });
+    }
+
+    // Fallback para mensagens geradas antes desta feature
+    const golden = db.prepare('SELECT title, content FROM golden_cases WHERE score>=4 LIMIT 3').all();
+    const socialProof = golden.map(g => `- ${g.title}: ${(g.content || '').substring(0, 80)}...`).join('\n');
+    const learned = buildLearnedContext(db, m.channel, m.contact_role);
+    const userPrompt = buildSequenceUserPrompt({
+      companyName: m.company_name || '—', sector: m.company_sector, contactName: m.contact_name || '—',
+      role: m.contact_role || 'other', hook: m.hook || `Olá ${m.contact_name || ''},`,
+      productValue: '(produto informado na geração)', day: m.day, channel: m.channel, socialProof, learned,
+    });
+    db.close();
+    res.json({ prompt_used: `[SYSTEM]\n${SEQ_SYSTEM}\n\n[USER]\n${userPrompt}`, system: SEQ_SYSTEM, reconstructed: true });
+  } catch (e) {
+    db.close();
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// Preview ao vivo do prompt (sem chamar a LLM), já com as observações injetadas
+app.get('/api/learn/prompt-preview', (req, res) => {
+  const channel = req.query.channel || 'email';
+  const role = req.query.role || 'c_level';
+  const db = getDb();
+  try {
+    const golden = db.prepare('SELECT title, content FROM golden_cases WHERE score>=4 LIMIT 3').all();
+    const socialProof = golden.map(g => `- ${g.title}: ${(g.content || '').substring(0, 80)}...`).join('\n');
+    const learned = buildLearnedContext(db, channel, role);
+    const userPromptTemplate = buildSequenceUserPrompt({
+      companyName: '{empresa}', sector: '{setor}', contactName: '{contato}', role,
+      hook: '{gancho de pesquisa}', productValue: '{produto}',
+      day: (SEQUENCE_CHANNELS.find(c => c.channel === channel) || {}).day || 1,
+      channel, socialProof, learned,
+    });
+    db.close();
+    res.json({ systemPrompt: SEQ_SYSTEM, userPromptTemplate, hasLearned: !!learned, channel, role });
+  } catch (e) {
+    db.close();
+    res.status(500).json({ error: String(e.message || e) });
+  }
 });
 
 // Gerenciamento de usuários
@@ -2037,10 +2794,198 @@ app.post('/api/followup/:id/generate', (req, res) => {
   const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(req.params.id);
   if(!contact) { db.close(); return res.status(404).json({error: 'Not found'}); }
   const content = `Follow up automático via ${channel} para ${contact.name}...`;
-  db.prepare("INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved) VALUES (?,?,?,?,?,?,?,'pending',0)")
+  db.prepare("INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at) VALUES (?,?,?,?,?,?,?,'pending',0,datetime('now'))")
     .run(contact.id, contact.company_id, channel, 5, 'follow_up', content, content);
   db.close();
   res.json({ ok: true });
+});
+
+// ─── RLHF / Aprendizado ────────────────────────────────────────────────────
+
+// Estatísticas do aprendizado acumulado (consumido por RLHF.jsx)
+app.get('/api/learn/stats', (req, res) => {
+  const db = getDb();
+  try {
+    const approved_examples = db.prepare(
+      `SELECT m.channel, ct.role AS role, COUNT(*) AS total
+       FROM messages m LEFT JOIN contacts ct ON ct.id = m.contact_id
+       WHERE m.approved=1 AND m.score >= 4
+       GROUP BY m.channel, ct.role`
+    ).all();
+
+    const corrections_pending = db.prepare(
+      `SELECT COUNT(*) AS cnt FROM messages
+       WHERE human_correction IS NOT NULL AND human_correction != ''
+         AND ai_original IS NOT NULL
+         AND ABS(LENGTH(human_correction) - LENGTH(ai_original)) > 10`
+    ).get().cnt;
+
+    const learned_patterns = db.prepare(
+      'SELECT channel, role, pattern, confidence, sample_size FROM learned_patterns ORDER BY confidence DESC'
+    ).all();
+
+    const avg_score = db.prepare(
+      'SELECT ROUND(AVG(score),2) AS v FROM messages WHERE score IS NOT NULL'
+    ).get().v;
+
+    res.json({
+      avg_score,
+      corrections_pending_analysis: corrections_pending,
+      approved_examples,
+      learned_patterns,
+      ready_to_analyze: corrections_pending >= 2,
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  } finally {
+    db.close();
+  }
+});
+
+// Séries temporais do progresso do RLHF (evolução ao longo do tempo)
+app.get('/api/learn/progress', (req, res) => {
+  const db = getDb();
+  try {
+    const kv = (rows) => ({ labels: rows.map(r => r.d), values: rows.map(r => r.v) });
+
+    const score_series = db.prepare(
+      `SELECT strftime('%Y-%m-%d', created_at) AS d, ROUND(AVG(score),2) AS v
+       FROM messages WHERE score IS NOT NULL AND created_at IS NOT NULL
+       GROUP BY d ORDER BY d`
+    ).all();
+
+    const approvals = db.prepare(
+      `SELECT strftime('%Y-%m-%d', created_at) AS d, COUNT(*) AS v
+       FROM messages WHERE approved=1 AND created_at IS NOT NULL
+       GROUP BY d ORDER BY d`
+    ).all();
+
+    const corrections = db.prepare(
+      `SELECT strftime('%Y-%m-%d', created_at) AS d, COUNT(*) AS v
+       FROM messages
+       WHERE human_correction IS NOT NULL AND human_correction != '' AND created_at IS NOT NULL
+       GROUP BY d ORDER BY d`
+    ).all();
+
+    const patterns = db.prepare(
+      `SELECT strftime('%Y-%m-%d', created_at) AS d, COUNT(*) AS v
+       FROM learned_patterns WHERE created_at IS NOT NULL
+       GROUP BY d ORDER BY d`
+    ).all();
+
+    const approval_rate = db.prepare(
+      `SELECT strftime('%Y-%m-%d', created_at) AS d,
+              ROUND(100.0 * SUM(CASE WHEN score >= 4 THEN 1 ELSE 0 END) / COUNT(*), 1) AS v
+       FROM messages WHERE score IS NOT NULL AND created_at IS NOT NULL
+       GROUP BY d ORDER BY d`
+    ).all();
+
+    const avg_last7 = db.prepare(
+      `SELECT ROUND(AVG(score),2) AS v FROM messages
+       WHERE score IS NOT NULL AND created_at >= datetime('now','-7 days')`
+    ).get().v;
+    const avg_prev7 = db.prepare(
+      `SELECT ROUND(AVG(score),2) AS v FROM messages
+       WHERE score IS NOT NULL
+         AND created_at >= datetime('now','-14 days')
+         AND created_at <  datetime('now','-7 days')`
+    ).get().v;
+    const total_feedback = db.prepare(
+      `SELECT COUNT(*) AS v FROM messages
+       WHERE score IS NOT NULL OR approved=1
+          OR (human_correction IS NOT NULL AND human_correction != '')`
+    ).get().v;
+    const total_patterns = db.prepare('SELECT COUNT(*) AS v FROM learned_patterns').get().v;
+
+    res.json({
+      score_series: kv(score_series),
+      approvals: kv(approvals),
+      corrections: kv(corrections),
+      patterns: kv(patterns),
+      approval_rate: kv(approval_rate),
+      summary: {
+        avg_last7,
+        avg_prev7,
+        trend: (avg_last7 == null || avg_prev7 == null)
+          ? 0
+          : Math.round((avg_last7 - avg_prev7) * 100) / 100,
+        total_feedback,
+        total_patterns,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  } finally {
+    db.close();
+  }
+});
+
+// Analisa correções humanas e extrai regras de estilo (padrões aprendidos)
+app.post('/api/learn/analyze', async (req, res) => {
+  const db = getDb();
+  let corrections;
+  try {
+    corrections = db.prepare(
+      `SELECT m.channel AS channel, ct.role AS role, m.ai_original AS ai_original, m.human_correction AS human_correction
+       FROM messages m LEFT JOIN contacts ct ON ct.id = m.contact_id
+       WHERE m.human_correction IS NOT NULL AND m.human_correction != ''
+         AND m.ai_original IS NOT NULL
+         AND ABS(LENGTH(m.human_correction) - LENGTH(m.ai_original)) > 10`
+    ).all();
+  } catch (e) {
+    db.close();
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+
+  if (!corrections || corrections.length < 2) {
+    db.close();
+    return res.json({ ok: false, message: 'Sem correções suficientes ainda. Continue avaliando!' });
+  }
+
+  // Agrupa por canal+cargo
+  const groups = {};
+  for (const c of corrections) {
+    const key = `${c.channel || 'geral'}|${c.role || 'other'}`;
+    (groups[key] = groups[key] || []).push(c);
+  }
+
+  const analyzed = [];
+  try {
+    for (const [key, items] of Object.entries(groups)) {
+      const [channel, role] = key.split('|');
+      const examples = items.slice(0, 8).map((c, i) =>
+        `Exemplo ${i + 1}:\nORIGINAL (IA): ${c.ai_original}\nCORRIGIDO (humano): ${c.human_correction}`
+      ).join('\n\n');
+
+      const prompt =
+        `Analise as correções humanas abaixo (canal: ${channel}, cargo: ${role}) e extraia de 2 a 4 REGRAS DE ESTILO objetivas ` +
+        `que expliquem como o humano prefere as mensagens. Responda APENAS com um array JSON de strings curtas, ` +
+        `ex: ["Evite abrir com o nome do lead", "Use perguntas em vez de afirmações"].\n\n${examples}`;
+
+      let rules = [];
+      try {
+        const raw = await callClaude('Você é analista de estilo de escrita comercial. Responda só com JSON.', prompt, 400);
+        const match = String(raw).match(/\[[\s\S]*\]/);
+        rules = match ? JSON.parse(match[0]) : [];
+      } catch (_) {
+        rules = [];
+      }
+      rules = (rules || []).filter(r => typeof r === 'string' && r.trim()).slice(0, 4);
+
+      const confidence = Math.min(0.95, 0.5 + items.length * 0.1);
+      const ins = db.prepare(
+        'INSERT INTO learned_patterns (channel, role, pattern, confidence, sample_size) VALUES (?,?,?,?,?)'
+      );
+      for (const r of rules) ins.run(channel, role, r, confidence, items.length);
+
+      analyzed.push({ channel, role, rules_extracted: rules.length });
+    }
+    res.json({ ok: true, analyzed });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  } finally {
+    db.close();
+  }
 });
 
 // Catch-all route to serve React frontend for non-API requests

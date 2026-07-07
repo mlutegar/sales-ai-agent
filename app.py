@@ -53,13 +53,37 @@ SEQUENCE_CHANNELS = [
     {'day': 5, 'channel': 'whatsapp', 'type': 'follow_up'},
 ]
 
+# ── Flags/Etiquetas de empresa ────────────────────────────────────────────────
+# Catálogo fixo de etiquetas aplicáveis a empresas. 'blocks_outreach' indica que a
+# automação de geração de abordagem NÃO deve gerar cadência para a empresa.
+COMPANY_FLAGS = [
+    {'key': 'nao_contatar',        'label': 'Não contatar',       'badge': 'bg-danger',          'blocks_outreach': True},
+    {'key': 'empresa_ja_atendida', 'label': 'Empresa já atendida', 'badge': 'bg-warning text-dark', 'blocks_outreach': False},
+    {'key': 'cliente_ativo',       'label': 'Cliente ativo',       'badge': 'bg-success',          'blocks_outreach': False},
+]
+FLAG_KEYS = {f['key'] for f in COMPANY_FLAGS}
+BLOCKING_FLAG_KEYS = {f['key'] for f in COMPANY_FLAGS if f['blocks_outreach']}
+
+
+def company_flag_keys(db, cid):
+    """Retorna o conjunto de flags aplicadas a uma empresa."""
+    rows = db.execute('SELECT flag FROM company_flags WHERE company_id=?', (cid,)).fetchall()
+    return {r['flag'] for r in rows}
+
+
+def company_is_blocked(db, cid):
+    """True se a empresa possui alguma flag que bloqueia a automação (ex.: 'não contatar')."""
+    return bool(company_flag_keys(db, cid) & BLOCKING_FLAG_KEYS)
+
 
 # ── DB ──────────────────────────────────────────────────────────────────────
 
 def get_db():
     db = getattr(g, '_db', None)
     if db is None:
-        db = g._db = sqlite3.connect(DATABASE)
+        db = g._db = sqlite3.connect(DATABASE, detect_types=sqlite3.PARSE_DECLTYPES)
+        # sqlite3.Row suporta acesso por índice (row[0]) E por nome (row['col']),
+        # além de dict(row). Um dict puro quebra os inúmeros row[0] do código (KeyError: 0).
         db.row_factory = sqlite3.Row
     return db
 
@@ -72,7 +96,8 @@ def close_db(exc):
 
 
 def init_db():
-    db = sqlite3.connect(DATABASE)
+    db = sqlite3.connect(DATABASE, detect_types=sqlite3.PARSE_DECLTYPES)
+    db.execute("PRAGMA encoding = 'UTF-8'")
     db.executescript('''
         CREATE TABLE IF NOT EXISTS leads (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -252,6 +277,14 @@ def init_db():
 
     # Tabelas adicionais
     db.executescript('''
+        CREATE TABLE IF NOT EXISTS company_flags (
+            company_id INTEGER NOT NULL,
+            flag       TEXT    NOT NULL,
+            created_at TEXT    DEFAULT (datetime('now')),
+            PRIMARY KEY (company_id, flag),
+            FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_company_flags_flag ON company_flags(flag);
         CREATE TABLE IF NOT EXISTS users (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             username   TEXT    UNIQUE NOT NULL,
@@ -282,8 +315,9 @@ def init_db():
         try:
             db.execute(sql)
             db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            # Coluna já existe — esperado em re-inicializações
+            log.debug('Migration ignorada (já aplicada): %s — %s', sql[:60], e)
     db.commit()
     db.close()
     # Migra leads existentes para o modelo companies/contacts (executa uma vez)
@@ -562,12 +596,18 @@ def list_companies():
         '''SELECT c.*,
                   COUNT(DISTINCT ct.id) as contact_count,
                   MAX(ct.status) as status,
-                  MAX(ct.interest_score) as interest_score
+                  MAX(ct.interest_score) as interest_score,
+                  (SELECT GROUP_CONCAT(cf.flag) FROM company_flags cf WHERE cf.company_id=c.id) as flags
            FROM companies c
            LEFT JOIN contacts ct ON ct.company_id=c.id
            GROUP BY c.id ORDER BY c.created_at DESC'''
     ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    result = []
+    for r in rows:
+        d = dict(r)
+        d['flags'] = d['flags'].split(',') if d.get('flags') else []
+        result.append(d)
+    return jsonify(result)
 
 
 @app.route('/api/companies', methods=['POST'])
@@ -637,7 +677,7 @@ def get_company(cid):
            ORDER BY li.created_at DESC LIMIT 30''', (cid,)
     ).fetchall()
     return jsonify({
-        'company': dict(comp),
+        'company': {**dict(comp), 'flags': sorted(company_flag_keys(db, cid))},
         'contacts': [{**dict(c), 'completeness_score': _completeness_score(c)[0], 'completeness_missing': _completeness_score(c)[1]} for c in contacts],
         'messages': [dict(m) for m in msgs],
         'slots': [dict(s) for s in slots],
@@ -700,6 +740,41 @@ def company_optout(cid):
     return jsonify({'ok': True})
 
 
+@app.route('/api/flags', methods=['GET'])
+def list_flags():
+    """Catálogo de etiquetas disponíveis para empresas."""
+    return jsonify(COMPANY_FLAGS)
+
+
+@app.route('/api/companies/<int:cid>/flags', methods=['POST'])
+def add_company_flag(cid):
+    db = get_db()
+    comp = db.execute('SELECT id, name FROM companies WHERE id=?', (cid,)).fetchone()
+    if not comp:
+        return jsonify({'error': 'Empresa não encontrada'}), 404
+    flag = (request.json or {}).get('flag', '').strip()
+    if flag not in FLAG_KEYS:
+        return jsonify({'error': 'Flag inválida'}), 400
+    db.execute('INSERT OR IGNORE INTO company_flags (company_id, flag) VALUES (?,?)', (cid, flag))
+    db.execute('INSERT INTO consent_logs (lead_id, action, details) VALUES (?,?,?)',
+               (cid, 'flag_added', f'Etiqueta aplicada: {flag}'))
+    db.commit()
+    return jsonify({'ok': True, 'flags': sorted(company_flag_keys(db, cid))})
+
+
+@app.route('/api/companies/<int:cid>/flags/<flag>', methods=['DELETE'])
+def remove_company_flag(cid, flag):
+    db = get_db()
+    comp = db.execute('SELECT id FROM companies WHERE id=?', (cid,)).fetchone()
+    if not comp:
+        return jsonify({'error': 'Empresa não encontrada'}), 404
+    db.execute('DELETE FROM company_flags WHERE company_id=? AND flag=?', (cid, flag))
+    db.execute('INSERT INTO consent_logs (lead_id, action, details) VALUES (?,?,?)',
+               (cid, 'flag_removed', f'Etiqueta removida: {flag}'))
+    db.commit()
+    return jsonify({'ok': True, 'flags': sorted(company_flag_keys(db, cid))})
+
+
 @app.route('/api/companies/<int:cid>/research', methods=['POST'])
 def company_research(cid):
     db = get_db()
@@ -749,6 +824,8 @@ def company_sequence(cid):
     comp = db.execute('SELECT * FROM companies WHERE id=?', (cid,)).fetchone()
     if not comp:
         return jsonify({'error': 'Não encontrada'}), 404
+    if company_is_blocked(db, cid):
+        return jsonify({'error': "Empresa com flag 'não contatar' — abordagem bloqueada"}), 403
     contact_id = request.json.get('contact_id')
     contact = None
     if contact_id:
@@ -764,7 +841,7 @@ def company_sequence(cid):
             'INSERT INTO leads (name,company,role,email,linkedin,whatsapp,sector,country,research_hook,research_context) VALUES (?,?,?,?,?,?,?,?,?,?)',
             (contact['name'], comp['name'], contact['role'], contact['email'],
              contact['linkedin'], contact['whatsapp'], comp['sector'], contact['country'],
-             contact.get('research_hook',''), contact.get('research_context',''))
+             contact['research_hook'] or '', contact['research_context'] or '')
         )
         db.commit()
         lid = cur.lastrowid
@@ -775,19 +852,14 @@ def company_sequence(cid):
             db.execute('UPDATE leads SET research_hook=?, research_context=? WHERE id=?',
                        (contact['research_hook'], contact['research_context'], lid))
             db.commit()
-    # Chama generate_sequence existente — precisa de contexto de requisição
-    from flask import current_app
-    with current_app.test_request_context(
-        f'/api/leads/{lid}/sequence',
-        method='POST',
-        json=request.json
-    ):
-        result = generate_sequence(lid)
-        data = result.get_json()
-    # Atualiza status do contato
+    lead = db.execute('SELECT * FROM leads WHERE id=?', (lid,)).fetchone()
+    data, status = _build_sequence_messages(db, lead, request.json or {})
+    if status != 200:
+        return jsonify(data), status
+    # Atualiza status do contato apenas se gerou com sucesso
     db.execute("UPDATE contacts SET status='sequence_created' WHERE id=?", (contact['id'],))
     db.commit()
-    return jsonify(data)
+    return jsonify(data), 200
 
 
 @app.route('/api/companies/<int:cid>/response', methods=['POST'])
@@ -1369,21 +1441,22 @@ Responda APENAS com JSON válido, sem markdown.
 
 # ── Sequence ─────────────────────────────────────────────────────────────────
 
-@app.route('/api/leads/<int:lid>/sequence', methods=['POST'])
-def generate_sequence(lid):
-    db = get_db()
-    lead = db.execute('SELECT * FROM leads WHERE id=?', (lid,)).fetchone()
-    if not lead:
-        return jsonify({'error': 'Não encontrado'}), 404
+def _build_sequence_messages(db, lead, payload):
+    """
+    Função pura que gera e persiste as mensagens de sequência para um lead.
+    Recebe o dict do lead e o payload do request, retorna {'sequence': [...]} ou {'error': ...}.
+    Não depende de contexto HTTP — pode ser chamada de qualquer lugar.
+    """
     if lead['opted_out']:
-        return jsonify({'error': 'Lead está na blacklist'}), 403
+        return {'error': 'Lead está na blacklist'}, 403
 
+    lid = lead['id']
     db.execute('DELETE FROM messages WHERE lead_id=?', (lid,))
 
     role_info = ROLE_PROFILES.get(lead['role'], ROLE_PROFILES['other'])
     hook = lead['research_hook'] or f'Olá {lead["name"]},'
-    product_value = request.json.get('product_value', 'solução de automação de vendas com IA')
-    selected_pain_point = request.json.get('selected_pain_point', '')  # Dor selecionada pelo usuário
+    product_value = payload.get('product_value', 'solução de automação de vendas com IA')
+    selected_pain_point = payload.get('selected_pain_point', '')
 
     # Golden cases filtrados por setor (fallback para qualquer setor)
     golden = db.execute(
@@ -1396,7 +1469,6 @@ def generate_sequence(lid):
         golden = db.execute('SELECT title, content FROM golden_cases WHERE score>=4 LIMIT 3').fetchall()
     social_proof = '\n'.join(f'- {g["title"]}: {g["content"][:80]}...' for g in golden) if golden else ''
 
-    # Contexto do produto via RAG (busca uma vez, reutiliza em todos os canais)
     rag_ctx = _get_rag_product_context(
         db, f'{lead["role"]} no setor {lead["sector"] or "empresarial"}'
     )
@@ -1409,9 +1481,7 @@ def generate_sequence(lid):
             'whatsapp': 'mensagem WhatsApp (casual, máx 100 palavras)',
         }[tpl['channel']]
 
-        # Contexto de aprendizado: exemplos aprovados + padrões de estilo
         learned = get_learned_context(db, tpl['channel'], lead['role'])
-
         pain_line = f'Dor principal do lead: {selected_pain_point}' if selected_pain_point else ''
         prompt = f"""
 Lead: {lead['name']}, {lead['role']} na {lead['company']} (setor: {lead['sector'] or 'não definido'})
@@ -1432,8 +1502,7 @@ CTA progressivo: convide para uma "conversa de 15 minutos" ou "demo rápida". N�
             prompt, max_tokens=400
         )
 
-        # Injeta footer de compliance conforme país do lead
-        compliance = get_compliance_footer(lead['country'] if 'country' in lead.keys() else 'BR')
+        compliance = get_compliance_footer(lead.get('country') or 'BR')
         content_with_compliance = content + compliance
 
         cur = db.execute(
@@ -1441,12 +1510,28 @@ CTA progressivo: convide para uma "conversa de 15 minutos" ou "demo rápida". N�
             (lid, tpl['channel'], tpl['day'], tpl['type'], content_with_compliance, content_with_compliance, 'pending')
         )
         db.commit()
-        results.append({'id': cur.lastrowid, 'channel': tpl['channel'],
-                        'day': tpl['day'], 'content': content_with_compliance, 'status': 'pending', 'approved': 0})
+        results.append({
+            'id': cur.lastrowid,
+            'channel': tpl['channel'],
+            'day': tpl['day'],
+            'content': content_with_compliance,
+            'status': 'pending',
+            'approved': 0,
+        })
 
     db.execute("UPDATE leads SET status='sequence_created' WHERE id=?", (lid,))
     db.commit()
-    return jsonify({'sequence': results})
+    return {'sequence': results}, 200
+
+@app.route('/api/leads/<int:lid>/sequence', methods=['POST'])
+def generate_sequence(lid):
+    db = get_db()
+    lead = db.execute('SELECT * FROM leads WHERE id=?', (lid,)).fetchone()
+    if not lead:
+        return jsonify({'error': 'Não encontrado'}), 404
+    payload = request.json or {}
+    data, status = _build_sequence_messages(db, lead, payload)
+    return jsonify(data), status
 
 
 # ── Message actions ───────────────────────────────────────────────────────────
@@ -1649,19 +1734,19 @@ def learn_stats():
     ).fetchall()
 
     corrections_pending = db.execute(
-        '''SELECT COUNT(*) FROM messages
+        '''SELECT COUNT(*) AS cnt FROM messages
            WHERE human_correction IS NOT NULL
              AND human_correction != ''
              AND ABS(LENGTH(human_correction) - LENGTH(ai_original)) > 10'''
-    ).fetchone()[0]
+    ).fetchone()['cnt']
 
     patterns = db.execute(
         'SELECT channel, role, pattern, confidence, sample_size FROM learned_patterns ORDER BY confidence DESC'
     ).fetchall()
 
     avg_score = db.execute(
-        'SELECT ROUND(AVG(score),2) FROM messages WHERE score IS NOT NULL'
-    ).fetchone()[0]
+        'SELECT ROUND(AVG(score),2) AS avg_score FROM messages WHERE score IS NOT NULL'
+    ).fetchone()['avg_score']
 
     return jsonify({
         'avg_score':           avg_score,
@@ -1669,6 +1754,85 @@ def learn_stats():
         'approved_examples':   [dict(r) for r in approved_examples],
         'learned_patterns':    [dict(r) for r in patterns],
         'ready_to_analyze':    corrections_pending >= 2,
+    })
+
+
+@app.route('/api/learn/progress', methods=['GET'])
+def learn_progress():
+    """Séries temporais do progresso do RLHF (evolução ao longo do tempo)."""
+    db = get_db()
+
+    # Score médio por dia
+    score_series = db.execute(
+        '''SELECT strftime('%Y-%m-%d', created_at) AS d, ROUND(AVG(score),2) AS v
+           FROM messages WHERE score IS NOT NULL
+           GROUP BY d ORDER BY d'''
+    ).fetchall()
+
+    # Aprovações por dia
+    approvals = db.execute(
+        '''SELECT strftime('%Y-%m-%d', created_at) AS d, COUNT(*) AS v
+           FROM messages WHERE approved=1
+           GROUP BY d ORDER BY d'''
+    ).fetchall()
+
+    # Correções por dia
+    corrections = db.execute(
+        '''SELECT strftime('%Y-%m-%d', created_at) AS d, COUNT(*) AS v
+           FROM messages
+           WHERE human_correction IS NOT NULL AND human_correction != ''
+           GROUP BY d ORDER BY d'''
+    ).fetchall()
+
+    # Padrões aprendidos por dia
+    patterns = db.execute(
+        '''SELECT strftime('%Y-%m-%d', created_at) AS d, COUNT(*) AS v
+           FROM learned_patterns
+           GROUP BY d ORDER BY d'''
+    ).fetchall()
+
+    # Taxa de aprovação (score>=4) por dia
+    approval_rate = db.execute(
+        '''SELECT strftime('%Y-%m-%d', created_at) AS d,
+                  ROUND(100.0 * SUM(CASE WHEN score >= 4 THEN 1 ELSE 0 END) / COUNT(*), 1) AS v
+           FROM messages WHERE score IS NOT NULL
+           GROUP BY d ORDER BY d'''
+    ).fetchall()
+
+    # Resumo: score médio dos últimos 7 dias vs. 7 dias anteriores
+    avg_last7 = db.execute(
+        '''SELECT ROUND(AVG(score),2) FROM messages
+           WHERE score IS NOT NULL AND created_at >= datetime('now','-7 days')'''
+    ).fetchone()[0]
+    avg_prev7 = db.execute(
+        '''SELECT ROUND(AVG(score),2) FROM messages
+           WHERE score IS NOT NULL
+             AND created_at >= datetime('now','-14 days')
+             AND created_at <  datetime('now','-7 days')'''
+    ).fetchone()[0]
+    total_feedback = db.execute(
+        '''SELECT COUNT(*) FROM messages
+           WHERE score IS NOT NULL OR approved=1
+              OR (human_correction IS NOT NULL AND human_correction != '')'''
+    ).fetchone()[0]
+    total_patterns = db.execute('SELECT COUNT(*) FROM learned_patterns').fetchone()[0]
+
+    def kv(rows):
+        return {'labels': [r['d'] for r in rows], 'values': [r['v'] for r in rows]}
+
+    return jsonify({
+        'score_series':   kv(score_series),
+        'approvals':      kv(approvals),
+        'corrections':    kv(corrections),
+        'patterns':       kv(patterns),
+        'approval_rate':  kv(approval_rate),
+        'summary': {
+            'avg_last7':      avg_last7,
+            'avg_prev7':      avg_prev7,
+            'trend':          (round((avg_last7 or 0) - (avg_prev7 or 0), 2)),
+            'total_feedback': total_feedback,
+            'total_patterns': total_patterns,
+        },
     })
 
 
@@ -2698,8 +2862,10 @@ Ordene do maior para o menor score. Inclua TODAS as {len(companies_info)} empres
 
 @app.route('/api/companies/bulk-sequence', methods=['POST'])
 def companies_bulk_sequence():
-    """Gera sequências de mensagens para múltiplas empresas com dores personalizadas."""
-    db = get_db()
+    """Gera sequências de mensagens para múltiplas empresas em paralelo."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    main_db = get_db()
     data = request.json or {}
     targets = data.get('targets', [])  # [{company_id, selected_pain_point}]
     product_value = data.get('product_value', 'solução de automação de vendas com IA')
@@ -2707,69 +2873,104 @@ def companies_bulk_sequence():
     if not targets:
         return jsonify({'error': 'Nenhum target selecionado'}), 400
 
-    results = []
+    # ── Fase 1 (serial, leve): resolve leads/contatos e valida no DB principal ──
+    tasks = []   # lista de dicts prontos para processar em paralelo
     errors = []
 
     for target in targets:
         cid = target.get('company_id')
         selected_pain_point = target.get('selected_pain_point', '')
 
-        comp = db.execute('SELECT * FROM companies WHERE id=?', (cid,)).fetchone()
+        comp = main_db.execute('SELECT * FROM companies WHERE id=?', (cid,)).fetchone()
         if not comp:
             errors.append({'company_id': cid, 'error': 'Empresa não encontrada'})
             continue
 
-        contact = db.execute(
+        contact = main_db.execute(
             'SELECT * FROM contacts WHERE company_id=? ORDER BY is_primary DESC LIMIT 1', (cid,)
         ).fetchone()
         if not contact:
             errors.append({'company_id': cid, 'company_name': comp['name'], 'error': 'Sem contato cadastrado'})
             continue
 
-        if contact.get('opted_out'):
+        if contact['opted_out']:
             errors.append({'company_id': cid, 'company_name': comp['name'], 'error': 'Empresa na blacklist'})
             continue
 
+        if company_is_blocked(main_db, cid):
+            errors.append({'company_id': cid, 'company_name': comp['name'], 'error': "Flag 'não contatar'"})
+            continue
+
         # Garante lead mapeado
-        lead_row = db.execute('SELECT id FROM leads WHERE name=? AND company=?',
-                              (contact['name'], comp['name'])).fetchone()
+        lead_row = main_db.execute('SELECT id FROM leads WHERE name=? AND company=?',
+                                   (contact['name'], comp['name'])).fetchone()
         if not lead_row:
-            cur = db.execute(
+            cur = main_db.execute(
                 'INSERT INTO leads (name,company,role,email,linkedin,whatsapp,sector,country,research_hook,research_context) VALUES (?,?,?,?,?,?,?,?,?,?)',
                 (contact['name'], comp['name'], contact['role'], contact['email'],
                  contact['linkedin'], contact['whatsapp'], comp['sector'], contact['country'],
-                 contact.get('research_hook', ''), contact.get('research_context', ''))
+                 contact['research_hook'] or '', contact['research_context'] or '')
             )
-            db.commit()
+            main_db.commit()
             lid = cur.lastrowid
         else:
             lid = lead_row['id']
-            if contact.get('research_hook'):
-                db.execute('UPDATE leads SET research_hook=?, research_context=? WHERE id=?',
-                           (contact['research_hook'], contact['research_context'], lid))
-                db.commit()
+            if contact['research_hook']:
+                main_db.execute('UPDATE leads SET research_hook=?, research_context=? WHERE id=?',
+                                (contact['research_hook'], contact['research_context'], lid))
+                main_db.commit()
 
-        # Gera sequência via lógica existente
-        from flask import current_app
-        with current_app.test_request_context(
-            f'/api/leads/{lid}/sequence',
-            method='POST',
-            json={'product_value': product_value, 'selected_pain_point': selected_pain_point}
-        ):
-            seq_result = generate_sequence(lid)
-            seq_data = seq_result.get_json()
-
-        db.execute("UPDATE contacts SET status='sequence_created' WHERE id=?", (contact['id'],))
-        db.commit()
-
-        results.append({
-            'company_id': cid,
+        tasks.append({
+            'cid': cid,
+            'lid': lid,
             'company_name': comp['name'],
+            'contact_id': contact['id'],
             'contact_name': contact['name'],
             'selected_pain_point': selected_pain_point,
-            'sequence': seq_data.get('sequence', []),
+            'payload': {'product_value': product_value, 'selected_pain_point': selected_pain_point},
         })
 
+    # ── Fase 2 (paralela, pesada): chamadas Claude por empresa ──────────────────
+    def _process_task(task):
+        """Roda em thread separada com conexão própria ao DB."""
+        worker_db = sqlite3.connect(DATABASE, detect_types=sqlite3.PARSE_DECLTYPES)
+        worker_db.row_factory = sqlite3.Row
+        try:
+            lead = worker_db.execute('SELECT * FROM leads WHERE id=?', (task['lid'],)).fetchone()
+            seq_data, status = _build_sequence_messages(worker_db, lead, task['payload'])
+            if status != 200:
+                return {'error': True, 'company_id': task['cid'],
+                        'company_name': task['company_name'], 'detail': seq_data.get('error')}
+            worker_db.execute("UPDATE contacts SET status='sequence_created' WHERE id=?", (task['contact_id'],))
+            worker_db.commit()
+            return {
+                'company_id': task['cid'],
+                'company_name': task['company_name'],
+                'contact_name': task['contact_name'],
+                'selected_pain_point': task['selected_pain_point'],
+                'sequence': seq_data.get('sequence', []),
+            }
+        except Exception as exc:
+            log.exception('Erro ao gerar sequência bulk para empresa %s: %s', task['company_name'], exc)
+            return {'error': True, 'company_id': task['cid'],
+                    'company_name': task['company_name'], 'detail': str(exc)}
+        finally:
+            worker_db.close()
+
+    MAX_WORKERS = min(5, len(tasks))  # máx 5 chamadas Claude simultâneas
+    results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_map = {executor.submit(_process_task, t): t for t in tasks}
+        for future in as_completed(future_map):
+            outcome = future.result()
+            if outcome.get('error'):
+                errors.append({'company_id': outcome['company_id'],
+                               'company_name': outcome.get('company_name'),
+                               'error': outcome.get('detail', 'Erro desconhecido')})
+            else:
+                results.append(outcome)
+
+    log.info('Bulk-sequence: %d geradas, %d erros', len(results), len(errors))
     return jsonify({'results': results, 'errors': errors, 'total': len(results)})
 
 

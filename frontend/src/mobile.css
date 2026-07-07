@@ -1,0 +1,98 @@
+/* ── Mobile improvements for Sales AI Agent ──────────────────────────── */
+
+/* Touch targets mínimos */
+.btn {
+  min-height: 38px;
+}
+.btn-sm {
+  min-height: 32px;
+}
+
+/* Navbar tabs: scroll horizontal sem barra visível */
+.nav-tabs-scroll {
+  overflow-x: auto;
+  flex-wrap: nowrap !important;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.nav-tabs-scroll::-webkit-scrollbar {
+  display: none;
+}
+.nav-tabs-scroll .nav-link {
+  white-space: nowrap;
+}
+
+/* Heatmap e tabelas largas sempre com scroll */
+.table-scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 767.98px) {
+  /* Reduz padding lateral no mobile */
+  .container-fluid.px-4 {
+    padding-left: 0.75rem !important;
+    padding-right: 0.75rem !important;
+  }
+
+  /* Modal fullscreen em telas pequenas */
+  .modal-xl {
+    margin: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    height: 100% !important;
+  }
+  .modal-xl .modal-content {
+    border-radius: 0 !important;
+    min-height: 100vh;
+  }
+
+  /* Botões touch-friendly em linhas de tabela */
+  .btn-xs-touch {
+    font-size: 0.8rem !important;
+    padding: 5px 10px !important;
+    min-height: 34px !important;
+  }
+
+  /* Status funnel boxes: garantir que caibam em 2 colunas */
+  .funnel-box {
+    flex: 1 1 calc(33% - 8px) !important;
+    min-width: 80px !important;
+  }
+
+  /* Ocultar setas do funil no mobile */
+  .funnel-arrow {
+    display: none !important;
+  }
+
+  /* StatCards: 3 por linha no mobile */
+  .stat-card-col {
+    flex: 0 0 33.333% !important;
+    max-width: 33.333% !important;
+  }
+
+  /* Reduz tamanho da fonte dos números nos stat cards */
+  .stat-card-col .display-6 {
+    font-size: 1.3rem !important;
+  }
+
+  /* Tabs: garante alinhamento */
+  .nav-tabs-scroll .nav-item {
+    flex-shrink: 0;
+  }
+
+  /* Textarea menor no mobile */
+  textarea.form-control[rows="8"] {
+    rows: 4;
+    max-height: 120px;
+  }
+  textarea.form-control[rows="6"] {
+    max-height: 100px;
+  }
+
+  /* Top 5 no dashboard: maxWidth relativo */
+  .top5-name {
+    max-width: 45vw !important;
+  }
+}

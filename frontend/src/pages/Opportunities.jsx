@@ -174,7 +174,7 @@ export default function Opportunities({ toast, loadStats }) {
   return (
     <div className="row g-3">
       {/* ── Sidebar form ── */}
-      <div className="col-md-3">
+      <div className="col-12 col-md-3 order-2 order-md-1">
         <div className="card p-3">
           <h6 className="fw-bold mb-3">
             <i className="bi bi-funnel me-1"></i>Nova Oportunidade
@@ -250,7 +250,7 @@ export default function Opportunities({ toast, loadStats }) {
       </div>
 
       {/* ── Main table ── */}
-      <div className="col-md-9">
+      <div className="col-12 col-md-9 order-1 order-md-2">
         <div className="card p-3">
           <div className="d-flex justify-content-between mb-2">
             <h6 className="fw-bold mb-0">

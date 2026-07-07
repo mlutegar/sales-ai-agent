@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import CompanyModal from './CompanyModal.jsx';
 
 const API = '';
@@ -17,7 +18,7 @@ const STATUS_BADGES = {
 const PAGE_SIZE = 15;
 
 // ── AddForm ────────────────────────────────────────────────────────────────────
-function AddForm({ onAdded, toast }) {
+export function AddForm({ onAdded, toast }) {
   const [form, setForm] = useState({
     companyName: '', sector: '',
     contactName: '', role: 'other', email: '', linkedin: '', whatsapp: '', country: 'BR',
@@ -164,11 +165,15 @@ function CSVImport({ toast, onAdded }) {
       const res = await fetch(`${API}/api/companies/import-bulk`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows }),
+        body: JSON.stringify({ rows, import_source: file.name }),
       });
       const d = await res.json();
       if (d.error) throw new Error(d.error);
-      setExcelResult(`✅ ${d.companies_created} empresa(s), ${d.contacts_created} contato(s)${d.skipped ? `, ${d.skipped} ignorado(s)` : ''}`);
+      const semContato = d.companies_without_contact || 0;
+      setExcelResult(
+        `✅ ${d.companies_created} empresa(s), ${d.contacts_created} contato(s)${d.skipped ? `, ${d.skipped} ignorado(s)` : ''}` +
+        (semContato > 0 ? `\n⚠️ ${semContato} empresa(s) importada(s) sem contato — use "Enriquecer sem e-mail" ou clique em ⭐ na linha da empresa.` : '')
+      );
       onAdded();
     } catch (err) {
       setExcelResult('❌ ' + (err.message || 'Erro ao importar'));
@@ -268,7 +273,7 @@ function CSVImport({ toast, onAdded }) {
 }
 
 // ── FiltersBar ─────────────────────────────────────────────────────────────────
-function FiltersBar({ filters, setFilters, sectors, count }) {
+function FiltersBar({ filters, setFilters, sectors, importSources, count, flagCatalog }) {
   return (
     <div className="d-flex gap-2 mb-2 flex-wrap align-items-center">
       <input
@@ -302,9 +307,39 @@ function FiltersBar({ filters, setFilters, sectors, count }) {
         <option value="">Todos os setores</option>
         {sectors.map((s) => <option key={s} value={s}>{s}</option>)}
       </select>
+      {importSources.length > 0 && (
+        <select
+          className="form-select form-select-sm"
+          style={{ maxWidth: 220 }}
+          value={filters.importSource}
+          onChange={(e) => setFilters((f) => ({ ...f, importSource: e.target.value }))}
+        >
+          <option value="">Todas as origens</option>
+          {importSources.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      )}
+      <select
+        className="form-select form-select-sm"
+        style={{ maxWidth: 180 }}
+        value={filters.flag}
+        onChange={(e) => setFilters((f) => ({ ...f, flag: e.target.value }))}
+      >
+        <option value="">Todas as etiquetas</option>
+        {(flagCatalog || []).map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+      </select>
+      <div className="form-check form-check-inline mb-0">
+        <input
+          className="form-check-input"
+          type="checkbox"
+          id="filtroSemContato"
+          checked={filters.semContato}
+          onChange={(e) => setFilters((f) => ({ ...f, semContato: e.target.checked }))}
+        />
+        <label className="form-check-label small" htmlFor="filtroSemContato">Sem contato</label>
+      </div>
       <button
         className="btn btn-outline-secondary btn-sm"
-        onClick={() => setFilters({ search: '', status: '', sector: '' })}
+        onClick={() => setFilters({ search: '', status: '', sector: '', importSource: '', flag: '', semContato: false })}
       >
         ✕ Limpar
       </button>
@@ -346,7 +381,7 @@ function BulkToolbar({ selected, onClear, onBulkResearch, onBulkMessages, onBulk
 }
 
 // ── ExpandedRow ────────────────────────────────────────────────────────────────
-function ExpandedRow({ company, onEnrich, onRemoveContact, onContactAdded, toast }) {
+function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onContactAdded, toast }) {
   const [addForm, setAddForm] = useState({ name: '', role: 'other', email: '', whatsapp: '', linkedin: '', country: 'BR' });
   const [adding, setAdding] = useState(false);
   const set = (k) => (e) => setAddForm((f) => ({ ...f, [k]: e.target.value }));
@@ -386,21 +421,52 @@ function ExpandedRow({ company, onEnrich, onRemoveContact, onContactAdded, toast
       <div className="d-flex gap-3 flex-wrap">
         <div style={{ flex: 1, minWidth: 300 }}>
           <p className="fw-bold small mb-2"><i className="bi bi-people me-1"></i>Contatos ({contacts.length})</p>
-          {contacts.length === 0 && <p className="text-muted small">Nenhum contato cadastrado.</p>}
+          {contacts.length === 0 && (
+            <div className="text-center py-3">
+              <i className="bi bi-person-x fs-3 text-muted d-block mb-2"></i>
+              <p className="text-muted small mb-2">Nenhum contato cadastrado.</p>
+              <button
+                className="btn btn-warning btn-sm"
+                onClick={() => onFindContact(company.id)}
+                title="Buscar contato na internet para esta empresa"
+              >
+                <i className="bi bi-stars me-1"></i>Enriquecer — buscar contato na internet
+              </button>
+            </div>
+          )}
+          {contacts.length > 0 && (
+            <button
+              className="btn btn-outline-warning btn-sm mb-2"
+              onClick={() => onFindContact(company.id)}
+              title="Buscar mais um contato na internet para esta empresa"
+            >
+              <i className="bi bi-stars me-1"></i>Buscar outro contato na internet
+            </button>
+          )}
           {contacts.map((ct) => (
             <div key={ct.id} className="d-flex align-items-start justify-content-between mb-2 p-2 rounded" style={{ background: '#fff', border: '1px solid #dee2e6' }}>
               <div>
-                <div className="fw-semibold small">{ct.name}</div>
+                <div className="fw-semibold small">
+                  {ct.name}
+                  {!ct.email && !ct.whatsapp && !ct.linkedin && (
+                    <span className="badge bg-warning text-dark ms-2" style={{ fontSize: '.65rem' }}>sem contato</span>
+                  )}
+                </div>
                 {ct.role && <div className="text-muted" style={{ fontSize: '.78rem' }}>{ct.role}</div>}
                 {ct.email && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-envelope me-1"></i>{ct.email}</div>}
                 {ct.whatsapp && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-whatsapp me-1"></i>{ct.whatsapp}</div>}
                 {ct.linkedin && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-linkedin me-1"></i><a href={ct.linkedin} target="_blank" rel="noreferrer">LinkedIn</a></div>}
+                {ct.import_source && (
+                  <div className="text-muted" style={{ fontSize: '.72rem' }}>
+                    <i className="bi bi-file-earmark-spreadsheet me-1"></i>{ct.import_source}
+                  </div>
+                )}
               </div>
               <div className="d-flex gap-1 ms-2">
-                <button className="btn btn-xs btn-outline-secondary" style={{ fontSize: '.75rem', padding: '2px 6px' }} onClick={() => onEnrich(ct.id)} title="Enriquecer">
+                <button className="btn btn-sm btn-outline-secondary btn-xs-touch" onClick={() => onEnrich(ct.id)} title="Enriquecer">
                   <i className="bi bi-search"></i>
                 </button>
-                <button className="btn btn-xs btn-outline-danger" style={{ fontSize: '.75rem', padding: '2px 6px' }} onClick={() => onRemoveContact(company.id, ct.id)} title="Remover">
+                <button className="btn btn-sm btn-outline-danger btn-xs-touch" onClick={() => onRemoveContact(company.id, ct.id)} title="Remover">
                   <i className="bi bi-trash"></i>
                 </button>
               </div>
@@ -435,7 +501,7 @@ function ExpandedRow({ company, onEnrich, onRemoveContact, onContactAdded, toast
 }
 
 // ── CompanyRow ─────────────────────────────────────────────────────────────────
-function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onOpen, onEnrich, onRemoveContact, onContactAdded, toast }) {
+function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onOpen, onEnrich, onFindContact, onRemoveContact, onContactAdded, toast, flagMap }) {
   const badge = STATUS_BADGES[company.status] || STATUS_BADGES.new;
   const contacts = company.contacts || [];
 
@@ -455,9 +521,19 @@ function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onO
             <i className={`bi ${expanded ? 'bi-chevron-down' : 'bi-chevron-right'}`}></i>
           </button>
         </td>
-        <td className="fw-semibold">{company.name}</td>
-        <td className="text-muted small">{company.sector || '—'}</td>
-        <td>
+        <td className="fw-semibold">
+          {company.name}
+          {(company.flags || []).length > 0 && (
+            <div className="mt-1">
+              {(company.flags || []).map((k) => {
+                const info = (flagMap && flagMap[k]) || { label: k, badge: 'bg-secondary' };
+                return <span key={k} className={`badge ${info.badge} me-1`} style={{ fontSize: '.65rem' }}>{info.label}</span>;
+              })}
+            </div>
+          )}
+        </td>
+        <td className="text-muted small d-none d-md-table-cell">{company.sector || '—'}</td>
+        <td className="d-none d-sm-table-cell">
           <span className="badge" style={{ background: '#7c6af7', color: '#fff', fontSize: '.75rem' }}>
             {contacts.length}
           </span>
@@ -465,16 +541,25 @@ function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onO
         <td>
           <span className={`badge ${badge.cls}`} style={{ fontSize: '.75rem' }}>{badge.label}</span>
         </td>
-        <td className="text-center">
+        <td className="text-center d-none d-sm-table-cell">
           {company.interest_score != null ? (
             <span className="fw-bold text-warning">{company.interest_score}</span>
           ) : '—'}
         </td>
         <td>
           <div className="d-flex gap-1">
-            <button className="btn btn-xs btn-outline-primary" style={{ fontSize: '.75rem', padding: '2px 6px' }} onClick={() => onOpen(company)} title="Abrir empresa">
+            <button className="btn btn-sm btn-outline-primary btn-xs-touch" onClick={() => onOpen(company)} title="Abrir empresa">
               <i className="bi bi-box-arrow-up-right"></i>
             </button>
+            {contacts.length === 0 && (
+              <button
+                className="btn btn-sm btn-warning btn-xs-touch"
+                onClick={() => onFindContact(company.id)}
+                title="Enriquecer: buscar contato na internet"
+              >
+                <i className="bi bi-stars"></i>
+              </button>
+            )}
           </div>
         </td>
       </tr>
@@ -484,6 +569,7 @@ function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onO
             <ExpandedRow
               company={company}
               onEnrich={onEnrich}
+              onFindContact={onFindContact}
               onRemoveContact={onRemoveContact}
               onContactAdded={onContactAdded}
               toast={toast}
@@ -549,15 +635,26 @@ function GlobalContactSearch() {
 }
 
 // ── Main Companies Component ───────────────────────────────────────────────────
-export default function Companies({ toast, loadStats, refreshData }) {
+export default function Companies({ toast, loadStats, refreshData, onOpenWhatsApp }) {
+  const navigate = useNavigate();
   const [companies, setCompanies] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState([]);
   const [expanded, setExpanded] = useState([]);
-  const [filters, setFilters] = useState({ search: '', status: '', sector: '' });
+  const [filters, setFilters] = useState({ search: '', status: '', sector: '', importSource: '', flag: '', semContato: false });
   const [page, setPage] = useState(1);
   const [modalCompany, setModalCompany] = useState(null);
   const [sectors, setSectors] = useState([]);
+  const [importSources, setImportSources] = useState([]);
+  const [flagCatalog, setFlagCatalog] = useState([]);
+  const flagMap = Object.fromEntries((flagCatalog || []).map((f) => [f.key, f]));
+
+  useEffect(() => {
+    fetch(`${API}/api/flags`)
+      .then((r) => r.json())
+      .then((d) => setFlagCatalog(Array.isArray(d) ? d : []))
+      .catch(() => setFlagCatalog([]));
+  }, []);
 
   const loadCompanies = useCallback(async () => {
     setLoading(true);
@@ -568,6 +665,8 @@ export default function Companies({ toast, loadStats, refreshData }) {
       setCompanies(list);
       const uniqueSectors = [...new Set(list.map((c) => c.sector).filter(Boolean))].sort();
       setSectors(uniqueSectors);
+      const uniqueSources = [...new Set(list.map((c) => c.import_source).filter(Boolean))].sort();
+      setImportSources(uniqueSources);
     } catch (err) {
       toast('Erro ao carregar empresas', 'danger');
     } finally {
@@ -582,6 +681,9 @@ export default function Companies({ toast, loadStats, refreshData }) {
     if (filters.search && !c.name?.toLowerCase().includes(filters.search.toLowerCase()) && !c.sector?.toLowerCase().includes(filters.search.toLowerCase())) return false;
     if (filters.status && c.status !== filters.status) return false;
     if (filters.sector && c.sector !== filters.sector) return false;
+    if (filters.importSource && c.import_source !== filters.importSource) return false;
+    if (filters.flag && !(c.flags || []).includes(filters.flag)) return false;
+    if (filters.semContato && (c.contacts || []).length > 0) return false;
     return true;
   });
 
@@ -614,6 +716,21 @@ export default function Companies({ toast, loadStats, refreshData }) {
       loadCompanies();
     } catch (err) {
       toast(err.message || 'Erro ao enriquecer', 'danger');
+    }
+  }
+
+  async function handleFindContact(companyId) {
+    try {
+      const res = await fetch(`${API}/api/companies/${companyId}/find-contact`, { method: 'POST' });
+      const d = await res.json();
+      if (d.status === 'already_exists') { toast(d.message || 'Contato já cadastrado', 'info'); return; }
+      if (!d.ok) { toast(d.error || 'Nenhum contato encontrado pelo Apollo', 'warning'); return; }
+      const src = d.source === 'apollo' ? 'Apollo.io' : 'IA (sugestão)';
+      toast(`Contato encontrado via ${src}: ${d.contact.name}`, 'success');
+      loadCompanies();
+      if (loadStats) loadStats();
+    } catch (err) {
+      toast(err.message || 'Erro ao buscar contato', 'danger');
     }
   }
 
@@ -730,18 +847,16 @@ export default function Companies({ toast, loadStats, refreshData }) {
 
   return (
     <div className="row g-3">
-      {/* Sidebar */}
-      <div className="col-md-3">
-        <AddForm onAdded={() => { loadCompanies(); if (loadStats) loadStats(); }} toast={toast} />
-      </div>
-
       {/* Main table area */}
-      <div className="col-md-9">
+      <div className="col-12">
         <div className="card p-3">
           {/* Header */}
           <div className="d-flex justify-content-between mb-2">
             <h6 className="fw-bold mb-0"><i className="bi bi-list-ul me-1"></i>Lista de Empresas</h6>
             <div className="d-flex gap-2">
+              <button className="btn btn-primary btn-sm" onClick={() => navigate('/companies/new')}>
+                <i className="bi bi-building-add me-1"></i>Nova Empresa
+              </button>
               <div className="dropdown">
                 <button className="btn btn-outline-success btn-sm dropdown-toggle" data-bs-toggle="dropdown">
                   <i className="bi bi-download me-1"></i>Exportar
@@ -775,7 +890,9 @@ export default function Companies({ toast, loadStats, refreshData }) {
             filters={filters}
             setFilters={(f) => { setFilters(f); setPage(1); }}
             sectors={sectors}
+            importSources={importSources}
             count={filtered.length}
+            flagCatalog={flagCatalog}
           />
 
           {/* Bulk toolbar */}
@@ -803,10 +920,10 @@ export default function Companies({ toast, loadStats, refreshData }) {
                   </th>
                   <th style={{ width: 30 }}></th>
                   <th>Empresa</th>
-                  <th>Setor</th>
-                  <th>Contatos</th>
+                  <th className="d-none d-md-table-cell">Setor</th>
+                  <th className="d-none d-sm-table-cell">Contatos</th>
                   <th>Status</th>
-                  <th>Score</th>
+                  <th className="d-none d-sm-table-cell">Score</th>
                   <th>Ações</th>
                 </tr>
               </thead>
@@ -827,9 +944,11 @@ export default function Companies({ toast, loadStats, refreshData }) {
                     onToggleExpand={handleToggleExpand}
                     onOpen={setModalCompany}
                     onEnrich={handleEnrichContact}
+                    onFindContact={handleFindContact}
                     onRemoveContact={handleRemoveContact}
                     onContactAdded={() => { loadCompanies(); if (loadStats) loadStats(); }}
                     toast={toast}
+                    flagMap={flagMap}
                   />
                 ))}
               </tbody>
@@ -873,6 +992,7 @@ export default function Companies({ toast, loadStats, refreshData }) {
           onCompanyUpdated={() => { loadCompanies(); if (loadStats) loadStats(); if (refreshData) refreshData(); }}
           loadStats={loadStats}
           toast={toast}
+          onOpenWhatsApp={onOpenWhatsApp}
         />
       )}
     </div>

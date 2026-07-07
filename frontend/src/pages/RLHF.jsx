@@ -3,10 +3,36 @@ import { api, esc } from '../api.js'
 
 export default function RLHF({ toast, loadStats: parentLoadStats }) {
   const [stats, setStats] = useState(null)
+  const [prog, setProg] = useState(null)
   const [messages, setMessages] = useState([])
   const [analyzing, setAnalyzing] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editText, setEditText] = useState('')
+  const [pvChannel, setPvChannel] = useState('email')
+  const [pvRole, setPvRole] = useState('c_level')
+  const [preview, setPreview] = useState(null)
+  const [promptFor, setPromptFor] = useState(null)
+  const [promptData, setPromptData] = useState(null)
+
+  const loadPreview = async (channel = pvChannel, role = pvRole) => {
+    try {
+      const data = await api(`/api/learn/prompt-preview?channel=${channel}&role=${role}`)
+      setPreview(data)
+    } catch (e) {
+      console.warn('Erro ao carregar preview do prompt:', e)
+    }
+  }
+
+  const viewPrompt = async (id) => {
+    if (promptFor === id) { setPromptFor(null); setPromptData(null); return }
+    try {
+      const data = await api(`/api/messages/${id}/prompt`)
+      setPromptData(data)
+      setPromptFor(id)
+    } catch (e) {
+      toast('Erro ao carregar prompt', 'danger')
+    }
+  }
 
   const loadLearnStats = async () => {
     try {
@@ -15,6 +41,15 @@ export default function RLHF({ toast, loadStats: parentLoadStats }) {
       if (parentLoadStats) parentLoadStats()
     } catch (e) {
       console.warn('Erro ao carregar estatísticas de aprendizado:', e)
+    }
+  }
+
+  const loadLearnProgress = async () => {
+    try {
+      const data = await api('/api/learn/progress')
+      setProg(data)
+    } catch (e) {
+      console.warn('Erro ao carregar progresso do aprendizado:', e)
     }
   }
 
@@ -29,7 +64,9 @@ export default function RLHF({ toast, loadStats: parentLoadStats }) {
 
   useEffect(() => {
     loadLearnStats()
+    loadLearnProgress()
     loadRLHF()
+    loadPreview()
   }, [])
 
   const triggerAnalysis = async () => {
@@ -47,6 +84,7 @@ export default function RLHF({ toast, loadStats: parentLoadStats }) {
     } finally {
       setAnalyzing(false)
       loadLearnStats()
+      loadLearnProgress()
     }
   }
 
@@ -187,6 +225,100 @@ export default function RLHF({ toast, loadStats: parentLoadStats }) {
           )}
         </div>
 
+        {/*  ── Progresso do Aprendizado (evolução temporal) ────────────────────────  */}
+        <div className="card p-3 mb-3">
+          <div className="d-flex justify-content-between align-items-start mb-3">
+            <div>
+              <h6 className="fw-bold mb-1"><i className="bi bi-graph-up-arrow me-1 text-success"></i>Progresso do Aprendizado</h6>
+              <p className="text-muted small mb-0">Evolução do RLHF ao longo do tempo. A tendência mostra se a qualidade está melhorando.</p>
+            </div>
+            <button className="btn btn-outline-secondary btn-sm" onClick={loadLearnProgress}>
+              <i className="bi bi-arrow-clockwise"></i>
+            </button>
+          </div>
+
+          {(() => {
+            const s = prog?.summary || {}
+            const t = s.trend || 0
+            const trendCls = t > 0 ? 'text-success' : t < 0 ? 'text-danger' : 'text-muted'
+            const trendTxt = t > 0 ? `▲ +${t}` : t < 0 ? `▼ ${t}` : '– 0'
+            const ss = prog?.score_series || { labels: [], values: [] }
+            const appr = prog?.approvals || { labels: [], values: [] }
+            const corr = prog?.corrections || { labels: [], values: [] }
+            // Une os dias das duas séries de feedback
+            const apprMap = Object.fromEntries((appr.labels || []).map((d, i) => [d, appr.values[i]]))
+            const corrMap = Object.fromEntries((corr.labels || []).map((d, i) => [d, corr.values[i]]))
+            const days = Array.from(new Set([...(appr.labels || []), ...(corr.labels || [])])).sort()
+            const maxFb = Math.max(1, ...days.map(d => (apprMap[d] || 0) + (corrMap[d] || 0)))
+            return (
+              <>
+                <div className="row g-2 mb-3">
+                  <div className="col-6 col-md-3">
+                    <div className="border rounded p-2 text-center">
+                      <div className="fw-bold fs-5 text-warning">{s.avg_last7 != null ? s.avg_last7 : '—'}</div>
+                      <div className="text-muted" style={{fontSize: '.75rem'}}>Score Médio (7d)</div>
+                    </div>
+                  </div>
+                  <div className="col-6 col-md-3">
+                    <div className="border rounded p-2 text-center">
+                      <div className={`fw-bold fs-5 ${trendCls}`}>{trendTxt}</div>
+                      <div className="text-muted" style={{fontSize: '.75rem'}}>Tendência vs. 7d ant.</div>
+                    </div>
+                  </div>
+                  <div className="col-6 col-md-3">
+                    <div className="border rounded p-2 text-center">
+                      <div className="fw-bold fs-5 text-info">{s.total_feedback || 0}</div>
+                      <div className="text-muted" style={{fontSize: '.75rem'}}>Feedbacks Totais</div>
+                    </div>
+                  </div>
+                  <div className="col-6 col-md-3">
+                    <div className="border rounded p-2 text-center">
+                      <div className="fw-bold fs-5 text-primary">{s.total_patterns || 0}</div>
+                      <div className="text-muted" style={{fontSize: '.75rem'}}>Padrões Aprendidos</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="row g-3">
+                  <div className="col-12 col-lg-6">
+                    <div className="small fw-bold text-muted mb-2">Score médio ao longo do tempo</div>
+                    {ss.labels.length === 0 ? (
+                      <p className="text-muted small mb-0">Ainda sem dados. Avalie mensagens para ver a evolução.</p>
+                    ) : ss.labels.map((d, i) => (
+                      <div key={d} className="d-flex align-items-center gap-2 mb-1">
+                        <span className="text-muted" style={{fontSize: '.7rem', width: 70}}>{d.slice(5)}</span>
+                        <div className="progress flex-grow-1" style={{height: 14}}>
+                          <div className="progress-bar bg-warning" style={{width: `${(ss.values[i] || 0) / 5 * 100}%`}}></div>
+                        </div>
+                        <span className="text-muted" style={{fontSize: '.7rem', width: 28}}>{ss.values[i]}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="col-12 col-lg-6">
+                    <div className="small fw-bold text-muted mb-2">Feedbacks por dia (aprovações + correções)</div>
+                    {days.length === 0 ? (
+                      <p className="text-muted small mb-0">Ainda sem feedbacks registrados.</p>
+                    ) : days.map(d => (
+                      <div key={d} className="d-flex align-items-center gap-2 mb-1">
+                        <span className="text-muted" style={{fontSize: '.7rem', width: 70}}>{d.slice(5)}</span>
+                        <div className="progress flex-grow-1" style={{height: 14}}>
+                          <div className="progress-bar bg-success" style={{width: `${(apprMap[d] || 0) / maxFb * 100}%`}} title={`${apprMap[d] || 0} aprovações`}></div>
+                          <div className="progress-bar bg-info" style={{width: `${(corrMap[d] || 0) / maxFb * 100}%`}} title={`${corrMap[d] || 0} correções`}></div>
+                        </div>
+                        <span className="text-muted" style={{fontSize: '.7rem', width: 28}}>{(apprMap[d] || 0) + (corrMap[d] || 0)}</span>
+                      </div>
+                    ))}
+                    <div className="d-flex gap-3 mt-2">
+                      <span className="small text-muted"><span className="badge bg-success">&nbsp;</span> Aprovações</span>
+                      <span className="small text-muted"><span className="badge bg-info">&nbsp;</span> Correções</span>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )
+          })()}
+        </div>
+
         {/*  ── Fila de Curadoria ───────────────────────────────────────────────────  */}
         <div className="card p-3">
           <div className="d-flex justify-content-between mb-3">
@@ -246,12 +378,76 @@ export default function RLHF({ toast, loadStats: parentLoadStats }) {
                       <button className="btn btn-outline-secondary btn-sm" onClick={() => startEditing(m)}>
                         <i className="bi bi-pencil me-1"></i>Editar & Corrigir
                       </button>
+                      <button className="btn btn-outline-info btn-sm" onClick={() => viewPrompt(m.id)}>
+                        <i className="bi bi-code-square me-1"></i>{promptFor === m.id ? 'Ocultar prompt' : 'Ver prompt'}
+                      </button>
+                    </div>
+                  )}
+
+                  {promptFor === m.id && promptData && (
+                    <div className="mt-2">
+                      {promptData.reconstructed && (
+                        <div className="small text-muted mb-1">
+                          <i className="bi bi-info-circle me-1"></i>Mensagem antiga: prompt reconstruído com as observações atuais.
+                        </div>
+                      )}
+                      <pre className="p-2 border rounded bg-dark text-light" style={{whiteSpace: 'pre-wrap', fontSize: '.75rem', maxHeight: 320, overflow: 'auto'}}>
+                        {promptData.prompt_used}
+                      </pre>
                     </div>
                   )}
                 </div>
               ))
             )}
           </div>
+        </div>
+
+        {/*  ── Prompt enviado à LLM ────────────────────────────────────────────────  */}
+        <div className="card p-3 mt-3">
+          <div className="d-flex justify-content-between align-items-start mb-2 flex-wrap gap-2">
+            <div>
+              <h6 className="fw-bold mb-1"><i className="bi bi-code-square me-1 text-info"></i>Prompt enviado à LLM</h6>
+              <p className="text-muted small mb-0">Veja o prompt real da geração, já com as SUAS observações (padrões, correções e comentários) injetadas.</p>
+            </div>
+            <div className="d-flex gap-2 align-items-center">
+              <select className="form-select form-select-sm" style={{width: 'auto'}} value={pvChannel}
+                onChange={e => { setPvChannel(e.target.value); loadPreview(e.target.value, pvRole) }}>
+                <option value="linkedin">LinkedIn</option>
+                <option value="email">Email</option>
+                <option value="whatsapp">WhatsApp</option>
+              </select>
+              <select className="form-select form-select-sm" style={{width: 'auto'}} value={pvRole}
+                onChange={e => { setPvRole(e.target.value); loadPreview(pvChannel, e.target.value) }}>
+                <option value="c_level">C-Level</option>
+                <option value="manager">Gerente</option>
+                <option value="engineer">Engenheiro</option>
+                <option value="other">Outro</option>
+              </select>
+              <button className="btn btn-outline-secondary btn-sm" onClick={() => loadPreview()}>
+                <i className="bi bi-arrow-clockwise"></i>
+              </button>
+            </div>
+          </div>
+
+          {!preview ? (
+            <p className="text-muted small mb-0">Carregando preview…</p>
+          ) : (
+            <>
+              <div className="small fw-bold text-muted mb-1">System prompt</div>
+              <pre className="p-2 border rounded bg-light" style={{whiteSpace: 'pre-wrap', fontSize: '.78rem'}}>{preview.systemPrompt}</pre>
+              <div className="small fw-bold text-muted mb-1 mt-2">
+                User prompt {preview.hasLearned
+                  ? <span className="badge bg-info ms-1">com suas observações</span>
+                  : <span className="badge bg-secondary ms-1">sem observações ainda</span>}
+              </div>
+              <pre className="p-2 border rounded bg-dark text-light" style={{whiteSpace: 'pre-wrap', fontSize: '.78rem', maxHeight: 400, overflow: 'auto'}}>{preview.userPromptTemplate}</pre>
+              {!preview.hasLearned && (
+                <p className="text-muted small mb-0">
+                  <i className="bi bi-lightbulb me-1"></i>Dê notas, comentários e correções (e clique em "Analisar Padrões") para que suas observações apareçam aqui e influenciem a geração.
+                </p>
+              )}
+            </>
+          )}
         </div>
       </div>
     </div>

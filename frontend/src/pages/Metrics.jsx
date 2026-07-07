@@ -187,7 +187,7 @@ export default function Metrics({ toast }) {
         )}
 
         <div className={`row g-3 mb-3 ${totalSent === 0 ? 'opacity-50' : ''}`}>
-          <div className="col-md-6">
+          <div className="col-12 col-md-6">
             <div className="card p-3 h-100">
               <h6 className="fw-bold mb-3"><i className="bi bi-bar-chart me-1"></i>Taxa de Resposta por Canal</h6>
               {(!overview?.by_channel || overview.by_channel.length === 0) ? (
@@ -198,14 +198,14 @@ export default function Metrics({ toast }) {
             </div>
           </div>
           
-          <div className="col-md-3">
+          <div className="col-6 col-md-3">
             <div className="card p-3 h-100">
               <h6 className="fw-bold mb-3"><i className="bi bi-people me-1"></i>Leads por Cargo</h6>
               <canvas ref={chartRoleRef} height="220"></canvas>
             </div>
           </div>
           
-          <div className="col-md-3">
+          <div className="col-6 col-md-3">
             <div className="card p-3 h-100">
               <h6 className="fw-bold mb-3"><i className="bi bi-shuffle me-1"></i>A/B Testing</h6>
               <div>
@@ -235,14 +235,14 @@ export default function Metrics({ toast }) {
         </div>
 
         <div className={`row g-3 mb-3 ${totalSent === 0 ? 'opacity-50' : ''}`}>
-          <div className="col-md-5">
+          <div className="col-12 col-md-5">
             <div className="card p-3 h-100">
               <h6 className="fw-bold mb-3"><i className="bi bi-filter me-1"></i>Funil de Conversão</h6>
               <canvas ref={chartFunnelRef} height="200"></canvas>
             </div>
           </div>
           
-          <div className="col-md-7">
+          <div className="col-12 col-md-7">
             <div className="card p-3 h-100">
               <h6 className="fw-bold mb-2"><i className="bi bi-clock me-1"></i>Melhores Horários de Envio</h6>
               <p className="text-muted small mb-2">Taxa de resposta por dia da semana e hora (mais escuro = melhor)</p>

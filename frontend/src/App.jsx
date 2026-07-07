@@ -6,6 +6,7 @@ import ToastContainer from './components/ToastContainer.jsx'
 
 const Login = lazy(() => import('./pages/Login.jsx'))
 const Main = lazy(() => import('./pages/Main.jsx'))
+const CompanyWhatsApp = lazy(() => import('./pages/CompanyWhatsApp.jsx'))
 
 function PrivateRoute({ children }) {
   const { user, loading } = useAuth()
@@ -21,6 +22,7 @@ function AppRoutes() {
       <Suspense fallback={<div className="d-flex justify-content-center align-items-center" style={{height:'100vh'}}><div className="spinner-border text-primary"></div></div>}>
         <Routes>
           <Route path="/login" element={<Login toast={toast} />} />
+          <Route path="/companies/:companyId/whatsapp" element={<PrivateRoute><CompanyWhatsApp /></PrivateRoute>} />
           <Route path="/*" element={<PrivateRoute><Main toast={toast} /></PrivateRoute>} />
         </Routes>
       </Suspense>
