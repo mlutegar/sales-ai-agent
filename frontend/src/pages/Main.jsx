@@ -89,13 +89,13 @@ export default function Main({ toast }) {
           <Routes>
             <Route index element={<Navigate to="/companies" replace />} />
             <Route path="/companies/new" element={<CompanyNew     {...sharedProps} />} />
-            <Route path="/companies"     element={<Companies     {...sharedProps} onOpenWhatsApp={id => navigate('/whatsapp', { state: { companyId: id } })} />} />
-            <Route path="/whatsapp"      element={<WhatsAppInbox toast={toast} initialCompanyId={location.state?.companyId ?? null} />} />
+            <Route path="/companies"     element={<Companies     {...sharedProps} onOpenWhatsApp={(companyId, contactId) => navigate('/whatsapp', { state: { companyId, contactId } })} />} />
+            <Route path="/whatsapp"      element={<WhatsAppInbox toast={toast} initialCompanyId={location.state?.companyId ?? null} initialContactId={location.state?.contactId ?? null} onEditMessage={(messageId) => navigate('/rlhf', { state: { messageId } })} />} />
             <Route path="/notifications" element={<Notifications toast={toast} onUnreadChange={setUnreadNotifications} />} />
             <Route path="/followup"      element={<FollowUps      {...sharedProps} />} />
             <Route path="/opportunities" element={<Opportunities  {...sharedProps} />} />
             <Route path="/dashboard"     element={<Dashboard      {...sharedProps} />} />
-            <Route path="/rlhf"          element={<RLHF           {...sharedProps} />} />
+            <Route path="/rlhf"          element={<RLHF           {...sharedProps} initialMessageId={location.state?.messageId ?? null} />} />
             <Route path="/rag"           element={<RAG            {...sharedProps} />} />
             <Route path="/golden"        element={<GoldenCases    {...sharedProps} />} />
             <Route path="/agenda"        element={<Agenda         {...sharedProps} />} />

@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import CompanyModal from './CompanyModal.jsx';
 import PropensityModal from './PropensityModal.jsx';
 
 const API = '';
@@ -382,7 +381,7 @@ function BulkToolbar({ selected, onClear, onBulkResearch, onBulkMessages, onBulk
 }
 
 // ── ContactCard (contato + contexto pessoal do lead) ────────────────────────────
-function ContactCard({ contact, companyId, onEnrich, onRemove, toast }) {
+function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversation, toast }) {
   const [savedCtx, setSavedCtx] = useState(contact.context || '');
   const [ctx, setCtx]           = useState(contact.context || '');
   const [open, setOpen]         = useState(false);
@@ -446,6 +445,15 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, toast }) {
       </div>
 
       <button
+        className="btn btn-sm w-100 mt-2 text-white fw-semibold"
+        style={{ fontSize: '.75rem', background: '#25d366' }}
+        onClick={() => onStartConversation && onStartConversation(companyId, contact.id)}
+        title="Abrir a conversa de WhatsApp com este lead"
+      >
+        <i className="bi bi-whatsapp me-1"></i>Iniciar conversa
+      </button>
+
+      <button
         className={`btn btn-sm ${hasContext ? 'btn-outline-primary' : 'btn-outline-secondary'} w-100 mt-2`}
         style={{ fontSize: '.75rem' }}
         onClick={() => { setCtx(savedCtx); setOpen((o) => !o); }}
@@ -478,7 +486,7 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, toast }) {
 }
 
 // ── ExpandedRow ────────────────────────────────────────────────────────────────
-function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onContactAdded, toast }) {
+function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onContactAdded, onStartConversation, toast }) {
   const [addForm, setAddForm] = useState({ name: '', role: 'other', email: '', whatsapp: '', linkedin: '', country: 'BR' });
   const [adding, setAdding] = useState(false);
   const set = (k) => (e) => setAddForm((f) => ({ ...f, [k]: e.target.value }));
@@ -547,6 +555,7 @@ function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onCont
               companyId={company.id}
               onEnrich={onEnrich}
               onRemove={onRemoveContact}
+              onStartConversation={onStartConversation}
               toast={toast}
             />
           ))}
@@ -579,7 +588,7 @@ function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onCont
 }
 
 // ── CompanyRow ─────────────────────────────────────────────────────────────────
-function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onOpen, onEnrich, onFindContact, onRemoveContact, onContactAdded, toast, flagMap }) {
+function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onEnrich, onFindContact, onRemoveContact, onContactAdded, onStartConversation, toast, flagMap }) {
   const badge = STATUS_BADGES[company.status] || STATUS_BADGES.new;
   const contacts = company.contacts || [];
 
@@ -626,9 +635,6 @@ function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onO
         </td>
         <td>
           <div className="d-flex gap-1">
-            <button className="btn btn-sm btn-outline-primary btn-xs-touch" onClick={() => onOpen(company)} title="Abrir empresa">
-              <i className="bi bi-box-arrow-up-right"></i>
-            </button>
             {contacts.length === 0 && (
               <button
                 className="btn btn-sm btn-warning btn-xs-touch"
@@ -650,6 +656,7 @@ function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onO
               onFindContact={onFindContact}
               onRemoveContact={onRemoveContact}
               onContactAdded={onContactAdded}
+              onStartConversation={onStartConversation}
               toast={toast}
             />
           </td>
@@ -721,7 +728,6 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
   const [expanded, setExpanded] = useState([]);
   const [filters, setFilters] = useState({ search: '', status: '', sector: '', importSource: '', flag: '', semContato: false });
   const [page, setPage] = useState(1);
-  const [modalCompany, setModalCompany] = useState(null);
   const [sectors, setSectors] = useState([]);
   const [importSources, setImportSources] = useState([]);
   const [flagCatalog, setFlagCatalog] = useState([]);
@@ -1022,11 +1028,11 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
                     onToggle={handleToggle}
                     expanded={expanded.includes(company.id)}
                     onToggleExpand={handleToggleExpand}
-                    onOpen={setModalCompany}
                     onEnrich={handleEnrichContact}
                     onFindContact={handleFindContact}
                     onRemoveContact={handleRemoveContact}
                     onContactAdded={() => { loadCompanies(); if (loadStats) loadStats(); }}
+                    onStartConversation={onOpenWhatsApp}
                     toast={toast}
                     flagMap={flagMap}
                   />
@@ -1076,16 +1082,6 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
       )}
 
       {/* Company Modal */}
-      {modalCompany && (
-        <CompanyModal
-          companyId={modalCompany.id}
-          onClose={() => setModalCompany(null)}
-          onCompanyUpdated={() => { loadCompanies(); if (loadStats) loadStats(); if (refreshData) refreshData(); }}
-          loadStats={loadStats}
-          toast={toast}
-          onOpenWhatsApp={onOpenWhatsApp}
-        />
-      )}
     </div>
   );
 }

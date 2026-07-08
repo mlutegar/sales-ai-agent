@@ -1,10 +1,13 @@
 import React, { useState, useEffect } from 'react'
 import { api, esc } from '../api.js'
 
-export default function RLHF({ toast, loadStats: parentLoadStats }) {
+export default function RLHF({ toast, loadStats: parentLoadStats, initialMessageId }) {
   const [stats, setStats] = useState(null)
   const [prog, setProg] = useState(null)
-  const [messages, setMessages] = useState([])
+  const [tab, setTab] = useState('unrated')
+  const [unrated, setUnrated] = useState([])
+  const [rated, setRated] = useState([])
+  const [focusId, setFocusId] = useState(initialMessageId || null)
   const [analyzing, setAnalyzing] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editText, setEditText] = useState('')
@@ -55,8 +58,12 @@ export default function RLHF({ toast, loadStats: parentLoadStats }) {
 
   const loadRLHF = async () => {
     try {
-      const data = await api('/api/rlhf/queue')
-      setMessages(data || [])
+      const [u, r] = await Promise.all([
+        api('/api/rlhf/queue?filter=unrated'),
+        api('/api/rlhf/queue?filter=rated'),
+      ])
+      setUnrated(u || [])
+      setRated(r || [])
     } catch (e) {
       console.warn('Erro ao carregar fila RLHF:', e)
     }
@@ -68,6 +75,25 @@ export default function RLHF({ toast, loadStats: parentLoadStats }) {
     loadRLHF()
     loadPreview()
   }, [])
+
+  // Foco vindo do botão "Editar mensagem" (aba WhatsApp): abre a mensagem na aba certa,
+  // com o editor e o prompt já visíveis, e rola até ela.
+  useEffect(() => {
+    if (!focusId) return
+    const inUnrated = unrated.find(m => m.id === focusId)
+    const inRated = rated.find(m => m.id === focusId)
+    const found = inUnrated || inRated
+    if (!found) return
+    setTab(inUnrated ? 'unrated' : 'rated')
+    setEditingId(found.id)
+    setEditText(found.content)
+    if (promptFor !== found.id) viewPrompt(found.id)
+    setFocusId(null)
+    setTimeout(() => {
+      const el = document.getElementById(`rlhf-msg-${found.id}`)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 120)
+  }, [unrated, rated, focusId]) // eslint-disable-line
 
   const triggerAnalysis = async () => {
     setAnalyzing(true)
@@ -91,10 +117,11 @@ export default function RLHF({ toast, loadStats: parentLoadStats }) {
   const scoreMsgRLHF = async (id, score) => {
     try {
       await api(`/api/messages/${id}/score`, 'POST', { score })
-      setMessages(msgs => msgs.map(m => m.id === id ? { ...m, score } : m))
-      toast(`Score ${score}★`)
+      await loadRLHF()
+      loadLearnStats()
+      toast(score >= 4 ? '👍 Marcada como boa' : '👎 Marcada como ruim')
     } catch (e) {
-      toast('Erro ao dar score', 'danger')
+      toast('Erro ao avaliar', 'danger')
     }
   }
 
@@ -145,6 +172,7 @@ export default function RLHF({ toast, loadStats: parentLoadStats }) {
 
   const totalExamples = stats ? (stats.approved_examples || []).reduce((sum, e) => sum + e.total, 0) : 0
   const patternsCount = stats ? (stats.learned_patterns || []).length : 0
+  const messages = tab === 'rated' ? rated : unrated
 
   return (
     <div className="tab-container">
@@ -319,35 +347,46 @@ export default function RLHF({ toast, loadStats: parentLoadStats }) {
           })()}
         </div>
 
-        {/*  ── Fila de Curadoria ───────────────────────────────────────────────────  */}
+        {/*  ── Curadoria de Mensagens ──────────────────────────────────────────────  */}
         <div className="card p-3">
           <div className="d-flex justify-content-between mb-3">
-            <h6 className="fw-bold mb-0"><i className="bi bi-stars me-1"></i>Fila de Curadoria — Mensagens aguardando revisão humana</h6>
+            <h6 className="fw-bold mb-0"><i className="bi bi-stars me-1"></i>Curadoria de Mensagens</h6>
             <button className="btn btn-outline-secondary btn-sm" onClick={loadRLHF}>
               <i className="bi bi-arrow-clockwise"></i>
             </button>
           </div>
-          
+
+          <ul className="nav nav-tabs mb-3">
+            <li className="nav-item">
+              <button className={`nav-link ${tab === 'unrated' ? 'active' : ''}`} onClick={() => setTab('unrated')}>
+                Não avaliadas <span className="badge bg-secondary ms-1">{unrated.length}</span>
+              </button>
+            </li>
+            <li className="nav-item">
+              <button className={`nav-link ${tab === 'rated' ? 'active' : ''}`} onClick={() => setTab('rated')}>
+                Já avaliadas <span className="badge bg-secondary ms-1">{rated.length}</span>
+              </button>
+            </li>
+          </ul>
+
           <div>
             {messages.length === 0 ? (
-              <p className="text-muted">Nenhuma mensagem aguardando revisão.</p>
+              <p className="text-muted">{tab === 'unrated' ? 'Nenhuma mensagem pendente de avaliação.' : 'Nenhuma mensagem avaliada ainda.'}</p>
             ) : (
               messages.map(m => (
-                <div key={m.id} className="border rounded mb-3 p-3">
+                <div key={m.id} id={`rlhf-msg-${m.id}`} className={`border rounded mb-3 p-3 ${editingId === m.id ? 'border-primary' : ''}`}>
                   <div className="d-flex justify-content-between mb-2 flex-wrap gap-2">
                     <span>
-                      {chIcon[m.channel] || ''} <strong>{esc(m.company_name || '—')}</strong> — {esc(m.contact_name || '—')} ({m.contact_role || '—'}) — Dia {m.day}
+                      {chIcon[m.channel] || ''} <strong>{esc(m.company_name || '—')}</strong> — {esc(m.contact_name || '—')} ({m.contact_role || '—'})
+                      {m.created_at && <span className="text-muted ms-2" style={{ fontSize: '.75rem' }}><i className="bi bi-clock me-1"></i>{new Date(m.created_at.replace(' ', 'T') + 'Z').toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</span>}
                     </span>
                     <div className="d-flex gap-1">
-                      {[1, 2, 3, 4, 5].map(n => (
-                        <button 
-                          key={n}
-                          className={`btn btn-sm ${m.score === n ? 'btn-warning' : 'btn-outline-warning'}`} 
-                          onClick={() => scoreMsgRLHF(m.id, n)}
-                        >
-                          {n}★
-                        </button>
-                      ))}
+                      <button className={`btn btn-sm ${m.score >= 4 ? 'btn-success' : 'btn-outline-success'}`} onClick={() => scoreMsgRLHF(m.id, 5)} title="Marcar como boa">
+                        <i className="bi bi-hand-thumbs-up"></i>
+                      </button>
+                      <button className={`btn btn-sm ${m.score != null && m.score <= 2 ? 'btn-danger' : 'btn-outline-danger'}`} onClick={() => scoreMsgRLHF(m.id, 1)} title="Marcar como ruim">
+                        <i className="bi bi-hand-thumbs-down"></i>
+                      </button>
                     </div>
                   </div>
                   

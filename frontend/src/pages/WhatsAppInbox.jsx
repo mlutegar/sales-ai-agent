@@ -172,14 +172,87 @@ function timeAgo(dateStr) {
   return `${Math.floor(h / 24)}d`
 }
 
+// ── Painel de contexto do lead (ao lado da conversa) ───────────────────────────
+function LeadContextPanel({ contactId, contactName, initialContext, toast }) {
+  const [savedCtx, setSavedCtx] = useState(initialContext || '')
+  const [ctx, setCtx]           = useState(initialContext || '')
+  const [open, setOpen]         = useState(false)
+  const [saving, setSaving]     = useState(false)
+  const hasContext = !!(savedCtx && savedCtx.trim())
+
+  async function save() {
+    setSaving(true)
+    try {
+      const res = await fetch(`${API}/api/contacts/${contactId}/context`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ context: ctx }),
+      })
+      const d = await res.json()
+      if (d.error) throw new Error(d.error)
+      setSavedCtx(ctx)
+      setOpen(false)
+      toast('Contexto do lead salvo!', 'success')
+    } catch (e) { toast(e.message || 'Erro ao salvar contexto', 'danger') }
+    setSaving(false)
+  }
+
+  return (
+    <div style={{ border: '1px solid #e2e8f0', borderRadius: 10, padding: 12 }}>
+      <div className="fw-semibold mb-2" style={{ fontSize: '.82rem', color: '#075e54' }}>
+        <i className="bi bi-person-lines-fill me-1" />Contexto do lead
+      </div>
+      {!open && (
+        <>
+          {hasContext ? (
+            <div style={{ fontSize: '.76rem', color: '#444', whiteSpace: 'pre-wrap', maxHeight: 120, overflowY: 'auto', background: '#f8f9fa', border: '1px solid #eee', borderRadius: 6, padding: 8 }}>
+              {savedCtx}
+            </div>
+          ) : (
+            <div style={{ fontSize: '.76rem', color: '#999' }}>Sem contexto ainda para este lead.</div>
+          )}
+          <button className="btn btn-outline-primary btn-sm w-100 mt-2" style={{ fontSize: '.75rem' }} onClick={() => { setCtx(savedCtx); setOpen(true) }}>
+            <i className={`bi ${hasContext ? 'bi-pencil' : 'bi-plus-lg'} me-1`} />{hasContext ? 'Editar contexto' : 'Adicionar contexto'}
+          </button>
+        </>
+      )}
+      {open && (
+        <>
+          <textarea
+            className="form-control form-control-sm"
+            rows={5}
+            placeholder="Quem é essa pessoa, como falar com ela, o que importa pra ela... (personaliza o gancho e ajuda a lembrar quem é o lead)"
+            value={ctx}
+            onChange={e => setCtx(e.target.value)}
+            style={{ fontSize: '.78rem' }}
+          />
+          <div className="d-flex gap-2 mt-1">
+            <button className="btn btn-primary btn-sm" style={{ fontSize: '.72rem' }} onClick={save} disabled={saving}>
+              {saving ? 'Salvando…' : 'Salvar'}
+            </button>
+            <button className="btn btn-outline-secondary btn-sm" style={{ fontSize: '.72rem' }} onClick={() => { setCtx(savedCtx); setOpen(false) }} disabled={saving}>
+              Cancelar
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 // ── Chat panel ────────────────────────────────────────────────────────────────
-function ChatPanel({ companyId, toast }) {
+function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
   const [data,            setData]            = useState(null)
   const [simulateText,    setSimulateText]    = useState('')
   const [simulateTone,    setSimulateTone]    = useState('random')
   const [sentimentResult, setSentimentResult] = useState(null)
   const [autoReplyMode,   setAutoReplyMode]   = useState('off')
-  const [selectedContact, setSelectedContact] = useState('')
+  const [selectedContact, setSelectedContact] = useState(initialContactId ? String(initialContactId) : '')
+  const [product,     setProduct]     = useState('')
+  const [hook,        setHook]        = useState('')
+  const [loadingHook, setLoadingHook] = useState(false)
+  const [composeText, setComposeText] = useState('')
+  const [sending,     setSending]     = useState(false)
   const [loadingSeq,      setLoadingSeq]      = useState(false)
   const [loadingSim,      setLoadingSim]      = useState(false)
   const [loadingBot,      setLoadingBot]      = useState(false)
@@ -209,7 +282,8 @@ function ChatPanel({ companyId, toast }) {
     setData(null)
     setSentimentResult(null)
     setSimulateText('')
-    setSelectedContact('')
+    setSelectedContact(initialContactId ? String(initialContactId) : '')
+    setHook('')
     load()
   }, [companyId]) // eslint-disable-line
 
@@ -244,7 +318,7 @@ function ChatPanel({ companyId, toast }) {
     }
   }
   async function scoreMessage(msgId, n) {
-    if (await saveFeedback(msgId, { score: n })) toast(`Avaliada com ${n}★`, 'success')
+    if (await saveFeedback(msgId, { score: n })) toast(n >= 4 ? '👍 Marcada como boa' : '👎 Marcada como ruim — use "Editar mensagem" para corrigir e treinar', 'success')
   }
   function openComment(msg) {
     setCommentFor(msg.id)
@@ -278,6 +352,50 @@ function ChatPanel({ companyId, toast }) {
       toast('Sequência gerada!', 'success')
     } catch (e) { toast(e.message || 'Erro ao gerar sequência.', 'danger') }
     setLoadingSeq(false)
+  }
+
+  async function sendMessage() {
+    if (!composeText.trim()) { toast('Escreva a mensagem.', 'warning'); return }
+    if (!selectedContact) { toast('Selecione um contato.', 'warning'); return }
+    setSending(true)
+    try {
+      const res = await fetch(`${API}/api/companies/${companyId}/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contact_id: Number(selectedContact), content: composeText.trim() }),
+      })
+      const d = await res.json()
+      if (d.error) throw new Error(d.error)
+      setComposeText('')
+      await load()
+    } catch (e) { toast(e.message || 'Erro ao enviar mensagem.', 'danger') }
+    setSending(false)
+  }
+
+  async function generateHook() {
+    if (!selectedContact) { toast('Selecione um contato.', 'warning'); return }
+    if (!product.trim()) { toast('Informe o produto.', 'warning'); return }
+    setLoadingHook(true)
+    try {
+      const res = await fetch(`${API}/api/companies/${companyId}/research`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ product_value: product, contact_id: Number(selectedContact) }),
+      })
+      const d = await res.json()
+      if (d.error) throw new Error(d.error)
+      // Cria a mensagem como RASCUNHO PENDENTE na conversa — avaliável/editável antes de enviar.
+      const mres = await fetch(`${API}/api/companies/${companyId}/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contact_id: Number(selectedContact), content: d.hook || '', status: 'pending' }),
+      })
+      const md = await mres.json()
+      if (md.error) throw new Error(md.error)
+      await load()
+      toast('Gancho gerado como rascunho — avalie (👍/👎), edite se precisar e clique "Aprovar" para enviar.', 'success')
+    } catch (e) { toast(e.message || 'Erro ao gerar gancho.', 'danger') }
+    setLoadingHook(false)
   }
 
   async function generateProspectReply() {
@@ -474,7 +592,7 @@ function ChatPanel({ companyId, toast }) {
                         ✓ Aprovar
                       </button>
                     )}
-                    {!isInbound && msg.approved && msg.status !== 'sent' && (
+                    {!isInbound && msg.approved === 1 && msg.status !== 'sent' && (
                       <button className="btn btn-primary" style={{ fontSize: '.65rem', padding: '1px 7px', borderRadius: 20 }} onClick={() => markSent(msg.id)}>
                         <i className="bi bi-send me-1" />Enviada
                       </button>
@@ -486,24 +604,29 @@ function ChatPanel({ companyId, toast }) {
                     )}
                     {!isInbound && (
                       <span className="d-flex align-items-center gap-1">
-                        {[1, 2, 3, 4, 5].map(n => (
-                          <button
-                            key={n}
-                            className={`btn ${msg.score === n ? 'btn-warning' : 'btn-outline-warning'}`}
-                            style={{ fontSize: '.65rem', padding: '1px 5px', borderRadius: 20 }}
-                            onClick={() => scoreMessage(msg.id, n)}
-                            title={`Avaliar com ${n} estrela${n > 1 ? 's' : ''}`}
-                          >
-                            {n}★
-                          </button>
-                        ))}
                         <button
-                          className={`btn ${msg.score_comment ? 'btn-info' : 'btn-outline-info'}`}
-                          style={{ fontSize: '.65rem', padding: '1px 7px', borderRadius: 20 }}
-                          onClick={() => (commentFor === msg.id ? setCommentFor(null) : openComment(msg))}
-                          title={msg.score_comment ? 'Editar comentário da nota' : 'Comentar o motivo da nota'}
+                          className={`btn ${msg.score >= 4 ? 'btn-success' : 'btn-outline-success'}`}
+                          style={{ fontSize: '.72rem', padding: '1px 9px', borderRadius: 20 }}
+                          onClick={() => scoreMessage(msg.id, 5)}
+                          title="Mensagem boa"
                         >
-                          <i className="bi bi-chat-left-text" />
+                          <i className="bi bi-hand-thumbs-up" />
+                        </button>
+                        <button
+                          className={`btn ${msg.score != null && msg.score <= 2 ? 'btn-danger' : 'btn-outline-danger'}`}
+                          style={{ fontSize: '.72rem', padding: '1px 9px', borderRadius: 20 }}
+                          onClick={() => scoreMessage(msg.id, 1)}
+                          title="Mensagem ruim"
+                        >
+                          <i className="bi bi-hand-thumbs-down" />
+                        </button>
+                        <button
+                          className="btn btn-outline-secondary"
+                          style={{ fontSize: '.65rem', padding: '1px 8px', borderRadius: 20 }}
+                          onClick={() => onEditMessage && onEditMessage(msg.id)}
+                          title="Editar a mensagem e ver/ajustar o prompt (vai para RLHF / Curadoria)"
+                        >
+                          <i className="bi bi-pencil me-1" />Editar mensagem
                         </button>
                       </span>
                     )}
@@ -551,10 +674,60 @@ function ChatPanel({ companyId, toast }) {
           })}
           <div ref={bottomRef} />
         </div>
+
+        {/* compor + enviar mensagem */}
+        <div style={{ padding: '8px 12px', borderTop: '1px solid #e2e8f0', background: '#fff', flexShrink: 0, display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+          <textarea
+            className="form-control form-control-sm"
+            rows={2}
+            placeholder="Escreva a mensagem para o lead… (ou gere um gancho ao lado e clique em 'Usar como mensagem')"
+            value={composeText}
+            onChange={e => setComposeText(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
+            style={{ fontSize: '.85rem', resize: 'none' }}
+            disabled={sending || !selectedContact}
+          />
+          <button className="btn btn-success btn-sm" onClick={sendMessage} disabled={sending || !composeText.trim() || !selectedContact} style={{ whiteSpace: 'nowrap' }}>
+            {sending ? <span className="spinner-border spinner-border-sm" /> : <><i className="bi bi-send me-1" />Enviar</>}
+          </button>
+        </div>
       </div>
 
       {/* ── Painel de Ações ──────────────────────────────────────────────── */}
       <div style={{ width: 280, flexShrink: 0, overflowY: 'auto', background: '#fff', padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+        {/* Contexto do lead */}
+        {selectedContact && (
+          <LeadContextPanel
+            key={selectedContact}
+            contactId={selectedContact}
+            contactName={selectedContactObj?.name}
+            initialContext={selectedContactObj?.context || ''}
+            toast={toast}
+          />
+        )}
+
+        {/* Gerar gancho */}
+        <div style={{ border: '1px solid #e2e8f0', borderRadius: 10, padding: 12 }}>
+          <div className="fw-semibold mb-2" style={{ fontSize: '.82rem', color: '#075e54' }}>
+            <i className="bi bi-lightning me-1" />Gerar Gancho
+          </div>
+          <input
+            className="form-control form-control-sm mb-2"
+            placeholder="Produto sendo vendido"
+            value={product}
+            onChange={e => setProduct(e.target.value)}
+            style={{ fontSize: '.78rem' }}
+          />
+          <button className="btn btn-outline-success btn-sm w-100" onClick={generateHook} disabled={loadingHook || !selectedContact}>
+            {loadingHook
+              ? <><span className="spinner-border spinner-border-sm me-1" />Pesquisando…</>
+              : <><i className="bi bi-stars me-1" />Gerar gancho (vira rascunho)</>}
+          </button>
+          <div className="text-muted mt-1" style={{ fontSize: '.7rem' }}>
+            O gancho entra na conversa como rascunho pendente — avalie e edite antes de enviar.
+          </div>
+        </div>
 
         {/* Gerar sequência */}
         <div style={{ border: '1px solid #e2e8f0', borderRadius: 10, padding: 12 }}>
@@ -694,7 +867,7 @@ function ChatPanel({ companyId, toast }) {
 }
 
 // ── Inbox principal ───────────────────────────────────────────────────────────
-export default function WhatsAppInbox({ toast, initialCompanyId }) {
+export default function WhatsAppInbox({ toast, initialCompanyId, initialContactId, onEditMessage }) {
   const [inbox,      setInbox]      = useState([])
   const [selected,   setSelected]   = useState(initialCompanyId ?? null)
   const [loading,    setLoading]    = useState(true)
@@ -818,7 +991,7 @@ export default function WhatsAppInbox({ toast, initialCompanyId }) {
       {/* ── Painel direito ─────────────────────────────────────────────────── */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {selected ? (
-          <ChatPanel key={selected} companyId={selected} toast={toast} />
+          <ChatPanel key={selected} companyId={selected} initialContactId={selected === initialCompanyId ? initialContactId : null} onEditMessage={onEditMessage} toast={toast} />
         ) : (
           <div className="d-flex flex-column justify-content-center align-items-center h-100 text-center" style={{ color: '#aaa' }}>
             <i className="bi bi-whatsapp" style={{ fontSize: '3rem', color: '#25d366', opacity: .4, display: 'block', marginBottom: 12 }} />

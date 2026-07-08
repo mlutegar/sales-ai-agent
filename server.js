@@ -1285,6 +1285,29 @@ app.put('/api/contacts/:id/context', (req, res) => {
   res.json({ ok: true, context });
 });
 
+// Envia uma mensagem de WhatsApp avulsa na conversa (mensagem de saída, nossa).
+// Usado no workspace da aba WhatsApp para iniciar/continuar a conversa com o lead
+// sem precisar gerar a sequência multicanal.
+app.post('/api/companies/:id/message', (req, res) => {
+  const content = (req.body.content || '').toString().trim();
+  if (!content) return res.status(400).json({ error: 'Mensagem vazia' });
+  const db = getDb();
+  const contact = req.body.contact_id
+    ? db.prepare('SELECT * FROM contacts WHERE id=? AND company_id=?').get(req.body.contact_id, req.params.id)
+    : db.prepare('SELECT * FROM contacts WHERE company_id=? AND is_primary=1').get(req.params.id)
+      || db.prepare('SELECT * FROM contacts WHERE company_id=? LIMIT 1').get(req.params.id);
+  if (!contact) { db.close(); return res.status(404).json({ error: 'Contato não encontrado' }); }
+  const prompt_used = (req.body.prompt_used || '').toString() || null;
+  // status: 'pending' = rascunho (avaliável/editável antes de enviar) | 'sent' = enviada direto.
+  const status = req.body.status === 'pending' ? 'pending' : 'sent';
+  const approved = status === 'sent' ? 1 : 0;
+  const r = db.prepare(
+    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at, prompt_used) VALUES (?,?,'whatsapp',1,'text',?,?,?,?,datetime('now'),?)"
+  ).run(contact.id, req.params.id, content, content, status, approved, prompt_used);
+  db.close();
+  res.json({ ok: true, id: r.lastInsertRowid, status });
+});
+
 // ── Ações em lote (bulk actions) ─────────────────────────────────────────────
 
 // Atualizar status de várias empresas
@@ -2027,28 +2050,10 @@ Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou
     .run(companyId, contact_id, receivedMsgId, notifType, notifTitle, response_text);
   db2.close();
 
-  // 4. Auto-reply — respeita o auto_reply_mode da empresa, igual ao webhook real.
-  //    Bot ativo → grava como 'sent'. Bot off → grava rascunho 'pending' para revisão manual.
-  let autoReplyStatus = null;
-  if (sentiment === 'interested' || sentiment === 'technical_question') {
-    const autoMode = company?.auto_reply_mode || 'off';
-    const botActive = autoMode === 'all' || autoMode === 'except_meeting';
-    const draftPrompt = sentiment === 'technical_question'
-      ? `O prospect enviou: "${response_text}"\nEle tem uma dúvida técnica. Escreva uma resposta curta (máx 80 palavras) que responda de forma objetiva e convide para uma conversa de 15 minutos para aprofundar. Tom consultivo.`
-      : `O prospect enviou: "${response_text}"\nEle demonstrou interesse. Escreva uma resposta curta (máx 60 palavras) que confirme o interesse e proponha uma reunião de 15 minutos. Tom entusiasmado mas profissional.`;
-    const draft_reply = await callClaude('Você é SDR especialista em respostas rápidas para prospects interessados.', draftPrompt, 200);
-
-    const status   = botActive ? 'sent' : 'pending';
-    const approved = botActive ? 1 : 0;
-    autoReplyStatus = status;
-    const db3 = getDb();
-    db3.prepare(
-      "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, ?, ?, datetime('now'))"
-    ).run(contact_id, companyId, draft_reply, draft_reply, status, approved);
-    db3.close();
-  }
-
-  res.json({ ok: true, sentiment, interest_score: iscore, auto_reply_status: autoReplyStatus });
+  // Modo treino: NÃO gera a resposta do bot automaticamente. A resposta da IA é criada
+  // só quando o operador clica em "Simular resposta do Bot" / "Responder com IA" — assim
+  // cada mensagem gerada pela IA é um passo explícito e revisável (nada escapa da avaliação).
+  res.json({ ok: true, sentiment, interest_score: iscore, auto_reply_status: null });
 });
 
 // Simula a resposta do BOT (IA em treinamento) para a última mensagem recebida.
@@ -2075,11 +2080,9 @@ app.post('/api/companies/:id/simulator/bot-reply', async (req, res) => {
   const draftPrompt = `O prospect enviou: "${lastMsg}"\nEscreva a resposta do vendedor (bot) via WhatsApp: curta (máx 80 palavras), objetiva, tom consultivo e profissional. Se fizer sentido, convide para uma conversa de 15 minutos. Escreva APENAS o texto da mensagem.`;
   const draft_reply = await callClaude('Você é SDR especialista em respostas rápidas para prospects.', draftPrompt, 200);
 
-  // Bot ativo → 'sent'; bot off → 'pending' (revisão). Mesma semântica do inbound.
-  const autoMode = company?.auto_reply_mode || 'off';
-  const botActive = autoMode === 'all' || autoMode === 'except_meeting';
-  const status   = botActive ? 'sent' : 'pending';
-  const approved = botActive ? 1 : 0;
+  // Modo treino: resposta do bot sempre como rascunho pendente para revisão/avaliação.
+  const status   = 'pending';
+  const approved = 0;
 
   const db2 = getDb();
   const ins = db2.prepare(
@@ -2679,14 +2682,18 @@ app.get('/api/consent-logs', (req, res) => {
 
 // RLHF
 app.get('/api/rlhf/queue', (req, res) => {
+  // filter: 'unrated' (não avaliadas — sem 👍/👎) | 'rated' (já avaliadas)
+  // Considera apenas mensagens geradas pela IA (saída), nunca as recebidas do prospect.
+  const filter = req.query.filter === 'rated' ? 'rated' : 'unrated';
+  const scoreCond = filter === 'rated' ? 'm.score IS NOT NULL' : 'm.score IS NULL';
   const db = getDb();
   res.json(db.prepare(`
     SELECT m.*, co.name as company_name, co.sector as company_sector, ct.name as contact_name, ct.role as contact_role
     FROM messages m
     LEFT JOIN companies co ON m.company_id = co.id
     LEFT JOIN contacts ct ON m.contact_id = ct.id
-    WHERE m.approved=0 AND m.status='pending'
-    ORDER BY m.id DESC
+    WHERE m.status != 'received' AND ${scoreCond}
+    ORDER BY COALESCE(m.created_at, '') DESC, m.id DESC
   `).all());
   db.close();
 });
