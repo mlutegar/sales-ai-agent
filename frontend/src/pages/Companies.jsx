@@ -995,7 +995,7 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
           companyIds={bulkModal.ids}
           toast={toast}
           onClose={() => setBulkModal(null)}
-          onDone={() => { loadCompanies(); if (loadStats) loadStats(); }}
+          onDone={() => { loadCompanies(); if (loadStats) loadStats(); setSelected([]); }}
         />
       )}
 
