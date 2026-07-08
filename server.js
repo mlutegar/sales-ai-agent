@@ -619,10 +619,9 @@ const ROLE_PROFILES = {
   other:    { focus: 'benefícios gerais e facilidade de uso',             tone: 'amigável e claro' },
 };
 
+// Foco 100% WhatsApp: a geração (single e bulk) produz apenas mensagem de WhatsApp.
 const SEQUENCE_CHANNELS = [
-  { day: 1, channel: 'linkedin', type: 'connection_request' },
-  { day: 3, channel: 'email',    type: 'first_outreach' },
-  { day: 5, channel: 'whatsapp', type: 'follow_up' },
+  { day: 1, channel: 'whatsapp', type: 'first_outreach' },
 ];
 
 // ── Flags/Etiquetas de empresa ────────────────────────────────────────────────
@@ -2692,7 +2691,7 @@ app.get('/api/rlhf/queue', (req, res) => {
     FROM messages m
     LEFT JOIN companies co ON m.company_id = co.id
     LEFT JOIN contacts ct ON m.contact_id = ct.id
-    WHERE m.status != 'received' AND ${scoreCond}
+    WHERE m.status != 'received' AND m.channel = 'whatsapp' AND ${scoreCond}
     ORDER BY COALESCE(m.created_at, '') DESC, m.id DESC
   `).all());
   db.close();

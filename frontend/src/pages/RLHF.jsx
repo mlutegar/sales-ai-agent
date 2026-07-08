@@ -11,7 +11,7 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
   const [analyzing, setAnalyzing] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editText, setEditText] = useState('')
-  const [pvChannel, setPvChannel] = useState('email')
+  const [pvChannel, setPvChannel] = useState('whatsapp')
   const [pvRole, setPvRole] = useState('c_level')
   const [preview, setPreview] = useState(null)
   const [promptFor, setPromptFor] = useState(null)
@@ -451,8 +451,6 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
             <div className="d-flex gap-2 align-items-center">
               <select className="form-select form-select-sm" style={{width: 'auto'}} value={pvChannel}
                 onChange={e => { setPvChannel(e.target.value); loadPreview(e.target.value, pvRole) }}>
-                <option value="linkedin">LinkedIn</option>
-                <option value="email">Email</option>
                 <option value="whatsapp">WhatsApp</option>
               </select>
               <select className="form-select form-select-sm" style={{width: 'auto'}} value={pvRole}

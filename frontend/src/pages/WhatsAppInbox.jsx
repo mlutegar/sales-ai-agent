@@ -729,30 +729,6 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
           </div>
         </div>
 
-        {/* Gerar sequência */}
-        <div style={{ border: '1px solid #e2e8f0', borderRadius: 10, padding: 12 }}>
-          <div className="fw-semibold mb-2" style={{ fontSize: '.82rem', color: '#075e54' }}>
-            <i className="bi bi-lightning-charge me-1" />Gerar Sequência
-          </div>
-          {contacts.length > 0 ? (
-            <>
-              <select
-                className="form-select form-select-sm mb-2"
-                value={selectedContact}
-                onChange={e => setSelectedContact(e.target.value)}
-              >
-                {contacts.map(c => (
-                  <option key={c.id} value={c.id}>{c.name}{c.is_primary ? ' ★' : ''}</option>
-                ))}
-              </select>
-              <button className="btn btn-success btn-sm w-100" onClick={generateSequence} disabled={loadingSeq}>
-                {loadingSeq ? <span className="spinner-border spinner-border-sm" /> : <><i className="bi bi-stars me-1" />Gerar</>}
-              </button>
-            </>
-          ) : (
-            <div style={{ fontSize: '.78rem', color: '#888' }}>Adicione um contato primeiro.</div>
-          )}
-        </div>
 
         {/* Bot auto-reply */}
         <div style={{ border: '1px solid #e2e8f0', borderRadius: 10, padding: 12 }}>
