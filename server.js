@@ -1056,7 +1056,10 @@ app.post('/api/companies', (req, res) => {
   const { name, sector, contact_name, contact_role, contact_email, contact_linkedin, contact_whatsapp } = req.body;
   if (!name) return res.status(400).json({ error: 'Nome da empresa é obrigatório' });
   const db = getDb();
-  const dup = db.prepare('SELECT id FROM companies WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))').get(name);
+  // Deduplicação por chave normalizada (ignora acento/caixa/espaços):
+  // "Itaú" e "Itau" são tratadas como a mesma empresa.
+  const nameKey = normalizeCompanyKey(name);
+  const dup = db.prepare('SELECT id, name FROM companies').all().find((c) => normalizeCompanyKey(c.name) === nameKey);
   if (dup) { db.close(); return res.status(409).json({ error: 'Empresa já cadastrada', existing_id: dup.id }); }
   // Valida e-mail do primeiro contato antes de criar a empresa (evita órfã).
   if (contact_name && contact_name.trim() && contact_email && !isValidEmailServer(contact_email)) {
