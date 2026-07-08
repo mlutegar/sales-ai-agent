@@ -10,7 +10,7 @@ const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DB_PATH = path.join(__dirname, 'prototype.db');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'prototype.db');
 
 // ── DB helper ─────────────────────────────────────────────────────────────────
 function getDb() {
@@ -24,7 +24,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.use(session({
   store: new FileStore({
-    path: path.join(__dirname, '.sessions'),
+    path: process.env.SESSIONS_PATH || path.join(__dirname, '.sessions'),
     ttl: 28800, // 8 horas em segundos
     retries: 1,
   }),
