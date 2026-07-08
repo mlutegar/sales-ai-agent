@@ -121,6 +121,15 @@ function isValidEmailServer(email) {
   return /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(email.trim());
 }
 
+// Chave de deduplicação de empresa: ignora acentos, caixa e espaços,
+// para que "Itaú", "Itau" e "ITAÚ " sejam tratados como a mesma empresa.
+function normalizeCompanyKey(name) {
+  return String(name ?? '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
 function normalizePhone(phone) {
   if (!phone || !phone.trim()) return '';
   const digits = phone.replace(/\D/g, '');
@@ -1090,7 +1099,6 @@ app.post('/api/companies/import-bulk', (req, res) => {
   const newCompanyIds = [];
   const errors = [];
 
-  const findCompany   = db.prepare('SELECT id FROM companies WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))');
   const insCompany    = db.prepare('INSERT INTO companies (name, sector, import_source) VALUES (?, ?, ?)');
   const logCompany    = db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?,?,?)');
   const findContact   = db.prepare("SELECT id FROM contacts WHERE email != '' AND email=? AND company_id=?");
@@ -1099,20 +1107,27 @@ app.post('/api/companies/import-bulk', (req, res) => {
   const insContact    = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, import_source) VALUES (?,?,?,?,?,?,?,?)');
   const logContact    = db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)');
 
+  // Mapa de deduplicação por chave normalizada (ignora acento/caixa/espaços).
+  // Evita que "Itaú" e "Itau" virem duas empresas diferentes.
+  const companyKeyMap = new Map();
+  for (const c of db.prepare('SELECT id, name FROM companies').all()) {
+    const k = normalizeCompanyKey(c.name);
+    if (!companyKeyMap.has(k)) companyKeyMap.set(k, c.id);
+  }
+
   for (const row of rows) {
     const companyName = (row.company || '').toString().trim();
     if (!companyName) { skipped++; continue; }
 
-    let comp = findCompany.get(companyName);
-    let companyId;
-    const isNew = !comp;
-    if (comp) {
-      companyId = comp.id;
-    } else {
+    const companyKey = normalizeCompanyKey(companyName);
+    let companyId = companyKeyMap.get(companyKey);
+    const isNew = companyId === undefined;
+    if (isNew) {
       companyId = insCompany.run(companyName, (row.sector || '').toString().trim(), importSource).lastInsertRowid;
       logCompany.run(companyId, 'company_added', `Empresa "${companyName}" importada (${importSource || 'planilha'})`);
       companiesCreated++;
       newCompanyIds.push(companyId);
+      companyKeyMap.set(companyKey, companyId);
     }
 
     const contactName = (row.contact_name || '').toString().trim();
