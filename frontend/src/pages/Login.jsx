@@ -74,28 +74,28 @@ export default function Login({ toast }) {
         <form onSubmit={handleSubmit}>
           <div className="mb-3">
             <label style={{ color: '#344054', fontSize: '.85rem', fontWeight: 500, marginBottom: 6, display: 'block' }}>Usuário</label>
-            <div className="input-group">
+            <div className="input-group" style={{ flexWrap: 'nowrap' }}>
               <span style={{ background: '#f9fafb', border: '1px solid #d6dae1', borderRight: 'none', color: '#667085', borderRadius: '8px 0 0 8px', padding: '0 .75rem', display: 'flex', alignItems: 'center' }}>
                 <i className="bi bi-person-fill" />
               </span>
               <input
                 type="text" value={username} onChange={e => setUsername(e.target.value)}
                 placeholder="Digite seu usuário" required autoFocus
-                style={{ background: '#fff', border: '1px solid #d6dae1', borderLeft: 'none', color: '#1a2233', borderRadius: '0 8px 8px 0', padding: '.65rem 1rem', width: '100%', outline: 'none' }}
+                style={{ background: '#fff', border: '1px solid #d6dae1', borderLeft: 'none', color: '#1a2233', borderRadius: '0 8px 8px 0', padding: '.65rem 1rem', flex: 1, minWidth: 0, outline: 'none' }}
               />
             </div>
           </div>
 
           <div className="mb-3">
             <label style={{ color: '#344054', fontSize: '.85rem', fontWeight: 500, marginBottom: 6, display: 'block' }}>Senha</label>
-            <div className="input-group">
+            <div className="input-group" style={{ flexWrap: 'nowrap' }}>
               <span style={{ background: '#f9fafb', border: '1px solid #d6dae1', borderRight: 'none', color: '#667085', borderRadius: '8px 0 0 8px', padding: '0 .75rem', display: 'flex', alignItems: 'center' }}>
                 <i className="bi bi-lock-fill" />
               </span>
               <input
                 type={showPwd ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)}
                 placeholder="Digite sua senha" required
-                style={{ background: '#fff', border: '1px solid #d6dae1', borderLeft: 'none', borderRight: 'none', color: '#1a2233', padding: '.65rem 1rem', flex: 1, outline: 'none' }}
+                style={{ background: '#fff', border: '1px solid #d6dae1', borderLeft: 'none', borderRight: 'none', color: '#1a2233', padding: '.65rem 1rem', flex: 1, minWidth: 0, outline: 'none' }}
               />
               <button type="button" onClick={() => setShowPwd(!showPwd)}
                 style={{ background: '#fff', border: '1px solid #d6dae1', borderLeft: 'none', color: '#667085', borderRadius: '0 8px 8px 0', padding: '0 .75rem', cursor: 'pointer' }}>
