@@ -1315,15 +1315,25 @@ const WA_SYSTEM = 'Você é um SDR brasileiro especialista em prospecção por W
 function buildWhatsappUserPrompt({ company, contact, observation, learned, previous }) {
   const who = `${contact?.name || 'o contato'}${contact?.role ? ` (${contact.role})` : ''}${company ? ` — empresa ${company.name}${company.sector ? `, setor ${company.sector}` : ''}` : ''}`;
   return `# Tarefa
-Escreva UMA mensagem de WhatsApp para ${who}. Objetivo: conseguir uma reunião curta. Gere uma mensagem NOVA (não edite a anterior).
-${contact?.context ? `\n# Sobre a pessoa (use para personalizar de verdade)\n${contact.context}\n` : ''}${learned ? `\n# O que o revisor humano já ensinou (aplique SEMPRE)\n${learned}\n` : ''}
-# REGRAS OBRIGATÓRIAS — o revisor reprovou mensagens que as violaram. Cumpra TODAS, sem exceção:
-${observation ? `- ${observation}` : '- (não há regra nova; gere uma versão diferente e melhor que a anterior)'}
-- Não pareça IA nem template; escreva como um humano escreve no WhatsApp.
+Gere uma nova versão de uma mensagem de WhatsApp para ${who}. Objetivo: conseguir uma reunião curta.
+
+# Mensagem atual (BASE — mantenha o mesmo assunto, o mesmo produto/oferta e o mesmo objetivo dela)
+"""${previous || '(ainda não há mensagem)'}"""
+
+${observation
+  ? `# Correção pedida pelo revisor (OBRIGATÓRIA)
+A mensagem acima foi reprovada. Corrija EXATAMENTE isto: "${observation}".
+Mude só o necessário para atender a correção — mantenha o mesmo assunto/produto e objetivo (a não ser que a correção seja justamente sobre trocar o assunto).`
+  : `# O que fazer
+NÃO houve reprovação. Gere uma VARIAÇÃO diferente da mensagem acima: mesmo assunto, mesmo produto/oferta e mesmo objetivo — mudando apenas a abordagem e a redação (abertura, ângulo, tom, estrutura). NÃO troque o tema nem remova o produto/assunto que a mensagem atual menciona.`}
+${contact?.context ? `\n# Sobre a pessoa (personalize)\n${contact.context}\n` : ''}${learned ? `\n# Regras aprendidas com o revisor (aplique SEMPRE)\n${learned}\n` : ''}
+# Regras
+- Mantenha o assunto/produto da mensagem atual.
+- Não pareça IA nem template; soe como um humano no WhatsApp.
 - Curta: no máximo ~70 palavras, uma única mensagem.
-${previous ? `\n# Versão anterior — REPROVADA (referência do que NÃO fazer; não copie)\n"""${previous}"""\n${observation ? `Motivo da reprovação: ${observation}\n` : ''}` : ''}
+
 # Checagem final (obrigatória antes de responder)
-Releia sua mensagem e confirme que NENHUMA regra obrigatória foi violada. Uma regra do tipo "não falar sobre X" significa que o tema X NÃO pode aparecer em NENHUMA frase — nem de forma indireta, nem com sinônimos. Se encontrar qualquer violação, reescreva antes de responder.
+Confirme que a nova mensagem trata do MESMO assunto/produto da mensagem atual${observation ? ' e que a correção pedida foi aplicada. Uma regra "não falar sobre X" = o tema X não pode aparecer em NENHUMA frase, nem indireta, nem com sinônimos.' : '.'} Se algo estiver errado, reescreva antes de responder.
 
 Responda APENAS com a mensagem final de WhatsApp. Sem aspas, sem título, sem comentários.`;
 }
