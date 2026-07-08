@@ -866,7 +866,7 @@ function BotAutoReplyBar({ companyId, toast }) {
     { value: 'all',            label: '🟢 Totalmente automático' },
   ]
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, padding: '8px 14px', border: '1px solid #e2e8f0', borderRadius: 10, background: '#fff', flexWrap: 'wrap' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', border: '1px solid #e2e8f0', borderRadius: 10, background: '#fff', flexWrap: 'wrap', flexShrink: 0 }}>
       <span className="fw-semibold" style={{ fontSize: '.82rem', color: '#333' }}>
         <i className="bi bi-robot me-1" />Bot Auto-reply:
       </span>
@@ -922,11 +922,9 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
   )
 
   // Altura total disponível menos navbar e statcards (~160px)
-  const panelHeight = 'calc(100vh - 220px)'
-
   return (
-    <>
-    <div style={{ display: 'flex', height: panelHeight, border: '1px solid #e2e8f0', borderRadius: 12, overflow: 'hidden', background: '#fff', boxShadow: '0 2px 8px rgba(0,0,0,.06)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)', gap: 8 }}>
+    <div style={{ display: 'flex', flex: 1, minHeight: 0, border: '1px solid #e2e8f0', borderRadius: 12, overflow: 'hidden', background: '#fff', boxShadow: '0 2px 8px rgba(0,0,0,.06)' }}>
 
       {/* ── Lista de chats ─────────────────────────────────────────────────── */}
       <div style={{ width: 280, flexShrink: 0, borderRight: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', background: '#fafafa' }}>
@@ -1028,6 +1026,6 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
       </div>
     </div>
     {selected && <BotAutoReplyBar companyId={selected} toast={toast} />}
-    </>
+    </div>
   )
 }
