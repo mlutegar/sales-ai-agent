@@ -238,3 +238,97 @@ a { color: var(--accent); }
 ::-webkit-scrollbar-thumb { background: #d4d9e0; border-radius: 99px; border: 2px solid var(--canvas); }
 ::-webkit-scrollbar-thumb:hover { background: #bfc6cf; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   Passe de acabamento — ritmo, profundidade e micro-interações
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Ritmo vertical: respiro entre o topo da janela e o conteúdo */
+@media (min-width: 769px) {
+  .app-main { padding-top: 22px; padding-bottom: 32px; }
+}
+@media (max-width: 768px) {
+  .app-main { padding-bottom: 24px; }
+  .app-main .container-fluid:first-of-type { padding-top: 14px; }
+}
+
+/* Fundo com wash sutil no topo (percebe-se, não se nota) */
+.app-shell {
+  background:
+    radial-gradient(1200px 400px at 50% -100px, rgba(29, 78, 216, .035), transparent 70%),
+    var(--canvas, #f6f7f9);
+}
+
+/* Seleção de texto na cor da marca */
+::selection { background: #dbe5fb; color: var(--ink); }
+
+/* Stat tiles: rótulo em caps acima, valor abaixo (via CSS, sem tocar no DOM),
+   hover com elevação discreta */
+.stat-card-col .card {
+  flex-direction: column-reverse;
+  gap: 2px;
+  height: 100%;
+  justify-content: center;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.stat-card-col .card:hover {
+  border-color: #d3dcf2;
+  box-shadow: var(--shadow-2);
+  transform: translateY(-1px);
+}
+.stat-card-col .small {
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  font-size: .66rem;
+  font-weight: 600;
+  color: #98a2b3;
+}
+.stat-card-col .display-6 { font-size: 1.55rem; }
+
+/* Botões: highlight interno sutil (sensação de material) + pressionar */
+.btn-primary, .btn-success, .btn-danger, .btn-info, .btn-secondary, .btn-warning {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .09), var(--shadow-1);
+}
+.btn:active { transform: translateY(.5px); }
+
+/* Tabela: hover com tinta da marca, transição suave */
+.table-hover > tbody > tr { transition: background-color .12s ease; }
+.table { --bs-table-hover-bg: #f5f8fe; }
+
+/* Cards de conteúdo: título com respiro consistente */
+.card > h6.fw-bold, .card .card-body > h6.fw-bold { color: var(--ink); }
+
+/* Inputs: hover perceptível antes do foco */
+.form-control:hover:not(:focus), .form-select:hover:not(:focus) { border-color: #c4cad3; }
+
+/* Dropdown: entrada suave */
+.dropdown-menu { animation: menuIn .12s ease-out; }
+@keyframes menuIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Modais (Bootstrap e customizados): entrada com fade + escala */
+.modal-content, .modal-pop {
+  animation: modalIn .16s cubic-bezier(.16, 1, .3, 1);
+}
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(.985) translateY(6px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* Toasts alinhados ao sistema */
+.toast { border: 1px solid var(--border); }
+
+/* Paginação: números tabulares */
+.pagination { font-variant-numeric: tabular-nums; }
+
+/* Badges de contagem: leve pill */
+.badge { font-variant-numeric: tabular-nums; }
+
+/* Focus visível para navegação por teclado em qualquer elemento interativo */
+a:focus-visible, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}

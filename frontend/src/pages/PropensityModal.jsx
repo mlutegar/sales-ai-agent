@@ -92,7 +92,7 @@ export default function PropensityModal({ mode = 'propensity', companyIds = [], 
       onClick={onClose}
     >
       <div
-        className="card shadow"
+        className="card shadow modal-pop"
         style={{ maxWidth: 720, margin: '40px auto', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}
         onClick={(e) => e.stopPropagation()}
       >
