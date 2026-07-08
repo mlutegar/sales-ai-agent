@@ -1307,6 +1307,46 @@ app.post('/api/companies/:id/message', (req, res) => {
   res.json({ ok: true, id: r.lastInsertRowid, status });
 });
 
+// "Gerar de novo": reescreve a mensagem usando a observação do avaliador + o que a IA
+// já aprendeu (buildLearnedContext). Sem observação, gera uma variação diferente.
+app.post('/api/messages/:id/regenerate', async (req, res) => {
+  const db = getDb();
+  const msg = db.prepare('SELECT * FROM messages WHERE id=?').get(req.params.id);
+  if (!msg) { db.close(); return res.status(404).json({ error: 'Mensagem não encontrada' }); }
+  const contact = msg.contact_id ? db.prepare('SELECT * FROM contacts WHERE id=?').get(msg.contact_id) : null;
+  const company = msg.company_id ? db.prepare('SELECT * FROM companies WHERE id=?').get(msg.company_id) : null;
+  const role = contact?.role || 'other';
+  const observation = (req.body.observation || msg.score_comment || '').toString().trim();
+  const learned = buildLearnedContext(db, msg.channel || 'whatsapp', role);
+  db.close();
+
+  const sys = 'Você é SDR B2B que escreve mensagens de WhatsApp curtas, humanas e naturais (nunca "cara de IA") para agendar reuniões com humanos.';
+  const userPrompt = `Reescreva a mensagem de WhatsApp abaixo.
+${company ? 'Empresa: ' + company.name + (company.sector ? ' (' + company.sector + ')' : '') : ''}
+${contact ? 'Contato: ' + contact.name + ' (' + contact.role + ')' : ''}
+${contact?.context ? 'Contexto do lead: ' + contact.context : ''}
+
+Mensagem atual (NÃO aprovada pelo revisor):
+"""${msg.content || msg.ai_original || ''}"""
+
+${observation
+  ? 'O revisor apontou o problema a seguir — CORRIJA exatamente isso: "' + observation + '"'
+  : 'Gere uma versão ALTERNATIVA, diferente da atual, tentando melhorar (a atual não agradou).'}
+${learned ? '\n' + learned : ''}
+
+Escreva só a nova mensagem de WhatsApp (curta, máx ~80 palavras, objetiva, natural). Sem aspas, sem comentários.`;
+
+  const out = await callClaude(sys, userPrompt, 400);
+  if (!out || /^\[ERRO API/.test(out)) return res.status(502).json({ error: 'Falha ao regenerar (IA indisponível)' });
+  const newText = out.trim();
+
+  const db2 = getDb();
+  db2.prepare('UPDATE messages SET content=?, ai_original=?, score=NULL, prompt_used=? WHERE id=?')
+    .run(newText, newText, userPrompt, req.params.id);
+  db2.close();
+  res.json({ ok: true, content: newText });
+});
+
 // ── Ações em lote (bulk actions) ─────────────────────────────────────────────
 
 // Atualizar status de várias empresas

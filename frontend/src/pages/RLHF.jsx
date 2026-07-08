@@ -8,6 +8,7 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
   const [unrated, setUnrated] = useState([])
   const [rated, setRated] = useState([])
   const [focusId, setFocusId] = useState(initialMessageId || null)
+  const [regenId, setRegenId] = useState(null)
   const [analyzing, setAnalyzing] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editText, setEditText] = useState('')
@@ -150,6 +151,17 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
     } catch (e) {
       toast('Erro ao salvar correção', 'danger')
     }
+  }
+
+  const regenerateRLHF = async (m) => {
+    setRegenId(m.id)
+    try {
+      const d = await api(`/api/messages/${m.id}/regenerate`, 'POST', { observation: m.score_comment || '' })
+      if (d && d.error) throw new Error(d.error)
+      toast(m.score_comment ? 'Regerada com a observação.' : 'Regerada numa versão diferente.', 'success')
+      loadRLHF()
+    } catch (e) { toast('Erro ao gerar de novo', 'danger') }
+    setRegenId(null)
   }
 
   const startEditing = (m) => {
@@ -413,6 +425,9 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
                     <div className="d-flex gap-2 mt-1">
                       <button className="btn btn-success btn-sm" onClick={() => approveMsgRLHF(m.id)}>
                         <i className="bi bi-check2 me-1"></i>Aprovar
+                      </button>
+                      <button className="btn btn-outline-success btn-sm" onClick={() => regenerateRLHF(m)} disabled={regenId === m.id} title="Gera a mensagem de novo usando a observação (se houver) e o que a IA aprendeu">
+                        {regenId === m.id ? <><span className="spinner-border spinner-border-sm me-1"></span>Gerando…</> : <><i className="bi bi-arrow-repeat me-1"></i>Gerar de novo</>}
                       </button>
                       <button className="btn btn-outline-secondary btn-sm" onClick={() => startEditing(m)}>
                         <i className="bi bi-pencil me-1"></i>Editar & Corrigir

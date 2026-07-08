@@ -253,6 +253,7 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
   const [loadingHook, setLoadingHook] = useState(false)
   const [composeText, setComposeText] = useState('')
   const [sending,     setSending]     = useState(false)
+  const [regenId,     setRegenId]     = useState(null)
   const [loadingSeq,      setLoadingSeq]      = useState(false)
   const [loadingSim,      setLoadingSim]      = useState(false)
   const [loadingBot,      setLoadingBot]      = useState(false)
@@ -318,7 +319,30 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
     }
   }
   async function scoreMessage(msgId, n) {
-    if (await saveFeedback(msgId, { score: n })) toast(n >= 4 ? '👍 Marcada como boa' : '👎 Marcada como ruim — use "Editar mensagem" para corrigir e treinar', 'success')
+    if (await saveFeedback(msgId, { score: n })) toast(n >= 4 ? '👍 Marcada como boa' : '👎 Marcada como ruim', 'success')
+  }
+
+  // 👎 = marca como ruim E abre a caixa de observação (o motivo alimenta o aprendizado).
+  function thumbsDown(msg) {
+    scoreMessage(msg.id, 1)
+    openComment(msg)
+  }
+
+  // "Gerar de novo": reescreve usando a observação (se houver) + o que a IA aprendeu.
+  async function regenerate(msg) {
+    setRegenId(msg.id)
+    try {
+      const res = await fetch(`${API}/api/messages/${msg.id}/regenerate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ observation: msg.score_comment || '' }),
+      })
+      const d = await res.json()
+      if (d.error) throw new Error(d.error)
+      await load()
+      toast(msg.score_comment ? 'Regerada com a sua observação.' : 'Regerada numa versão diferente.', 'success')
+    } catch (e) { toast(e.message || 'Erro ao gerar de novo.', 'danger') }
+    setRegenId(null)
   }
   function openComment(msg) {
     setCommentFor(msg.id)
@@ -615,18 +639,29 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
                         <button
                           className={`btn ${msg.score != null && msg.score <= 2 ? 'btn-danger' : 'btn-outline-danger'}`}
                           style={{ fontSize: '.72rem', padding: '1px 9px', borderRadius: 20 }}
-                          onClick={() => scoreMessage(msg.id, 1)}
-                          title="Mensagem ruim"
+                          onClick={() => thumbsDown(msg)}
+                          title="Não ficou boa — abre um campo pra você dizer o porquê (a IA aprende)"
                         >
                           <i className="bi bi-hand-thumbs-down" />
+                        </button>
+                        <button
+                          className="btn btn-outline-success"
+                          style={{ fontSize: '.65rem', padding: '1px 8px', borderRadius: 20 }}
+                          onClick={() => regenerate(msg)}
+                          disabled={regenId === msg.id}
+                          title="Gera a mensagem de novo, usando a sua observação (se houver) e o que a IA aprendeu"
+                        >
+                          {regenId === msg.id
+                            ? <><span className="spinner-border spinner-border-sm me-1" />Gerando…</>
+                            : <><i className="bi bi-arrow-repeat me-1" />Gerar de novo</>}
                         </button>
                         <button
                           className="btn btn-outline-secondary"
                           style={{ fontSize: '.65rem', padding: '1px 8px', borderRadius: 20 }}
                           onClick={() => onEditMessage && onEditMessage(msg.id)}
-                          title="Editar a mensagem e ver/ajustar o prompt (vai para RLHF / Curadoria)"
+                          title="Editar manualmente e ver/ajustar o prompt (vai para RLHF / Curadoria)"
                         >
-                          <i className="bi bi-pencil me-1" />Editar mensagem
+                          <i className="bi bi-pencil me-1" />Editar
                         </button>
                       </span>
                     )}
@@ -636,26 +671,17 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
                       <textarea
                         className="form-control form-control-sm"
                         rows={2}
-                        placeholder="Por que essa nota? (motivo / o que melhorar)"
+                        placeholder="O que não ficou bom nessa mensagem? (a IA vai evitar isso nas próximas)"
                         value={commentText}
                         onChange={e => setCommentText(e.target.value)}
                         style={{ fontSize: '.8rem' }}
                       />
-                      <div className="form-check mt-1">
-                        <input
-                          className="form-check-input"
-                          type="checkbox"
-                          id={`scope-${msg.id}`}
-                          checked={commentChannelOnly}
-                          onChange={e => setCommentChannelOnly(e.target.checked)}
-                        />
-                        <label className="form-check-label" htmlFor={`scope-${msg.id}`} style={{ fontSize: '.72rem' }}>
-                          Aplicar só ao canal WhatsApp (por padrão vale para todos os canais)
-                        </label>
-                      </div>
-                      <div className="d-flex gap-2 mt-1">
+                      <div className="d-flex gap-2 mt-1 align-items-center">
                         <button className="btn btn-sm btn-info" style={{ fontSize: '.7rem' }} onClick={() => saveComment(msg.id)}>
-                          <i className="bi bi-check-lg me-1" />Salvar comentário
+                          <i className="bi bi-check-lg me-1" />Salvar observação
+                        </button>
+                        <button className="btn btn-sm btn-outline-success" style={{ fontSize: '.7rem' }} onClick={() => { saveComment(msg.id); regenerate({ ...msg, score_comment: commentText }) }} title="Salva a observação e já gera a mensagem de novo corrigindo">
+                          <i className="bi bi-arrow-repeat me-1" />Salvar e gerar de novo
                         </button>
                         <button className="btn btn-sm btn-link text-decoration-none" style={{ fontSize: '.7rem' }} onClick={() => setCommentFor(null)}>
                           Cancelar
@@ -729,36 +755,6 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
           </div>
         </div>
 
-
-        {/* Bot auto-reply */}
-        <div style={{ border: '1px solid #e2e8f0', borderRadius: 10, padding: 12 }}>
-          <div className="fw-semibold mb-2" style={{ fontSize: '.82rem', color: '#333' }}>
-            <i className="bi bi-robot me-1" />Bot Auto-reply
-          </div>
-          {[
-            { value: 'off',            label: '🔴 Desativado'               },
-            { value: 'except_meeting', label: '🟡 Ativo (exceto reuniões)'  },
-            { value: 'all',            label: '🟢 Totalmente automático'    },
-          ].map(opt => (
-            <div
-              key={opt.value}
-              onClick={() => !loadingAR && changeAutoReply(opt.value)}
-              style={{
-                padding: '6px 10px',
-                borderRadius: 6,
-                border: `1.5px solid ${autoReplyMode === opt.value ? '#075e54' : '#e2e8f0'}`,
-                background: autoReplyMode === opt.value ? '#f0faf4' : '#fafafa',
-                cursor: loadingAR ? 'wait' : 'pointer',
-                fontSize: '.78rem',
-                marginBottom: 5,
-                fontWeight: autoReplyMode === opt.value ? 600 : 400,
-              }}
-            >
-              {opt.label}
-              {autoReplyMode === opt.value && <i className="bi bi-check-circle-fill ms-2 text-success" />}
-            </div>
-          ))}
-        </div>
 
         {/* Marcar Reunião */}
         <button
@@ -843,6 +839,60 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
 }
 
 // ── Inbox principal ───────────────────────────────────────────────────────────
+// ── Barra do Bot Auto-reply (embaixo, horizontal, fora da caixa de conversa) ────
+function BotAutoReplyBar({ companyId, toast }) {
+  const [mode, setMode] = useState('off')
+  const [loading, setLoading] = useState(false)
+  useEffect(() => {
+    let alive = true
+    fetch(`${API}/api/companies/${companyId}`).then(r => r.json())
+      .then(d => { if (alive) setMode(d.company?.auto_reply_mode || 'off') }).catch(() => {})
+    return () => { alive = false }
+  }, [companyId])
+  async function change(m) {
+    setLoading(true)
+    try {
+      await fetch(`${API}/api/companies/${companyId}/auto-reply`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auto_reply_mode: m }),
+      })
+      setMode(m)
+    } catch { toast('Erro ao alterar bot.', 'danger') }
+    setLoading(false)
+  }
+  const opts = [
+    { value: 'off',            label: '🔴 Desativado' },
+    { value: 'except_meeting', label: '🟡 Ativo (exceto reuniões)' },
+    { value: 'all',            label: '🟢 Totalmente automático' },
+  ]
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, padding: '8px 14px', border: '1px solid #e2e8f0', borderRadius: 10, background: '#fff', flexWrap: 'wrap' }}>
+      <span className="fw-semibold" style={{ fontSize: '.82rem', color: '#333' }}>
+        <i className="bi bi-robot me-1" />Bot Auto-reply:
+      </span>
+      {opts.map(o => (
+        <button
+          key={o.value}
+          onClick={() => !loading && change(o.value)}
+          className="btn btn-sm"
+          style={{
+            fontSize: '.78rem',
+            border: `1.5px solid ${mode === o.value ? '#075e54' : '#e2e8f0'}`,
+            background: mode === o.value ? '#f0faf4' : '#fafafa',
+            fontWeight: mode === o.value ? 600 : 400,
+            cursor: loading ? 'wait' : 'pointer',
+          }}
+        >
+          {o.label}{mode === o.value && <i className="bi bi-check-circle-fill ms-1 text-success" />}
+        </button>
+      ))}
+      <span className="text-muted" style={{ fontSize: '.72rem', marginLeft: 'auto' }}>
+        Durante o treino, deixe <b>Desativado</b> para revisar cada resposta da IA.
+      </span>
+    </div>
+  )
+}
+
 export default function WhatsAppInbox({ toast, initialCompanyId, initialContactId, onEditMessage }) {
   const [inbox,      setInbox]      = useState([])
   const [selected,   setSelected]   = useState(initialCompanyId ?? null)
@@ -872,9 +922,10 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
   )
 
   // Altura total disponível menos navbar e statcards (~160px)
-  const panelHeight = 'calc(100vh - 160px)'
+  const panelHeight = 'calc(100vh - 220px)'
 
   return (
+    <>
     <div style={{ display: 'flex', height: panelHeight, border: '1px solid #e2e8f0', borderRadius: 12, overflow: 'hidden', background: '#fff', boxShadow: '0 2px 8px rgba(0,0,0,.06)' }}>
 
       {/* ── Lista de chats ─────────────────────────────────────────────────── */}
@@ -976,5 +1027,7 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
         )}
       </div>
     </div>
+    {selected && <BotAutoReplyBar companyId={selected} toast={toast} />}
+    </>
   )
 }
