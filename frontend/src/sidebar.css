@@ -1,16 +1,16 @@
 :root {
   --sidebar-width: 244px;
   --sidebar-width-collapsed: 66px;
-  --sidebar-bg: #1a1d23;
-  --sidebar-bg-hover: #23262e;
-  --sidebar-accent: #7c6af7;
-  --sidebar-text: #b8bdc7;
+  --sidebar-bg: #14171c;
+  --sidebar-bg-hover: #1e2229;
+  --sidebar-accent: #6a8ef5;
+  --sidebar-text: #9aa1ac;
 }
 
 /* ===== Layout shell ===== */
 .app-shell {
   min-height: 100vh;
-  background: #f5f7fa;
+  background: var(--canvas, #f6f7f9);
 }
 
 .app-main {
@@ -54,11 +54,13 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  color: var(--sidebar-accent);
-  font-weight: 700;
+  color: #f2f4f7;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   white-space: nowrap;
   overflow: hidden;
 }
+.sidebar-brand i { color: var(--sidebar-accent); }
 .sidebar-brand i { font-size: 1.35rem; flex-shrink: 0; }
 .sidebar-toggle {
   background: transparent;
@@ -101,12 +103,14 @@
 .sidebar-item i { font-size: 1.1rem; flex-shrink: 0; width: 22px; text-align: center; }
 .sidebar-item:hover { background: var(--sidebar-bg-hover); color: #fff; }
 .sidebar-item.active {
-  background: var(--sidebar-accent);
+  background: rgba(106, 142, 245, .13);
   color: #fff;
+  box-shadow: inset 2px 0 0 var(--sidebar-accent);
 }
+.sidebar-item.active i { color: var(--sidebar-accent); }
 .sidebar-badge {
   margin-left: auto;
-  background: #dc3545;
+  background: #b42318;
   color: #fff;
   font-size: 10px;
   font-weight: 600;
@@ -212,5 +216,5 @@
     cursor: pointer;
     padding: 0;
   }
-  .mobile-topbar .mobile-brand { color: var(--sidebar-accent); font-weight: 700; }
+  .mobile-topbar .mobile-brand { color: #f2f4f7; font-weight: 600; }
 }

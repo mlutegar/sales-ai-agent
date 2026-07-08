@@ -124,7 +124,7 @@ export default function PropensityModal({ mode = 'propensity', companyIds = [], 
                 autoFocus
               />
               {isProp ? (
-                <button className="btn btn-warning fw-semibold w-100" onClick={analyze} disabled={phase === 'loading'}>
+                <button className="btn btn-primary fw-semibold w-100" onClick={analyze} disabled={phase === 'loading'}>
                   {phase === 'loading'
                     ? <><span className="spinner-border spinner-border-sm me-2"></span>Analisando propensão...</>
                     : <><i className="bi bi-graph-up-arrow me-1"></i>Analisar propensão</>}
@@ -146,7 +146,7 @@ export default function PropensityModal({ mode = 'propensity', companyIds = [], 
               </div>
               <div className="d-flex flex-column gap-2">
                 {rankings.map((r) => (
-                  <div key={r.company_id} className={`border rounded p-2 ${picked.has(r.company_id) ? 'border-warning bg-light' : ''}`}>
+                  <div key={r.company_id} className="border rounded p-2" style={picked.has(r.company_id) ? { borderColor: '#b6c7f0', background: '#f7f9ff' } : {}}>
                     <div className="d-flex align-items-start gap-2">
                       <input
                         type="checkbox"

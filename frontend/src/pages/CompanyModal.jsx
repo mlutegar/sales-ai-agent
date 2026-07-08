@@ -1171,8 +1171,8 @@ export default function CompanyModal({ companyId, onClose, toast, loadStats, onC
                                   {c.is_primary && (
                                     <span
                                       style={{
-                                        background: '#7c6af7',
-                                        color: '#fff',
+                                        background: '#eff4ff',
+                                        color: '#1a44be',
                                         fontSize: '.7rem',
                                         padding: '.2em .5em',
                                         borderRadius: 4,

@@ -20,8 +20,8 @@ export default function Dashboard({ toast }) {
   // Funil de status
   const statusOrder = ['new', 'researched', 'sequence_created', 'contacted', 'hot_lead', 'meeting_set']
   const statusColors = {
-    new: '#6c757d', researched: '#0dcaf0', sequence_created: '#0d6efd',
-    contacted: '#0d6efd', hot_lead: '#dc3545', meeting_set: '#198754',
+    new: '#667085', researched: '#0e7490', sequence_created: '#1d4ed8',
+    contacted: '#1d4ed8', hot_lead: '#b42318', meeting_set: '#17825b',
   }
   const statusCounts = {}
   companies.forEach(c => { statusCounts[c.status] = (statusCounts[c.status] || 0) + 1 })
@@ -64,10 +64,10 @@ export default function Dashboard({ toast }) {
                   return (
                     <React.Fragment key={s}>
                       <div style={{
-                        flex: '1 1 0', minWidth: 92, textAlign: 'center', borderRadius: 10,
-                        padding: '14px 8px', background: active ? color : '#f1f3f5',
-                        color: active ? '#fff' : '#adb5bd', border: active ? 'none' : '1px solid #e9ecef',
-                        boxShadow: active ? '0 1px 3px rgba(0,0,0,.12)' : 'none',
+                        flex: '1 1 0', minWidth: 92, textAlign: 'center', borderRadius: 8,
+                        padding: '14px 8px', background: active ? color : '#f9fafb',
+                        color: active ? '#fff' : '#98a2b3', border: active ? 'none' : '1px solid #eef0f3',
+                        boxShadow: active ? '0 1px 2px rgba(16,24,40,.1)' : 'none',
                       }}>
                         <div style={{ fontSize: '1.7rem', fontWeight: 700, lineHeight: 1 }}>{count}</div>
                         <div style={{ fontSize: '.72rem', marginTop: 5 }}>{STATUS_LABEL[s] || s}</div>

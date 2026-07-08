@@ -12,7 +12,7 @@ export default function StatCards({ stats }) {
     { id: 'avg_score',         label: 'Score Médio',    color: 'text-info',      value: stats.avg_score || '—' },
     { id: 'docs_count',        label: 'Docs RAG',       color: 'text-secondary', value: stats.docs_count },
     { id: 'pipeline_value',    label: 'Pipeline R$',    color: 'text-success',   value: formatCurrency(stats.pipeline_value) },
-    { id: 'enriched_contacts', label: 'Com E-mail',     color: '',               style: { color: '#7c6af7' },
+    { id: 'enriched_contacts', label: 'Com E-mail',     color: '',
       value: `${stats.enriched_contacts || 0}/${stats.total_contacts || 0}` },
   ]
   return (

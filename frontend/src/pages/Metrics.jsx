@@ -82,7 +82,7 @@ export default function Metrics({ toast }) {
       
       chartInstances.current.role = new Chart(chartRoleRef.current, {
         type: 'doughnut',
-        data: { labels, datasets: [{ data, backgroundColor: ['#7c6af7','#0dcaf0','#198754','#ffc107'] }] },
+        data: { labels, datasets: [{ data, backgroundColor: ['#1d4ed8','#0e7490','#17825b','#b54708'] }] },
         options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
       })
     }
@@ -99,7 +99,7 @@ export default function Metrics({ toast }) {
       
       chartInstances.current.funnel = new Chart(chartFunnelRef.current, {
         type: 'bar',
-        data: { labels, datasets: [{ label: 'Leads', data, backgroundColor: '#7c6af7' }] },
+        data: { labels, datasets: [{ label: 'Leads', data, backgroundColor: '#1d4ed8' }] },
         options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true } } }
       })
     }
@@ -212,7 +212,7 @@ export default function Metrics({ toast }) {
                 {overview?.ab_stats?.decided > 0 ? (
                   <>
                     <div className="text-center mb-2">
-                      <div className="display-6 fw-bold" style={{color: '#7c6af7'}}>
+                      <div className="display-6 fw-bold" style={{color: '#1d4ed8'}}>
                         {((overview.ab_stats.b_won / overview.ab_stats.decided) * 100).toFixed(0)}%
                       </div>
                       <div className="text-muted small">variante B venceu</div>

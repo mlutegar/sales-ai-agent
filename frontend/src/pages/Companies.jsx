@@ -535,7 +535,7 @@ function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onO
         </td>
         <td className="text-muted small d-none d-md-table-cell">{company.sector || '—'}</td>
         <td className="d-none d-sm-table-cell">
-          <span className="badge" style={{ background: '#7c6af7', color: '#fff', fontSize: '.75rem' }}>
+          <span className="badge" style={{ background: '#eff4ff', color: '#1a44be', fontSize: '.75rem' }}>
             {contacts.length}
           </span>
         </td>
@@ -873,8 +873,7 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
                 </ul>
               </div>
               <button
-                className="btn btn-sm"
-                style={{ background: '#7c6af7', color: '#fff', border: 'none' }}
+                className="btn btn-sm btn-outline-primary"
                 onClick={bulkEnrichMissing}
                 title="Buscar e-mail e telefone para contatos sem e-mail"
               >
