@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import CompanyModal from './CompanyModal.jsx';
+import PropensityModal from './PropensityModal.jsx';
 
 const API = '';
 
@@ -647,6 +648,7 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
   const [sectors, setSectors] = useState([]);
   const [importSources, setImportSources] = useState([]);
   const [flagCatalog, setFlagCatalog] = useState([]);
+  const [bulkModal, setBulkModal] = useState(null); // { mode, ids }
   const flagMap = Object.fromEntries((flagCatalog || []).map((f) => [f.key, f]));
 
   useEffect(() => {
@@ -768,11 +770,13 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
   }
 
   function openBulkDirectModal() {
-    toast('Função "Gerar Mensagens por Produto" — abrir modal de produto', 'info');
+    if (!selected.length) { toast('Selecione ao menos um cliente.', 'warning'); return; }
+    setBulkModal({ mode: 'direct', ids: [...selected] });
   }
 
   function openPropensityModal() {
-    toast('Função "Analisar Propensão" — abrir modal', 'info');
+    if (!selected.length) { toast('Selecione ao menos um cliente.', 'warning'); return; }
+    setBulkModal({ mode: 'propensity', ids: [...selected] });
   }
 
   async function bulkStatus(status) {
@@ -983,6 +987,17 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
           </div>
         </div>
       </div>
+
+      {/* Bulk: propensão / mensagens por produto */}
+      {bulkModal && (
+        <PropensityModal
+          mode={bulkModal.mode}
+          companyIds={bulkModal.ids}
+          toast={toast}
+          onClose={() => setBulkModal(null)}
+          onDone={() => { loadCompanies(); if (loadStats) loadStats(); }}
+        />
+      )}
 
       {/* Company Modal */}
       {modalCompany && (
