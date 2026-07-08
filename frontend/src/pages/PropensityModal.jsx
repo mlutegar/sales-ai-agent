@@ -158,7 +158,8 @@ export default function PropensityModal({ mode = 'propensity', companyIds = [], 
                         <div className="d-flex align-items-center gap-2">
                           <span className={`badge ${scoreClass(r.propensity_score)}`}>{r.propensity_score}</span>
                           <strong>{r.company_name}</strong>
-                          {r.sector && <span className="text-muted small">· {r.sector}</span>}
+                          {r.contact_name && <span className="text-muted small"><i className="bi bi-person me-1"></i>{r.contact_name}</span>}
+                          {r.sector && r.sector !== 'nao informado' && <span className="text-muted small">· {r.sector}</span>}
                         </div>
                         {r.reason && <div className="small text-muted mt-1">{r.reason}</div>}
                         {(r.pain_points || []).length > 0 && (
