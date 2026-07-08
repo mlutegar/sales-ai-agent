@@ -340,6 +340,7 @@ function initDb() {
   addColumnIfNotExists(db, 'leads', 'wa_opt_out', "INTEGER DEFAULT 0");
   addColumnIfNotExists(db, 'contacts', 'last_wa_interaction', "TEXT");
   addColumnIfNotExists(db, 'contacts', 'wa_opt_out', "INTEGER DEFAULT 0");
+  addColumnIfNotExists(db, 'contacts', 'context', "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'messages', 'is_template',  "INTEGER DEFAULT 0");
   addColumnIfNotExists(db, 'messages', 'template_name',"TEXT");
   addColumnIfNotExists(db, 'messages', 'created_at',   "TEXT");
@@ -1272,6 +1273,18 @@ app.delete('/api/companies/:companyId/contacts/:contactId', (req, res) => {
   res.json({ ok: true });
 });
 
+// Contexto pessoal do lead (texto livre) — usado para enriquecer o gancho gerado pela IA
+// e para o operador lembrar quem é a pessoa.
+app.put('/api/contacts/:id/context', (req, res) => {
+  const context = (req.body.context || '').toString();
+  const db = getDb();
+  const contact = db.prepare('SELECT id FROM contacts WHERE id=?').get(req.params.id);
+  if (!contact) { db.close(); return res.status(404).json({ error: 'Contato não encontrado' }); }
+  db.prepare('UPDATE contacts SET context=? WHERE id=?').run(context, req.params.id);
+  db.close();
+  res.json({ ok: true, context });
+});
+
 // ── Ações em lote (bulk actions) ─────────────────────────────────────────────
 
 // Atualizar status de várias empresas
@@ -1620,6 +1633,7 @@ Pesquise na WEB informações REAIS e recentes sobre a empresa "${company.name}"
 
 Produto sendo vendido: ${productValue}
 Perfil do cargo: foco em ${roleInfo.focus}, tom ${roleInfo.tone}
+${contact?.context ? 'Contexto pessoal do lead (informado pelo operador — use para deixar o gancho mais pessoal e menos "de IA"):\n' + contact.context : ''}
 ${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
 
 Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com exatamente estas chaves:

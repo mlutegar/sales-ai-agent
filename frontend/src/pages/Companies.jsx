@@ -381,6 +381,102 @@ function BulkToolbar({ selected, onClear, onBulkResearch, onBulkMessages, onBulk
   );
 }
 
+// ── ContactCard (contato + contexto pessoal do lead) ────────────────────────────
+function ContactCard({ contact, companyId, onEnrich, onRemove, toast }) {
+  const [savedCtx, setSavedCtx] = useState(contact.context || '');
+  const [ctx, setCtx]           = useState(contact.context || '');
+  const [open, setOpen]         = useState(false);
+  const [saving, setSaving]     = useState(false);
+
+  const hasContext = !!(savedCtx && savedCtx.trim());
+
+  async function saveContext() {
+    setSaving(true);
+    try {
+      const res = await fetch(`${API}/api/contacts/${contact.id}/context`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ context: ctx }),
+      });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      setSavedCtx(ctx);
+      toast('Contexto do lead salvo!', 'success');
+      setOpen(false);
+    } catch (err) {
+      toast(err.message || 'Erro ao salvar contexto', 'danger');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mb-2 p-2 rounded" style={{ background: '#fff', border: '1px solid #dee2e6' }}>
+      <div className="d-flex align-items-start justify-content-between">
+        <div>
+          <div className="fw-semibold small">
+            {contact.name}
+            {!contact.email && !contact.whatsapp && !contact.linkedin && (
+              <span className="badge bg-warning text-dark ms-2" style={{ fontSize: '.65rem' }}>sem contato</span>
+            )}
+            {hasContext && (
+              <span className="badge bg-success-subtle text-success border border-success-subtle ms-2" style={{ fontSize: '.65rem' }} title="Contexto do lead cadastrado">
+                <i className="bi bi-person-lines-fill me-1"></i>com contexto
+              </span>
+            )}
+          </div>
+          {contact.role && <div className="text-muted" style={{ fontSize: '.78rem' }}>{contact.role}</div>}
+          {contact.email && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-envelope me-1"></i>{contact.email}</div>}
+          {contact.whatsapp && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-whatsapp me-1"></i>{contact.whatsapp}</div>}
+          {contact.linkedin && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-linkedin me-1"></i><a href={contact.linkedin} target="_blank" rel="noreferrer">LinkedIn</a></div>}
+          {contact.import_source && (
+            <div className="text-muted" style={{ fontSize: '.72rem' }}>
+              <i className="bi bi-file-earmark-spreadsheet me-1"></i>{contact.import_source}
+            </div>
+          )}
+        </div>
+        <div className="d-flex gap-1 ms-2">
+          <button className="btn btn-sm btn-outline-secondary btn-xs-touch" onClick={() => onEnrich(contact.id)} title="Enriquecer">
+            <i className="bi bi-search"></i>
+          </button>
+          <button className="btn btn-sm btn-outline-danger btn-xs-touch" onClick={() => onRemove(companyId, contact.id)} title="Remover">
+            <i className="bi bi-trash"></i>
+          </button>
+        </div>
+      </div>
+
+      <button
+        className={`btn btn-sm ${hasContext ? 'btn-outline-primary' : 'btn-outline-secondary'} w-100 mt-2`}
+        style={{ fontSize: '.75rem' }}
+        onClick={() => { setCtx(savedCtx); setOpen((o) => !o); }}
+      >
+        <i className={`bi ${hasContext ? 'bi-person-lines-fill' : 'bi-person-plus'} me-1`}></i>
+        {open ? 'Fechar contexto' : hasContext ? 'Ver / editar contexto do lead' : 'Adicionar contexto do lead'}
+      </button>
+
+      {open && (
+        <div className="mt-2">
+          <textarea
+            className="form-control form-control-sm"
+            rows={4}
+            placeholder="Quem é essa pessoa, como falar com ela, o que importa pra ela, histórico de interações... (usado para personalizar o gancho que a IA gera e para lembrar quem é o lead)"
+            value={ctx}
+            onChange={(e) => setCtx(e.target.value)}
+          />
+          <div className="d-flex gap-2 mt-1">
+            <button className="btn btn-primary btn-sm" onClick={saveContext} disabled={saving}>
+              {saving ? 'Salvando...' : 'Salvar contexto'}
+            </button>
+            <button className="btn btn-outline-secondary btn-sm" onClick={() => { setCtx(savedCtx); setOpen(false); }} disabled={saving}>
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── ExpandedRow ────────────────────────────────────────────────────────────────
 function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onContactAdded, toast }) {
   const [addForm, setAddForm] = useState({ name: '', role: 'other', email: '', whatsapp: '', linkedin: '', country: 'BR' });
@@ -445,33 +541,14 @@ function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onCont
             </button>
           )}
           {contacts.map((ct) => (
-            <div key={ct.id} className="d-flex align-items-start justify-content-between mb-2 p-2 rounded" style={{ background: '#fff', border: '1px solid #dee2e6' }}>
-              <div>
-                <div className="fw-semibold small">
-                  {ct.name}
-                  {!ct.email && !ct.whatsapp && !ct.linkedin && (
-                    <span className="badge bg-warning text-dark ms-2" style={{ fontSize: '.65rem' }}>sem contato</span>
-                  )}
-                </div>
-                {ct.role && <div className="text-muted" style={{ fontSize: '.78rem' }}>{ct.role}</div>}
-                {ct.email && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-envelope me-1"></i>{ct.email}</div>}
-                {ct.whatsapp && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-whatsapp me-1"></i>{ct.whatsapp}</div>}
-                {ct.linkedin && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-linkedin me-1"></i><a href={ct.linkedin} target="_blank" rel="noreferrer">LinkedIn</a></div>}
-                {ct.import_source && (
-                  <div className="text-muted" style={{ fontSize: '.72rem' }}>
-                    <i className="bi bi-file-earmark-spreadsheet me-1"></i>{ct.import_source}
-                  </div>
-                )}
-              </div>
-              <div className="d-flex gap-1 ms-2">
-                <button className="btn btn-sm btn-outline-secondary btn-xs-touch" onClick={() => onEnrich(ct.id)} title="Enriquecer">
-                  <i className="bi bi-search"></i>
-                </button>
-                <button className="btn btn-sm btn-outline-danger btn-xs-touch" onClick={() => onRemoveContact(company.id, ct.id)} title="Remover">
-                  <i className="bi bi-trash"></i>
-                </button>
-              </div>
-            </div>
+            <ContactCard
+              key={ct.id}
+              contact={ct}
+              companyId={company.id}
+              onEnrich={onEnrich}
+              onRemove={onRemoveContact}
+              toast={toast}
+            />
           ))}
         </div>
         <div style={{ minWidth: 280 }}>
