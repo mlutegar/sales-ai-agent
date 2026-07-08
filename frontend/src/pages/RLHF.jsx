@@ -9,6 +9,7 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
   const [rated, setRated] = useState([])
   const [focusId, setFocusId] = useState(initialMessageId || null)
   const [regenId, setRegenId] = useState(null)
+  const [verSel, setVerSel] = useState(null)
   const [analyzing, setAnalyzing] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editText, setEditText] = useState('')
@@ -450,6 +451,41 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
                       </pre>
                     </div>
                   )}
+
+                  {(() => {
+                    let vers = []
+                    try { vers = JSON.parse(m.versions || '[]') } catch {}
+                    if (!vers.length) return null
+                    const total = vers.length + 1
+                    const selKey = verSel && verSel.startsWith(m.id + ':') ? verSel.split(':')[1] : null
+                    const selVer = selKey === null ? null
+                      : (selKey === 'atual' ? { content: m.content, prompt_used: m.prompt_used } : vers[Number(selKey)])
+                    return (
+                      <div className="mt-2">
+                        <div className="small text-muted mb-1">
+                          <i className="bi bi-clock-history me-1"></i>Versões desta mensagem (clique para ver o texto e o prompt de cada uma):
+                        </div>
+                        <div className="d-flex gap-1 flex-wrap mb-1">
+                          {vers.map((v, i) => (
+                            <button key={i} className={`btn btn-sm ${selKey === String(i) ? 'btn-secondary' : 'btn-outline-secondary'}`} style={{fontSize: '.7rem'}} onClick={() => setVerSel(selKey === String(i) ? null : `${m.id}:${i}`)}>
+                              v{i + 1}
+                            </button>
+                          ))}
+                          <button className={`btn btn-sm ${selKey === 'atual' ? 'btn-primary' : 'btn-outline-primary'}`} style={{fontSize: '.7rem'}} onClick={() => setVerSel(selKey === 'atual' ? null : `${m.id}:atual`)}>
+                            v{total} (atual)
+                          </button>
+                        </div>
+                        {selVer && (
+                          <div className="border rounded p-2" style={{fontSize: '.78rem'}}>
+                            <div className="fw-semibold small mb-1">Mensagem (v{selKey === 'atual' ? total : Number(selKey) + 1}):</div>
+                            <div className="p-2 mb-2 rounded bg-light" style={{whiteSpace: 'pre-wrap'}}>{esc(selVer.content || '')}</div>
+                            <div className="fw-semibold small mb-1">Prompt desta versão:</div>
+                            <pre className="p-2 border rounded bg-dark text-light" style={{whiteSpace: 'pre-wrap', fontSize: '.72rem', maxHeight: 280, overflow: 'auto'}}>{selVer.prompt_used || '(sem prompt salvo desta versão)'}</pre>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })()}
                 </div>
               ))
             )}

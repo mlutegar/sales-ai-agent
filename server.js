@@ -347,6 +347,7 @@ function initDb() {
   addColumnIfNotExists(db, 'messages', 'score_comment',"TEXT");
   addColumnIfNotExists(db, 'messages', 'prompt_used',  "TEXT");
   addColumnIfNotExists(db, 'messages', 'comment_scope',"TEXT DEFAULT 'global'");
+  addColumnIfNotExists(db, 'messages', 'versions',     "TEXT DEFAULT '[]'");
 
   // Criar índices que dependem de colunas adicionadas por migração
   db.exec(`
@@ -1307,8 +1308,28 @@ app.post('/api/companies/:id/message', (req, res) => {
   res.json({ ok: true, id: r.lastInsertRowid, status });
 });
 
+// Prompt de geração de mensagem de WhatsApp de vendas, estruturado para APROVEITAR
+// o aprendizado: regras duras (o que o revisor reprovou) + checagem final anti-violação.
+const WA_SYSTEM = 'Você é um SDR brasileiro especialista em prospecção por WhatsApp. Escreve mensagens curtas, humanas e específicas para conseguir UMA reunião com a pessoa. Nunca soa como robô, template ou marketing genérico. Segue à risca as regras dadas pelo revisor humano.';
+
+function buildWhatsappUserPrompt({ company, contact, observation, learned, previous }) {
+  const who = `${contact?.name || 'o contato'}${contact?.role ? ` (${contact.role})` : ''}${company ? ` — empresa ${company.name}${company.sector ? `, setor ${company.sector}` : ''}` : ''}`;
+  return `# Tarefa
+Escreva UMA mensagem de WhatsApp para ${who}. Objetivo: conseguir uma reunião curta. Gere uma mensagem NOVA (não edite a anterior).
+${contact?.context ? `\n# Sobre a pessoa (use para personalizar de verdade)\n${contact.context}\n` : ''}${learned ? `\n# O que o revisor humano já ensinou (aplique SEMPRE)\n${learned}\n` : ''}
+# REGRAS OBRIGATÓRIAS — o revisor reprovou mensagens que as violaram. Cumpra TODAS, sem exceção:
+${observation ? `- ${observation}` : '- (não há regra nova; gere uma versão diferente e melhor que a anterior)'}
+- Não pareça IA nem template; escreva como um humano escreve no WhatsApp.
+- Curta: no máximo ~70 palavras, uma única mensagem.
+${previous ? `\n# Versão anterior — REPROVADA (referência do que NÃO fazer; não copie)\n"""${previous}"""\n${observation ? `Motivo da reprovação: ${observation}\n` : ''}` : ''}
+# Checagem final (obrigatória antes de responder)
+Releia sua mensagem e confirme que NENHUMA regra obrigatória foi violada. Uma regra do tipo "não falar sobre X" significa que o tema X NÃO pode aparecer em NENHUMA frase — nem de forma indireta, nem com sinônimos. Se encontrar qualquer violação, reescreva antes de responder.
+
+Responda APENAS com a mensagem final de WhatsApp. Sem aspas, sem título, sem comentários.`;
+}
+
 // "Gerar de novo": reescreve a mensagem usando a observação do avaliador + o que a IA
-// já aprendeu (buildLearnedContext). Sem observação, gera uma variação diferente.
+// já aprendeu. Guarda a versão anterior (versionamento) antes de sobrescrever.
 app.post('/api/messages/:id/regenerate', async (req, res) => {
   const db = getDb();
   const msg = db.prepare('SELECT * FROM messages WHERE id=?').get(req.params.id);
@@ -1320,31 +1341,23 @@ app.post('/api/messages/:id/regenerate', async (req, res) => {
   const learned = buildLearnedContext(db, msg.channel || 'whatsapp', role);
   db.close();
 
-  const sys = 'Você é SDR B2B que escreve mensagens de WhatsApp curtas, humanas e naturais (nunca "cara de IA") para agendar reuniões com humanos.';
-  const userPrompt = `Reescreva a mensagem de WhatsApp abaixo.
-${company ? 'Empresa: ' + company.name + (company.sector ? ' (' + company.sector + ')' : '') : ''}
-${contact ? 'Contato: ' + contact.name + ' (' + contact.role + ')' : ''}
-${contact?.context ? 'Contexto do lead: ' + contact.context : ''}
-
-Mensagem atual (NÃO aprovada pelo revisor):
-"""${msg.content || msg.ai_original || ''}"""
-
-${observation
-  ? 'O revisor apontou o problema a seguir — CORRIJA exatamente isso: "' + observation + '"'
-  : 'Gere uma versão ALTERNATIVA, diferente da atual, tentando melhorar (a atual não agradou).'}
-${learned ? '\n' + learned : ''}
-
-Escreva só a nova mensagem de WhatsApp (curta, máx ~80 palavras, objetiva, natural). Sem aspas, sem comentários.`;
-
-  const out = await callClaude(sys, userPrompt, 400);
+  const userPrompt = buildWhatsappUserPrompt({ company, contact, observation, learned, previous: msg.content || msg.ai_original || '' });
+  const out = await callClaude(WA_SYSTEM, userPrompt, 400);
   if (!out || /^\[ERRO API/.test(out)) return res.status(502).json({ error: 'Falha ao regenerar (IA indisponível)' });
   const newText = out.trim();
 
   const db2 = getDb();
-  db2.prepare('UPDATE messages SET content=?, ai_original=?, score=NULL, prompt_used=? WHERE id=?')
-    .run(newText, newText, userPrompt, req.params.id);
+  let versions = [];
+  try { versions = JSON.parse(msg.versions || '[]'); } catch {}
+  versions.push({
+    content: msg.content, prompt_used: msg.prompt_used || null,
+    score: msg.score ?? null, score_comment: msg.score_comment || null,
+    created_at: msg.created_at || null,
+  });
+  db2.prepare('UPDATE messages SET content=?, ai_original=?, score=NULL, prompt_used=?, versions=? WHERE id=?')
+    .run(newText, newText, userPrompt, JSON.stringify(versions), req.params.id);
   db2.close();
-  res.json({ ok: true, content: newText });
+  res.json({ ok: true, content: newText, version: versions.length + 1 });
 });
 
 // ── Ações em lote (bulk actions) ─────────────────────────────────────────────
@@ -1688,6 +1701,7 @@ app.post('/api/companies/:id/research', async (req, res) => {
   const productValue = req.body.product_value || 'solução de automação de vendas com IA';
   const golden = db.prepare('SELECT content FROM golden_cases ORDER BY score DESC LIMIT 2').all();
   const goldenCtx = golden.map(g => g.content).join('\n');
+  const learned = buildLearnedContext(db, 'whatsapp', contact?.role || 'other');
   db.close();
 
   const prompt = `
@@ -1697,6 +1711,7 @@ Produto sendo vendido: ${productValue}
 Perfil do cargo: foco em ${roleInfo.focus}, tom ${roleInfo.tone}
 ${contact?.context ? 'Contexto pessoal do lead (informado pelo operador — use para deixar o gancho mais pessoal e menos "de IA"):\n' + contact.context : ''}
 ${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
+${learned ? '\nREGRAS OBRIGATÓRIAS aprendidas com o revisor humano — o "hook" DEVE cumprir TODAS, sem exceção. Uma regra do tipo "não falar sobre X" significa que o tema X não pode aparecer no hook de forma nenhuma (nem indireta, nem sinônimo):\n' + learned + '\n' : ''}
 
 Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com exatamente estas chaves:
 - "research_context": array de 2-3 strings curtas (uma frase cada), cada uma com um fato REAL encontrado
@@ -2393,7 +2408,10 @@ app.post('/api/messages/:id/correct', (req, res) => {
   const db = getDb();
   const msg = db.prepare('SELECT * FROM messages WHERE id=?').get(req.params.id);
   if (!msg) { db.close(); return res.status(404).json({ error: 'Não encontrada' }); }
-  db.prepare('UPDATE messages SET human_correction=?,content=? WHERE id=?').run(correction, correction, req.params.id);
+  let versions = [];
+  try { versions = JSON.parse(msg.versions || '[]'); } catch {}
+  versions.push({ content: msg.content, prompt_used: msg.prompt_used || null, score: msg.score ?? null, score_comment: msg.score_comment || null, created_at: msg.created_at || null });
+  db.prepare('UPDATE messages SET human_correction=?,content=?,versions=? WHERE id=?').run(correction, correction, JSON.stringify(versions), req.params.id);
   db.close();
   res.json({ ok: true, original: msg.ai_original, correction });
 });
