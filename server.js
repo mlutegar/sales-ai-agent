@@ -1936,13 +1936,23 @@ app.post('/api/companies/propensity', async (req, res) => {
 
   const prompt = 'Produto sendo vendido: ' + product + '\n\nAvalie as seguintes empresas pela propensao de compra desse produto.\n\nEmpresas:\n' + block + '\n\nResposta APENAS em JSON valido:\n{"rankings":[{"company_id":N,"propensity_score":N,"reason":"frase curta","pain_points":["dor 1","dor 2","dor 3"]}]}\n\nOrdene do maior para o menor score. Inclua TODAS as ' + companies.length + ' empresas.';
 
-  const raw = await callClaude('Voce e especialista em qualificacao de leads B2B com foco em propensao de compra.', prompt, 1500);
-  let parsed;
-  try {
-    const clean = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    parsed = JSON.parse(clean);
-  } catch(e) {
-    return res.status(500).json({ error: 'Erro ao processar resposta do LLM', raw });
+  // Limite de tokens escala com o nº de empresas para evitar JSON truncado.
+  const maxTokens = Math.min(8000, 1500 + companies.length * 300);
+  // Falhas de formatação da IA são intermitentes: tenta até 3 vezes antes de desistir.
+  let parsed = null, lastRaw = '';
+  for (let attempt = 1; attempt <= 3 && !parsed; attempt++) {
+    lastRaw = await callClaude('Voce e especialista em qualificacao de leads B2B com foco em propensao de compra.', prompt, maxTokens);
+    try {
+      // Extrai o bloco JSON mesmo que a IA adicione texto antes/depois (parser robusto).
+      let clean = (lastRaw || '').replace(/```json\s*|\s*```/g, '').trim();
+      const jsonMatch = clean.match(/\{[\s\S]*\}/);
+      if (jsonMatch) clean = jsonMatch[0];
+      const p = JSON.parse(clean);
+      if (p && Array.isArray(p.rankings)) parsed = p;
+    } catch (e) { /* formato inválido — tenta novamente */ }
+  }
+  if (!parsed) {
+    return res.status(502).json({ error: 'A IA retornou um formato inesperado após 3 tentativas. Tente novamente em alguns segundos.', raw: lastRaw });
   }
   const idMap = {};
   companies.forEach(c => { idMap[c.id] = c; });
