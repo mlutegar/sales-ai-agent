@@ -1632,11 +1632,11 @@ Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com
 Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em tendências reais do setor e indique isso. Responda APENAS com JSON válido, sem markdown, sem comentários.`;
 
   const result = await callClaudeWithSearch('Você é assistente de pesquisa de vendas B2B que usa busca na web para encontrar informações reais e atuais sobre empresas e seus executivos.', prompt, 2600);
-  let hook, ctx;
+  let hook, ctx, painPoints = [];
   let raw = (result || '').replace(/```json\s*|\s*```/g, '').trim();
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (jsonMatch) raw = jsonMatch[0];
-  try { const p = JSON.parse(raw); hook = p.hook || result; ctx = JSON.stringify(p); }
+  try { const p = JSON.parse(raw); hook = p.hook || result; ctx = JSON.stringify(p); painPoints = Array.isArray(p.pain_points) ? p.pain_points : []; }
   catch { hook = result; ctx = result; }
 
   const db2 = getDb();
@@ -1650,7 +1650,7 @@ Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em ten
   }
   db2.prepare('UPDATE companies SET research_hook=?,research_context=?,research_history=?,status=? WHERE id=?').run(hook, ctx, JSON.stringify(researchHist), 'researched', req.params.id);
   db2.close();
-  res.json({ hook, context: ctx, history: researchHist });
+  res.json({ hook, context: ctx, pain_points: painPoints, history: researchHist });
 });
 
 app.post('/api/companies/:id/sequence', async (req, res) => {
@@ -1691,7 +1691,7 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
   const socialProof = golden.map(g => `- ${g.title}: ${g.content.substring(0, 80)}...`).join('\n');
   db.close();
 
-  const painPoint = req.body.pain_point || '';
+  const painPoint = req.body.pain_point || req.body.selected_pain || req.body.selected_pain_point || '';
   const painLine = painPoint ? ('Dor principal do lead: ' + painPoint) : '';
   const painCTA  = painPoint ? 'IMPORTANTE: a mensagem deve abordar diretamente a dor mencionada acima como ponto de entrada.' : '';
 
