@@ -1268,12 +1268,20 @@ app.patch('/api/companies/:companyId/contacts/:contactId/set-primary', (req, res
 });
 
 app.delete('/api/companies/:companyId/contacts/:contactId', (req, res) => {
+  const { companyId, contactId } = req.params;
   const db = getDb();
-  db.prepare('DELETE FROM messages WHERE contact_id=? AND company_id=?').run(req.params.contactId, req.params.companyId);
-  db.prepare('DELETE FROM sentiment_logs WHERE contact_id=? AND company_id=?').run(req.params.contactId, req.params.companyId);
-  db.prepare('DELETE FROM contacts WHERE id=? AND company_id=?').run(req.params.contactId, req.params.companyId);
-  db.close();
-  res.json({ ok: true });
+  try {
+    // Remove tudo que referencia o contato ANTES (senão a FK bloqueia a exclusão).
+    for (const t of ['messages', 'sentiment_logs', 'consent_logs', 'schedule_slots', 'notifications']) {
+      db.prepare(`DELETE FROM ${t} WHERE contact_id=?`).run(contactId);
+    }
+    const r = db.prepare('DELETE FROM contacts WHERE id=? AND company_id=?').run(contactId, companyId);
+    db.close();
+    res.json({ ok: true, deleted: r.changes });
+  } catch (e) {
+    db.close();
+    res.status(500).json({ error: 'Erro ao excluir contato: ' + (e.message || e) });
+  }
 });
 
 // Contexto pessoal do lead (texto livre) — usado para enriquecer o gancho gerado pela IA
