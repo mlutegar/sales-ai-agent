@@ -1,5 +1,0 @@
-flask
-anthropic
-python-dotenv
-gunicorn
-werkzeug
