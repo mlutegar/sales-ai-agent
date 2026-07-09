@@ -13,20 +13,8 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
   const [analyzing, setAnalyzing] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editText, setEditText] = useState('')
-  const [pvChannel, setPvChannel] = useState('whatsapp')
-  const [pvRole, setPvRole] = useState('c_level')
-  const [preview, setPreview] = useState(null)
   const [promptFor, setPromptFor] = useState(null)
   const [promptData, setPromptData] = useState(null)
-
-  const loadPreview = async (channel = pvChannel, role = pvRole) => {
-    try {
-      const data = await api(`/api/learn/prompt-preview?channel=${channel}&role=${role}`)
-      setPreview(data)
-    } catch (e) {
-      console.warn('Erro ao carregar preview do prompt:', e)
-    }
-  }
 
   const viewPrompt = async (id) => {
     if (promptFor === id) { setPromptFor(null); setPromptData(null); return }
@@ -75,7 +63,6 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
     loadLearnStats()
     loadLearnProgress()
     loadRLHF()
-    loadPreview()
   }, [])
 
   // Foco vindo do botão "Editar mensagem" (aba WhatsApp): abre a mensagem na aba certa,
@@ -492,51 +479,6 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
           </div>
         </div>
 
-        {/*  ── Prompt enviado à LLM ────────────────────────────────────────────────  */}
-        <div className="card p-3 mt-3">
-          <div className="d-flex justify-content-between align-items-start mb-2 flex-wrap gap-2">
-            <div>
-              <h6 className="fw-bold mb-1"><i className="bi bi-code-square me-1 text-info"></i>Prompt enviado à LLM</h6>
-              <p className="text-muted small mb-0">Veja o prompt real da geração, já com as SUAS observações (padrões, correções e comentários) injetadas.</p>
-            </div>
-            <div className="d-flex gap-2 align-items-center">
-              <select className="form-select form-select-sm" style={{width: 'auto'}} value={pvChannel}
-                onChange={e => { setPvChannel(e.target.value); loadPreview(e.target.value, pvRole) }}>
-                <option value="whatsapp">WhatsApp</option>
-              </select>
-              <select className="form-select form-select-sm" style={{width: 'auto'}} value={pvRole}
-                onChange={e => { setPvRole(e.target.value); loadPreview(pvChannel, e.target.value) }}>
-                <option value="c_level">C-Level</option>
-                <option value="manager">Gerente</option>
-                <option value="engineer">Engenheiro</option>
-                <option value="other">Outro</option>
-              </select>
-              <button className="btn btn-outline-secondary btn-sm" onClick={() => loadPreview()}>
-                <i className="bi bi-arrow-clockwise"></i>
-              </button>
-            </div>
-          </div>
-
-          {!preview ? (
-            <p className="text-muted small mb-0">Carregando preview…</p>
-          ) : (
-            <>
-              <div className="small fw-bold text-muted mb-1">System prompt</div>
-              <pre className="p-2 border rounded bg-light" style={{whiteSpace: 'pre-wrap', fontSize: '.78rem'}}>{preview.systemPrompt}</pre>
-              <div className="small fw-bold text-muted mb-1 mt-2">
-                User prompt {preview.hasLearned
-                  ? <span className="badge bg-info ms-1">com suas observações</span>
-                  : <span className="badge bg-secondary ms-1">sem observações ainda</span>}
-              </div>
-              <pre className="p-2 border rounded bg-dark text-light" style={{whiteSpace: 'pre-wrap', fontSize: '.78rem', maxHeight: 400, overflow: 'auto'}}>{preview.userPromptTemplate}</pre>
-              {!preview.hasLearned && (
-                <p className="text-muted small mb-0">
-                  <i className="bi bi-lightbulb me-1"></i>Dê notas, comentários e correções (e clique em "Analisar Padrões") para que suas observações apareçam aqui e influenciem a geração.
-                </p>
-              )}
-            </>
-          )}
-        </div>
       </div>
     </div>
   )
