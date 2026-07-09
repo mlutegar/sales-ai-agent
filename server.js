@@ -349,6 +349,7 @@ function initDb() {
   addColumnIfNotExists(db, 'messages', 'prompt_used',  "TEXT");
   addColumnIfNotExists(db, 'messages', 'comment_scope',"TEXT DEFAULT 'global'");
   addColumnIfNotExists(db, 'messages', 'versions',     "TEXT DEFAULT '[]'");
+  addColumnIfNotExists(db, 'messages', 'product',      "TEXT DEFAULT ''");
 
   // Criar índices que dependem de colunas adicionadas por migração
   db.exec(`
@@ -1309,25 +1310,26 @@ app.post('/api/companies/:id/message', (req, res) => {
       || db.prepare('SELECT * FROM contacts WHERE company_id=? LIMIT 1').get(req.params.id);
   if (!contact) { db.close(); return res.status(404).json({ error: 'Contato não encontrado' }); }
   const prompt_used = (req.body.prompt_used || '').toString() || null;
+  const product = (req.body.product || '').toString().trim(); // produto sendo vendido (pra IA lembrar)
   // status: 'pending' = rascunho (avaliável/editável antes de enviar) | 'sent' = enviada direto.
   const status = req.body.status === 'pending' ? 'pending' : 'sent';
   const approved = status === 'sent' ? 1 : 0;
   const r = db.prepare(
-    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at, prompt_used) VALUES (?,?,'whatsapp',1,'text',?,?,?,?,datetime('now'),?)"
-  ).run(contact.id, req.params.id, content, content, status, approved, prompt_used);
+    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at, prompt_used, product) VALUES (?,?,'whatsapp',1,'text',?,?,?,?,datetime('now'),?,?)"
+  ).run(contact.id, req.params.id, content, content, status, approved, prompt_used, product);
   db.close();
   res.json({ ok: true, id: r.lastInsertRowid, status });
 });
 
 // Prompt de geração de mensagem de WhatsApp de vendas, estruturado para APROVEITAR
 // o aprendizado: regras duras (o que o revisor reprovou) + checagem final anti-violação.
-const WA_SYSTEM = 'Você é um SDR brasileiro especialista em prospecção por WhatsApp. Escreve mensagens curtas, humanas e específicas para conseguir UMA reunião com a pessoa. Nunca soa como robô, template ou marketing genérico. Segue à risca as regras dadas pelo revisor humano.';
+const WA_SYSTEM = 'Você é um SDR brasileiro especialista em prospecção por WhatsApp. Escreve mensagens curtas, humanas e específicas para conseguir UMA reunião com a pessoa. Nunca soa como robô, template ou marketing genérico. Segue à risca as regras dadas pelo revisor humano. REGRA ABSOLUTA: sua resposta é SEMPRE o texto de UMA mensagem de WhatsApp pronta para enviar ao lead — você NUNCA faz perguntas, NUNCA pede esclarecimento, NUNCA comenta sobre a tarefa nem fala com o operador. Se faltar alguma informação, use o melhor palpite pelo contexto e escreva a mensagem mesmo assim.';
 
-function buildWhatsappUserPrompt({ company, contact, observation, learned, previous }) {
+function buildWhatsappUserPrompt({ company, contact, observation, learned, previous, product }) {
   const who = `${contact?.name || 'o contato'}${contact?.role ? ` (${contact.role})` : ''}${company ? ` — empresa ${company.name}${company.sector ? `, setor ${company.sector}` : ''}` : ''}`;
   return `# Tarefa
 Gere uma nova versão de uma mensagem de WhatsApp para ${who}. Objetivo: conseguir uma reunião curta.
-
+${product ? `\n# Produto/serviço sendo vendido (é ISTO que a mensagem oferece — mencione de forma natural)\n${product}\n` : ''}
 # Mensagem atual (BASE — mantenha o mesmo assunto, o mesmo produto/oferta e o mesmo objetivo dela)
 """${previous || '(ainda não há mensagem)'}"""
 
@@ -1346,7 +1348,31 @@ ${contact?.context ? `\n# Sobre a pessoa (personalize)\n${contact.context}\n` : 
 # Checagem final (obrigatória antes de responder)
 Confirme que a nova mensagem trata do MESMO assunto/produto da mensagem atual${observation ? ' e que a correção pedida foi aplicada. Uma regra "não falar sobre X" = o tema X não pode aparecer em NENHUMA frase, nem indireta, nem com sinônimos.' : '.'} Se algo estiver errado, reescreva antes de responder.
 
-Responda APENAS com a mensagem final de WhatsApp. Sem aspas, sem título, sem comentários.`;
+Se algum detalhe faltar (produto, etc.), NÃO pergunte e NÃO comente — escreva a melhor mensagem possível com o contexto que tem, mantendo o assunto da mensagem atual.
+Responda APENAS com o texto da mensagem final de WhatsApp — jamais uma pergunta, pedido de esclarecimento ou explicação. Sem aspas, sem título, sem comentários.`;
+}
+
+// Detecta quando a IA "saiu do papel" e respondeu com uma pergunta/comentário
+// em vez de uma mensagem de WhatsApp pronta.
+function looksLikeMeta(t) {
+  const s = (t || '').toLowerCase();
+  if (/poderia me (informar|dizer|confirmar)|qual (é|e) o produto|que produto|qual produto|preciso (entender|saber|de mais|de mais detalhes)|me (informe|diga|confirme|esclare)|não ficou claro|nao ficou claro|pode esclarecer|não sei qual|nao sei qual|o revisor disse|a mensagem atual|para garantir que/.test(s)) return true;
+  if (/\?\s*$/.test((t || '').trim()) && /(revisor|produto|mensagem|corrig|reescrev)/.test(s)) return true;
+  return false;
+}
+
+async function generateWhatsapp(company, contact, observation, learned, previous, product) {
+  const userPrompt = buildWhatsappUserPrompt({ company, contact, observation, learned, previous, product });
+  let out = (await callClaude(WA_SYSTEM, userPrompt, 400) || '').trim();
+  if (!out || /^\[ERRO API/.test(out)) return { error: 'Falha ao gerar (IA indisponível)' };
+  if (looksLikeMeta(out)) {
+    // Modelo perguntou em vez de gerar — força uma reescrita direta.
+    const firm = userPrompt + '\n\nATENÇÃO: NÃO faça perguntas nem comentários. Escreva AGORA apenas a mensagem final de WhatsApp, começando direto pela saudação ao lead pelo primeiro nome.';
+    const retry = (await callClaude(WA_SYSTEM, firm, 400) || '').trim();
+    if (retry && !/^\[ERRO API/.test(retry) && !looksLikeMeta(retry)) out = retry;
+    else if (previous) out = previous; // último recurso: mantém a mensagem atual (nunca devolve pergunta)
+  }
+  return { text: out, prompt: userPrompt };
 }
 
 // "Gerar de novo": reescreve a mensagem usando a observação do avaliador + o que a IA
@@ -1362,10 +1388,10 @@ app.post('/api/messages/:id/regenerate', async (req, res) => {
   const learned = buildLearnedContext(db, msg.channel || 'whatsapp', role);
   db.close();
 
-  const userPrompt = buildWhatsappUserPrompt({ company, contact, observation, learned, previous: msg.content || msg.ai_original || '' });
-  const out = await callClaude(WA_SYSTEM, userPrompt, 400);
-  if (!out || /^\[ERRO API/.test(out)) return res.status(502).json({ error: 'Falha ao regenerar (IA indisponível)' });
-  const newText = out.trim();
+  const gen = await generateWhatsapp(company, contact, observation, learned, msg.content || msg.ai_original || '', msg.product || '');
+  if (gen.error) return res.status(502).json({ error: gen.error });
+  const newText = gen.text;
+  const userPrompt = gen.prompt;
 
   const db2 = getDb();
   let versions = [];

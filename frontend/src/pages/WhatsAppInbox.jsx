@@ -420,7 +420,7 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
       const mres = await fetch(`${API}/api/companies/${companyId}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contact_id: Number(selectedContact), content: d.hook || '', status: 'pending' }),
+        body: JSON.stringify({ contact_id: Number(selectedContact), content: d.hook || '', status: 'pending', product }),
       })
       const md = await mres.json()
       if (md.error) throw new Error(md.error)
