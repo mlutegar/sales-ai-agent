@@ -289,7 +289,11 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
   }, [companyId]) // eslint-disable-line
 
   useEffect(() => {
-    setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 80)
+    // Rola só o container das mensagens (nunca a página) — evita o "pulo" ao abrir a aba.
+    setTimeout(() => {
+      const el = bottomRef.current?.parentElement
+      if (el) el.scrollTop = el.scrollHeight
+    }, 80)
   }, [data?.messages?.length])
 
   async function approve(msgId) {
@@ -898,6 +902,12 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
   const [selected,   setSelected]   = useState(initialCompanyId ?? null)
   const [loading,    setLoading]    = useState(true)
   const [search,     setSearch]     = useState('')
+  const [listCollapsed, setListCollapsed] = useState(() => {
+    try { return localStorage.getItem('wa_list_collapsed') === '1' } catch { return false }
+  })
+  function toggleList() {
+    setListCollapsed(v => { try { localStorage.setItem('wa_list_collapsed', v ? '0' : '1') } catch {} return !v })
+  }
   const pollRef = useRef(null)
 
   const load = useCallback(async () => {
@@ -923,16 +933,29 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
 
   // Altura total disponível menos navbar e statcards (~160px)
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)', gap: 8 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 150px)', gap: 8 }}>
     <div style={{ display: 'flex', flex: 1, minHeight: 0, border: '1px solid #e2e8f0', borderRadius: 12, overflow: 'hidden', background: '#fff', boxShadow: '0 2px 8px rgba(0,0,0,.06)' }}>
 
-      {/* ── Lista de chats ─────────────────────────────────────────────────── */}
+      {/* ── Lista de chats (retrátil) ──────────────────────────────────────── */}
+      {listCollapsed ? (
+        <div style={{ width: 46, flexShrink: 0, borderRight: '1px solid #e2e8f0', background: '#075e54', display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: 12, gap: 14 }}>
+          <button onClick={toggleList} title="Mostrar conversas" style={{ background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: '1.15rem', padding: 0 }}>
+            <i className="bi bi-chevron-double-right" />
+          </button>
+          <i className="bi bi-chat-left-text" style={{ color: 'rgba(255,255,255,.85)', fontSize: '1.05rem' }} title="Conversas" />
+        </div>
+      ) : (
       <div style={{ width: 280, flexShrink: 0, borderRight: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', background: '#fafafa' }}>
 
         {/* header lista */}
         <div style={{ padding: '12px 14px', borderBottom: '1px solid #e2e8f0', background: '#075e54' }}>
-          <div style={{ color: '#fff', fontWeight: 700, fontSize: '.95rem', marginBottom: 8 }}>
-            <i className="bi bi-whatsapp me-2" />WhatsApp
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <span style={{ color: '#fff', fontWeight: 700, fontSize: '.95rem' }}>
+              <i className="bi bi-whatsapp me-2" />WhatsApp
+            </span>
+            <button onClick={toggleList} title="Ocultar lista de conversas" style={{ background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: '1rem', padding: 0, lineHeight: 1 }}>
+              <i className="bi bi-chevron-double-left" />
+            </button>
           </div>
           <input
             className="form-control form-control-sm"
@@ -1012,6 +1035,7 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
           })}
         </div>
       </div>
+      )}
 
       {/* ── Painel direito ─────────────────────────────────────────────────── */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

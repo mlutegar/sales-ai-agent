@@ -11,7 +11,6 @@ export const TABS = [
   { key: 'dashboard',      path: '/dashboard',     icon: 'bi-bar-chart-line',    label: 'Dashboard' },
   { key: 'rlhf',           path: '/rlhf',          icon: 'bi-stars',             label: 'RLHF / Curadoria', badgeKey: 'rlhf' },
   { key: 'rag',            path: '/rag',           icon: 'bi-file-earmark-text', label: 'RAG / Docs' },
-  { key: 'golden',         path: '/golden',        icon: 'bi-trophy',            label: 'Casos de Ouro' },
   { key: 'agenda',         path: '/agenda',        icon: 'bi-calendar-check',    label: 'Agenda' },
   { key: 'lgpd',           path: '/lgpd',          icon: 'bi-shield-lock',       label: 'LGPD' },
   { key: 'metrics',        path: '/metrics',       icon: 'bi-graph-up-arrow',    label: 'Métricas' },
