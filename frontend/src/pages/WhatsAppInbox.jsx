@@ -2,6 +2,10 @@ import React, { useState, useEffect, useCallback, useRef } from 'react'
 
 const API = ''
 
+// Cargo do contato: o texto original da planilha (title) ou um rótulo legível da categoria
+const ROLE_LABEL = { c_level: 'C-Level / Diretor', manager: 'Gerente / Coordenador', engineer: 'Engenheiro / TI', other: 'Outro' }
+const cargoDe = (c) => (c && c.title && c.title.trim()) ? c.title : (ROLE_LABEL[c?.role] || c?.role || '')
+
 const SLOTS_LABEL = dt =>
   new Date(dt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
 
@@ -559,6 +563,11 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
           {contacts.length === 1 && (
             <span style={{ fontSize: '.8rem', color: '#555' }}>
               <i className="bi bi-person me-1" />{contacts[0].name}
+            </span>
+          )}
+          {selectedContactObj && cargoDe(selectedContactObj) && (
+            <span className="badge" style={{ background: '#eef4ff', color: '#1a44be', fontSize: '.7rem', whiteSpace: 'nowrap' }}>
+              <i className="bi bi-briefcase me-1" />{cargoDe(selectedContactObj)}
             </span>
           )}
         </div>

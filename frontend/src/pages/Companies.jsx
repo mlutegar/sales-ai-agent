@@ -380,6 +380,10 @@ function BulkToolbar({ selected, onClear, onBulkResearch, onBulkMessages, onBulk
   );
 }
 
+// Rótulo legível para a categoria do cargo (usado quando não há o cargo original da planilha)
+const ROLE_LABEL = { c_level: 'C-Level / Diretor', manager: 'Gerente / Coordenador', engineer: 'Engenheiro / TI', other: 'Outro' };
+const cargoDe = (c) => (c && (c.title && c.title.trim())) ? c.title : (ROLE_LABEL[c?.role] || c?.role || '');
+
 // ── ContactCard (contato + contexto pessoal do lead) ────────────────────────────
 function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversation, toast }) {
   const [savedCtx, setSavedCtx] = useState(contact.context || '');
@@ -424,7 +428,7 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversati
               </span>
             )}
           </div>
-          {contact.role && <div className="text-muted" style={{ fontSize: '.78rem' }}>{contact.role}</div>}
+          {cargoDe(contact) && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-briefcase me-1"></i>{cargoDe(contact)}</div>}
           {contact.email && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-envelope me-1"></i>{contact.email}</div>}
           {contact.whatsapp && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-whatsapp me-1"></i>{contact.whatsapp}</div>}
           {contact.linkedin && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-linkedin me-1"></i><a href={contact.linkedin} target="_blank" rel="noreferrer">LinkedIn</a></div>}

@@ -341,6 +341,7 @@ function initDb() {
   addColumnIfNotExists(db, 'contacts', 'last_wa_interaction', "TEXT");
   addColumnIfNotExists(db, 'contacts', 'wa_opt_out', "INTEGER DEFAULT 0");
   addColumnIfNotExists(db, 'contacts', 'context', "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'contacts', 'title', "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'messages', 'is_template',  "INTEGER DEFAULT 0");
   addColumnIfNotExists(db, 'messages', 'template_name',"TEXT");
   addColumnIfNotExists(db, 'messages', 'created_at',   "TEXT");
@@ -1108,7 +1109,8 @@ app.post('/api/companies/import-bulk', (req, res) => {
   const findContact   = db.prepare("SELECT id FROM contacts WHERE email != '' AND email=? AND company_id=?");
   const findContactByName = db.prepare('SELECT id FROM contacts WHERE LOWER(TRIM(name))=LOWER(TRIM(?)) AND company_id=?');
   const countContacts = db.prepare('SELECT COUNT(*) as c FROM contacts WHERE company_id=?');
-  const insContact    = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, import_source) VALUES (?,?,?,?,?,?,?,?)');
+  const insContact    = db.prepare('INSERT INTO contacts (company_id, name, role, title, email, linkedin, whatsapp, is_primary, import_source) VALUES (?,?,?,?,?,?,?,?,?)');
+  const backfillTitle = db.prepare("UPDATE contacts SET title=? WHERE id=? AND (title IS NULL OR title='')");
   const logContact    = db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)');
 
   // Mapa de deduplicação por chave normalizada (ignora acento/caixa/espaços).
@@ -1143,11 +1145,12 @@ app.post('/api/companies/import-bulk', (req, res) => {
     // Deduplicar por email (se tiver) ou por nome+empresa
     let email = (row.email || '').toString().trim();
     if (email && !isValidEmailServer(email)) { errors.push(`E-mail inválido ignorado: ${email}`); email = ''; }
-    if (email && findContact.get(email, companyId)) { skipped++; continue; }
-    if (!email && findContactByName.get(contactName, companyId)) { skipped++; continue; }
+    const rawTitle = (row.role || '').toString().trim().slice(0, 120); // cargo original da planilha
+    const dup = (email && findContact.get(email, companyId)) || (!email && findContactByName.get(contactName, companyId));
+    if (dup) { if (rawTitle) backfillTitle.run(rawTitle, dup.id); skipped++; continue; } // preenche o cargo se faltava
 
     const isPrimary = countContacts.get(companyId).c === 0 ? 1 : 0;
-    const cr = insContact.run(companyId, contactName, roleFromText(row.role), email, '', normalizePhone(row.whatsapp), isPrimary, importSource);
+    const cr = insContact.run(companyId, contactName, roleFromText(row.role), rawTitle, email, '', normalizePhone(row.whatsapp), isPrimary, importSource);
     logContact.run(companyId, cr.lastInsertRowid, 'contact_added', `Contato "${contactName}" importado (${importSource || 'planilha'})`);
     contactsCreated++;
   }
