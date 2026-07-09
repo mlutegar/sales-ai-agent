@@ -17,6 +17,17 @@ function getDb() {
   return new DatabaseSync(DB_PATH);
 }
 
+// ── SSE: push de atualizações do inbox WhatsApp em tempo real ──────────────────
+// Substitui o polling do frontend. Cada aba conectada fica registrada aqui e
+// recebe um evento sempre que uma conversa muda (nova mensagem, envio, etc.).
+const inboxSseClients = new Set();
+function broadcastInboxUpdate() {
+  const payload = 'event: inbox\ndata: {"type":"update"}\n\n';
+  for (const client of inboxSseClients) {
+    try { client.write(payload); } catch (_) { /* conexão morta, será limpa no close */ }
+  }
+}
+
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -141,12 +152,31 @@ function normalizePhone(phone) {
   return phone.trim();
 }
 
+// Normaliza o tipo de call para um dos 3 níveis válidos.
+// cold  = lead totalmente novo, sem vínculo prévio (dispara busca automática)
+// warm  = lead já qualificado, contexto fornecido manualmente pelo operador
+// frozen = lead que já conhece a empresa (mensagem de reconexão)
+const CALL_TYPES = ['cold', 'warm', 'frozen'];
+function normalizeCallType(v) {
+  const t = (v || '').toString().trim().toLowerCase();
+  return CALL_TYPES.includes(t) ? t : 'cold';
+}
+
 // ── Helper: adiciona coluna apenas se não existir ─────────────────────────────
 function addColumnIfNotExists(db, table, column, definition) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all();
   if (!cols.find(c => c.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
+}
+
+// ── Helper: garante um único contato primário por empresa ─────────────────────
+// Zera qualquer is_primary=1 existente da empresa. Deve ser chamado ANTES de
+// inserir/atualizar um contato como primário — o índice único parcial
+// idx_one_primary_per_company rejeitaria um segundo primário. Centraliza a regra
+// para que os vários pontos de criação de contato não divirjam.
+function clearPrimaryContact(db, companyId) {
+  db.prepare('UPDATE contacts SET is_primary=0 WHERE company_id=? AND is_primary=1').run(companyId);
 }
 
 // ── Init DB ───────────────────────────────────────────────────────────────────
@@ -254,6 +284,17 @@ function initDb() {
       details    TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS search_logs (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id     INTEGER,
+      contact_id     INTEGER,
+      call_type      TEXT,
+      source         TEXT,
+      query          TEXT,
+      result_summary TEXT,
+      created_at     TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_search_logs_contact ON search_logs(contact_id);
     CREATE TABLE IF NOT EXISTS learned_patterns (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
       channel     TEXT,
@@ -342,6 +383,11 @@ function initDb() {
   addColumnIfNotExists(db, 'contacts', 'wa_opt_out', "INTEGER DEFAULT 0");
   addColumnIfNotExists(db, 'contacts', 'context', "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'contacts', 'title', "TEXT DEFAULT ''");
+  // Tipo de call: 'cold' (lead totalmente novo → busca automática), 'warm' (qualificado,
+  // contexto manual do operador), 'frozen' (lead que já conhece a empresa → reconexão).
+  addColumnIfNotExists(db, 'contacts', 'call_type', "TEXT DEFAULT 'cold'");
+  // Persona do prospect no simulador WhatsApp — mantém coerência de tom entre turnos.
+  addColumnIfNotExists(db, 'contacts', 'sim_tone', "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'messages', 'is_template',  "INTEGER DEFAULT 0");
   addColumnIfNotExists(db, 'messages', 'template_name',"TEXT");
   addColumnIfNotExists(db, 'messages', 'created_at',   "TEXT");
@@ -350,6 +396,24 @@ function initDb() {
   addColumnIfNotExists(db, 'messages', 'comment_scope',"TEXT DEFAULT 'global'");
   addColumnIfNotExists(db, 'messages', 'versions',     "TEXT DEFAULT '[]'");
   addColumnIfNotExists(db, 'messages', 'product',      "TEXT DEFAULT ''");
+  // RLHF v2: threading (histórico da conversa) + tipagem de sinal de feedback
+  addColumnIfNotExists(db, 'messages', 'thread_id',    "INTEGER");
+  addColumnIfNotExists(db, 'messages', 'seq_no',       "INTEGER");
+  addColumnIfNotExists(db, 'messages', 'direction',    "TEXT DEFAULT 'outbound'");
+  addColumnIfNotExists(db, 'messages', 'feedback_kind',"TEXT");
+  // Snapshot do texto exato a que uma crítica se refere — impede que a âncora crítica↔mensagem
+  // "deslize" quando a mensagem é regenerada (o ai_original é sobrescrito).
+  addColumnIfNotExists(db, 'messages', 'criticized_text', "TEXT");
+  // RLHF v2: regras destiladas com escopo, ciclo de vida e rastreabilidade
+  addColumnIfNotExists(db, 'learned_patterns', 'scope',              "TEXT DEFAULT 'global'");
+  addColumnIfNotExists(db, 'learned_patterns', 'status',             "TEXT DEFAULT 'active'");
+  addColumnIfNotExists(db, 'learned_patterns', 'source_message_ids', "TEXT DEFAULT '[]'");
+  addColumnIfNotExists(db, 'learned_patterns', 'updated_at',         "TEXT");
+  // Backfill de thread_id/seq_no para mensagens antigas (uma thread por contato)
+  try {
+    db.exec(`UPDATE messages SET thread_id=contact_id WHERE thread_id IS NULL AND contact_id IS NOT NULL`);
+    db.exec(`UPDATE messages SET direction='outbound' WHERE direction IS NULL`);
+  } catch (_) { /* colunas ainda não existem em bases muito antigas */ }
 
   // Criar índices que dependem de colunas adicionadas por migração
   db.exec(`
@@ -394,6 +458,28 @@ function initDb() {
   // Rastreamento de origem da importação
   addColumnIfNotExists(db, 'contacts',  'import_source', "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'companies', 'import_source', "TEXT DEFAULT ''");
+
+  // ── WhatsApp: deduplicação de mensagens recebidas ───────────────────────────
+  // A Meta reenvia webhooks em caso de timeout/erro. Guardamos o id único da
+  // mensagem (msg.id) para ignorar reentregas e evitar mensagens duplicadas.
+  addColumnIfNotExists(db, 'messages', 'wa_message_id', "TEXT");
+
+  // Normaliza contatos primários duplicados ANTES de criar o índice único parcial
+  // (o índice falharia se já existissem múltiplos is_primary=1 na mesma empresa).
+  db.exec(`
+    UPDATE contacts SET is_primary=0
+    WHERE is_primary=1
+      AND id NOT IN (SELECT MIN(id) FROM contacts WHERE is_primary=1 GROUP BY company_id);
+  `);
+  // Índices que garantem unicidade e aceleram o inbox
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_one_primary_per_company
+      ON contacts(company_id) WHERE is_primary = 1;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_wa_message_id
+      ON messages(wa_message_id) WHERE wa_message_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_messages_company_channel
+      ON messages(company_id, channel, status, id);
+  `);
 
   // Seed usuário admin padrão
   const adminUser = db.prepare('SELECT id FROM users WHERE username = ?').get('admin');
@@ -531,10 +617,29 @@ app.post('/api/webhook/whatsapp', (req, res) => {
       const phone = msg.from;
       const text  = msg.text.body;
 
+      const waMsgId = msg.id || null;
       const db = getDb();
+
+      // Dedup: se a Meta reenviou o mesmo webhook, ignoramos silenciosamente.
+      if (waMsgId) {
+        const dup = db.prepare('SELECT id FROM messages WHERE wa_message_id=?').get(waMsgId);
+        if (dup) {
+          console.log(`[WhatsApp Webhook] Reentrega ignorada (wa_message_id=${waMsgId})`);
+          db.close();
+          return;
+        }
+      }
+
+      // Busca o contato pelo número normalizado (compara apenas os dígitos finais,
+      // evitando falsos positivos do antigo LIKE '%phone%').
+      const phoneTail = (phone || '').replace(/\D/g, '').slice(-8);
       const contact = db.prepare(
-        'SELECT c.*, co.auto_reply_mode, co.name as company_name FROM contacts c JOIN companies co ON c.company_id=co.id WHERE c.whatsapp LIKE ? LIMIT 1'
-      ).get(`%${phone}%`);
+        `SELECT c.*, co.auto_reply_mode, co.name as company_name
+           FROM contacts c JOIN companies co ON c.company_id=co.id
+          WHERE c.whatsapp != ''
+            AND replace(replace(replace(replace(replace(c.whatsapp,'+',''),'-',''),' ',''),'(',''),')','') LIKE ?
+          LIMIT 1`
+      ).get(`%${phoneTail}`);
 
       if (!contact) {
         console.log(`[WhatsApp Webhook] Número desconhecido: ${phone}`);
@@ -545,12 +650,13 @@ app.post('/api/webhook/whatsapp', (req, res) => {
       // 1. Abre janela de 24h
       db.prepare("UPDATE contacts SET last_wa_interaction=datetime('now') WHERE id=?").run(contact.id);
 
-      // 2. Salva mensagem recebida
+      // 2. Salva mensagem recebida (com wa_message_id para dedup futura)
       const ins = db.prepare(
-        "INSERT INTO messages (contact_id,company_id,channel,day,msg_type,content,ai_original,status,approved,created_at) VALUES (?,?,'whatsapp',1,'text',?,?,'received',1,datetime('now'))"
-      ).run(contact.id, contact.company_id, text, text);
+        "INSERT INTO messages (contact_id,company_id,channel,day,msg_type,content,ai_original,status,approved,created_at,wa_message_id) VALUES (?,?,'whatsapp',1,'text',?,?,'received',1,datetime('now'),?)"
+      ).run(contact.id, contact.company_id, text, text, waMsgId);
       const messageId = ins.lastInsertRowid;
       db.close();
+      broadcastInboxUpdate();
 
       // 3. Classificação de sentimento via IA
       const sentPrompt = `
@@ -607,6 +713,7 @@ Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou
       }
 
       db2.close();
+      broadcastInboxUpdate();
       console.log(`[WhatsApp Webhook] ✅ Processado: ${contact.company_name} | sentimento: ${sentiment}`);
     } catch (err) {
       console.error('[WhatsApp Webhook] Erro no processamento assíncrono:', err.message);
@@ -811,9 +918,25 @@ function extractJsonLoose(s) {
   return m ? m[0] : raw;
 }
 
-async function callClaude(systemPrompt, userPrompt, maxTokens = 800) {
+// Normaliza uma lista de turnos p/ a API do Claude: mescla turnos consecutivos do mesmo papel
+// e garante que a conversa comece com 'user' (a API rejeita histórico iniciando em 'assistant').
+function normalizeTurns(turns) {
+  const out = [];
+  for (const t of turns) {
+    const txt = (t?.content || '').trim();
+    if (!txt) continue;
+    if (out.length && out[out.length - 1].role === t.role) out[out.length - 1].content += '\n' + txt;
+    else out.push({ role: t.role, content: txt });
+  }
+  while (out.length && out[0].role !== 'user') out.shift();
+  return out;
+}
+
+// `priorTurns` (opcional): histórico estruturado [{role:'user'|'assistant', content}] anexado ANTES
+// do userPrompt. Melhora a coerência multi-turno vs. despejar o histórico como texto no prompt.
+async function callClaude(systemPrompt, userPrompt, maxTokens = 800, priorTurns = null) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  
+
   // MOCK MODE (Modo de Demonstração Offline)
   // Caso a chave seja a padrão ("sk-ant-sua-chave-aqui") ou esteja vazia, simula as respostas do Claude com textos de alta qualidade
   if (!apiKey || apiKey === 'sk-ant-sua-chave-aqui') {
@@ -882,7 +1005,7 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 800) {
         model: 'claude-sonnet-4-6',
         max_tokens: maxTokens,
         system: systemPrompt,
-        messages: [{ role: 'user', content: userPrompt }],
+        messages: normalizeTurns([...(Array.isArray(priorTurns) ? priorTurns : []), { role: 'user', content: userPrompt }]),
       }),
     });
     const data = await res.json();
@@ -930,6 +1053,85 @@ async function callClaudeWithSearch(systemPrompt, userPrompt, maxTokens = 1500) 
     console.warn('[web_search] indisponível, usando pesquisa sem busca:', e.message);
     return callClaude(systemPrompt, userPrompt, maxTokens);
   }
+}
+
+// Prepara o contexto de abordagem conforme o TIPO DE CALL do contato.
+// - cold  : lead totalmente novo → dispara busca automática na WEB + base de conhecimento
+//           (golden_cases/learned_patterns) e registra cada passo em `search_logs`.
+// - warm  : lead já qualificado → usa EXATAMENTE o contexto manual do operador, SEM busca.
+// - frozen: lead que já conhece a empresa → usa contexto/histórico existente, sem busca nova.
+async function prepareCallContext(company, contact, productValue) {
+  const callType = normalizeCallType(contact?.call_type);
+  productValue = productValue || 'solução de automação de vendas com IA';
+
+  if (callType === 'warm') {
+    console.log(`[warm-call] contato ${contact?.id} (${contact?.name}) — usando contexto manual do operador, SEM busca automática.`);
+    return { call_type: 'warm', hook: null, autoResearched: false, manualContext: contact?.context || '' };
+  }
+  if (callType === 'frozen') {
+    console.log(`[frozen-call] contato ${contact?.id} (${contact?.name}) — lead já conhece a empresa; reconexão, sem busca nova.`);
+    return { call_type: 'frozen', hook: company?.research_hook || null, autoResearched: false, manualContext: contact?.context || '' };
+  }
+
+  // ── COLD: lead novo, sem vínculo prévio → pesquisar antes de abordar ──────────
+  console.log(`[cold-search] contato ${contact?.id} (${contact?.name}) — lead novo; iniciando busca externa (web + base de conhecimento)...`);
+  const roleInfo = ROLE_PROFILES[contact?.role] || ROLE_PROFILES.other;
+
+  // 1) Base de conhecimento interna (golden_cases + padrões aprendidos)
+  let kbSummary = '';
+  const dbk = getDb();
+  try {
+    const golden = dbk.prepare('SELECT content FROM golden_cases ORDER BY score DESC LIMIT 2').all();
+    const goldenCtx = golden.map(g => g.content).join('\n');
+    const learned = buildLearnedContext(dbk, 'whatsapp', contact?.role || 'other');
+    kbSummary = [goldenCtx, learned].filter(Boolean).join('\n');
+    dbk.prepare('INSERT INTO search_logs (company_id, contact_id, call_type, source, query, result_summary) VALUES (?,?,?,?,?,?)')
+      .run(company.id, contact?.id || null, 'cold', 'knowledge_base',
+           `base de conhecimento (golden_cases + learned_patterns, role=${contact?.role || 'other'})`,
+           (kbSummary || '(vazio)').slice(0, 500));
+  } catch (e) { console.warn('[cold-search] base de conhecimento indisponível:', e.message); }
+  dbk.close();
+  console.log(`[cold-search] base de conhecimento consultada (${kbSummary.length} chars).`);
+
+  // 2) Busca na WEB (Claude com web_search nativo)
+  const webQuery = `Notícias e contexto recentes sobre a empresa "${company.name}"${company.sector ? ' (setor: ' + company.sector + ')' : ''}${contact ? ' e o contato ' + contact.name + ' (' + contact.role + ')' : ''}`;
+  const prompt = `
+Pesquise na WEB informações REAIS e recentes sobre a empresa "${company.name}"${company.sector ? ' (setor: ' + company.sector + ')' : ''}${contact ? ' e, se possível, sobre o contato ' + contact.name + ' (' + contact.role + ')' : ''}. Procure por: notícias recentes, expansões, contratações, rodadas de investimento, lançamentos de produto, parcerias e desafios do setor.
+
+Produto sendo vendido: ${productValue}
+Perfil do cargo: foco em ${roleInfo.focus}, tom ${roleInfo.tone}
+${kbSummary ? 'Base de conhecimento interna (use como apoio):\n' + kbSummary.slice(0, 800) : ''}
+
+Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com exatamente estas chaves:
+- "research_context": array de 2-3 strings curtas (uma frase cada), cada uma com um fato REAL encontrado
+- "hook": uma única string (máx 2 linhas) conectando um gancho real ao produto
+- "pain_points": array de exatamente 3 strings (dores específicas do setor/porte)
+- "value_proposition": uma única string
+- "sources": array de URLs usados como fonte (strings)
+
+Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em tendências reais do setor e indique isso. Responda APENAS com JSON válido, sem markdown, sem comentários.`;
+
+  const result = await callClaudeWithSearch('Você é assistente de pesquisa de vendas B2B que usa busca na web para encontrar informações reais e atuais sobre empresas e seus executivos.', prompt, 2600);
+  let hook, ctx;
+  let raw = (result || '').replace(/```json\s*|\s*```/g, '').trim();
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (jsonMatch) raw = jsonMatch[0];
+  try { const p = JSON.parse(raw); hook = p.hook || result; ctx = JSON.stringify(p); }
+  catch { hook = result; ctx = result; }
+
+  const dbw = getDb();
+  dbw.prepare('INSERT INTO search_logs (company_id, contact_id, call_type, source, query, result_summary) VALUES (?,?,?,?,?,?)')
+    .run(company.id, contact?.id || null, 'cold', 'web', webQuery, (hook || '(sem retorno)').slice(0, 500));
+  dbw.prepare('UPDATE companies SET research_hook=?, research_context=?, status=? WHERE id=?').run(hook, ctx, 'researched', company.id);
+  // Retenção: mantém apenas os 30 registros de busca mais recentes por contato.
+  if (contact?.id) {
+    dbw.prepare(`DELETE FROM search_logs WHERE contact_id=? AND id NOT IN (
+      SELECT id FROM search_logs WHERE contact_id=? ORDER BY id DESC LIMIT 30
+    )`).run(contact.id, contact.id);
+  }
+  dbw.close();
+  console.log(`[cold-search] busca web concluída. hook="${(hook || '').slice(0, 80)}"`);
+  return { call_type: 'cold', hook, autoResearched: true, manualContext: contact?.context || '' };
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1057,6 +1259,7 @@ app.delete('/api/companies/:id/flags/:flag', (req, res) => {
 
 app.post('/api/companies', (req, res) => {
   const { name, sector, contact_name, contact_role, contact_email, contact_linkedin, contact_whatsapp } = req.body;
+  const contactCallType = normalizeCallType(req.body.contact_call_type);
   if (!name) return res.status(400).json({ error: 'Nome da empresa é obrigatório' });
   const db = getDb();
   // Deduplicação por chave normalizada (ignora acento/caixa/espaços):
@@ -1075,8 +1278,8 @@ app.post('/api/companies', (req, res) => {
   // Cria o primeiro contato (enviado pelo formulário "Nova Empresa") se informado.
   let contactId = null;
   if (contact_name && contact_name.trim()) {
-    const cr = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary) VALUES (?,?,?,?,?,?,1)')
-      .run(companyId, contact_name.trim(), contact_role || 'other', contact_email || '', contact_linkedin || '', normalizePhone(contact_whatsapp));
+    const cr = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, call_type) VALUES (?,?,?,?,?,?,1,?)')
+      .run(companyId, contact_name.trim(), contact_role || 'other', contact_email || '', contact_linkedin || '', normalizePhone(contact_whatsapp), contactCallType);
     contactId = cr.lastInsertRowid;
     db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(companyId, contactId, 'contact_added', `Contato "${contact_name.trim()}" adicionado`);
   }
@@ -1165,7 +1368,7 @@ app.get('/api/companies/:id', (req, res) => {
   const company = db.prepare('SELECT * FROM companies WHERE id=?').get(req.params.id);
   if (!company) { db.close(); return res.status(404).json({ error: 'Empresa não encontrada' }); }
   const contacts = db.prepare('SELECT * FROM contacts WHERE company_id=? ORDER BY is_primary DESC, created_at ASC').all(req.params.id);
-  const messages = db.prepare('SELECT m.*, ct.name as contact_name FROM messages m LEFT JOIN contacts ct ON m.contact_id=ct.id WHERE m.company_id=? ORDER BY m.day').all(req.params.id);
+  const messages = db.prepare('SELECT m.*, ct.name as contact_name FROM messages m LEFT JOIN contacts ct ON m.contact_id=ct.id WHERE m.company_id=? ORDER BY m.day, m.id ASC').all(req.params.id);
   const sentiments = db.prepare('SELECT s.*, ct.name as contact_name FROM sentiment_logs s LEFT JOIN contacts ct ON s.contact_id=ct.id WHERE s.company_id=? ORDER BY s.created_at DESC LIMIT 10').all(req.params.id);
   const consent_logs = db.prepare('SELECT cl.*, ct.name as contact_name FROM consent_logs cl LEFT JOIN contacts ct ON cl.contact_id=ct.id WHERE cl.company_id=? ORDER BY cl.created_at DESC').all(req.params.id);
   const slots = db.prepare('SELECT * FROM schedule_slots WHERE company_id=?').all(req.params.id);
@@ -1231,7 +1434,8 @@ app.post('/api/companies/:id/contacts', (req, res) => {
 
   const isPrimary = db.prepare('SELECT COUNT(*) as c FROM contacts WHERE company_id=?').get(req.params.id).c === 0 ? 1 : 0;
   const normalizedWa = normalizePhone(whatsapp);
-  const r = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary) VALUES (?,?,?,?,?,?,?)').run(req.params.id, name, role || 'other', email || '', linkedin || '', normalizedWa, isPrimary);
+  const callType = normalizeCallType(req.body.call_type);
+  const r = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, call_type) VALUES (?,?,?,?,?,?,?,?)').run(req.params.id, name, role || 'other', email || '', linkedin || '', normalizedWa, isPrimary, callType);
   db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(req.params.id, r.lastInsertRowid, 'contact_added', `Contato "${name}" adicionado`);
   db.close();
   res.json({ id: r.lastInsertRowid });
@@ -1252,6 +1456,11 @@ app.patch('/api/companies/:companyId/contacts/:contactId', (req, res) => {
     if (dup) { db.close(); return res.status(409).json({ error: 'Contato com este e-mail já cadastrado nesta empresa' }); }
   }
   const normalizedWa = normalizePhone(whatsapp);
+  // call_type é opcional no PATCH: se não vier, mantém o valor atual.
+  if (req.body.call_type !== undefined) {
+    db.prepare('UPDATE contacts SET call_type=? WHERE id=? AND company_id=?')
+      .run(normalizeCallType(req.body.call_type), req.params.contactId, req.params.companyId);
+  }
   db.prepare('UPDATE contacts SET name=?, role=?, email=?, linkedin=?, whatsapp=? WHERE id=? AND company_id=?')
     .run(name, role || 'other', email || '', linkedin || '', normalizedWa, req.params.contactId, req.params.companyId);
   db.close();
@@ -1262,7 +1471,7 @@ app.patch('/api/companies/:companyId/contacts/:contactId/set-primary', (req, res
   const db = getDb();
   const contact = db.prepare('SELECT id FROM contacts WHERE id=? AND company_id=?').get(req.params.contactId, req.params.companyId);
   if (!contact) { db.close(); return res.status(404).json({ error: 'Contato não encontrado' }); }
-  db.prepare('UPDATE contacts SET is_primary=0 WHERE company_id=?').run(req.params.companyId);
+  clearPrimaryContact(db, req.params.companyId);
   db.prepare('UPDATE contacts SET is_primary=1 WHERE id=?').run(req.params.contactId);
   db.close();
   res.json({ ok: true });
@@ -1297,6 +1506,26 @@ app.put('/api/contacts/:id/context', (req, res) => {
   res.json({ ok: true, context });
 });
 
+// Atualiza apenas o tipo de call de um contato (cold/warm/frozen) — usado pelo painel do contato.
+app.put('/api/contacts/:id/call-type', (req, res) => {
+  const callType = normalizeCallType(req.body.call_type);
+  const db = getDb();
+  const contact = db.prepare('SELECT id FROM contacts WHERE id=?').get(req.params.id);
+  if (!contact) { db.close(); return res.status(404).json({ error: 'Contato não encontrado' }); }
+  db.prepare('UPDATE contacts SET call_type=? WHERE id=?').run(callType, req.params.id);
+  db.close();
+  res.json({ ok: true, call_type: callType });
+});
+
+// Log das buscas externas (internet + base de conhecimento) feitas para um contato.
+// Usado para VERIFICAR que o cold call disparou pesquisa antes de gerar a mensagem.
+app.get('/api/contacts/:id/search-logs', (req, res) => {
+  const db = getDb();
+  const rows = db.prepare('SELECT * FROM search_logs WHERE contact_id=? ORDER BY id DESC LIMIT 50').all(req.params.id);
+  db.close();
+  res.json(rows);
+});
+
 // Envia uma mensagem de WhatsApp avulsa na conversa (mensagem de saída, nossa).
 // Usado no workspace da aba WhatsApp para iniciar/continuar a conversa com o lead
 // sem precisar gerar a sequência multicanal.
@@ -1318,6 +1547,7 @@ app.post('/api/companies/:id/message', (req, res) => {
     "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at, prompt_used, product) VALUES (?,?,'whatsapp',1,'text',?,?,?,?,datetime('now'),?,?)"
   ).run(contact.id, req.params.id, content, content, status, approved, prompt_used, product);
   db.close();
+  broadcastInboxUpdate();
   res.json({ ok: true, id: r.lastInsertRowid, status });
 });
 
@@ -1325,8 +1555,26 @@ app.post('/api/companies/:id/message', (req, res) => {
 // o aprendizado: regras duras (o que o revisor reprovou) + checagem final anti-violação.
 const WA_SYSTEM = 'Você é um SDR brasileiro especialista em prospecção por WhatsApp. Escreve mensagens curtas, humanas e específicas para conseguir UMA reunião com a pessoa. Nunca soa como robô, template ou marketing genérico. Segue à risca as regras dadas pelo revisor humano. REGRA ABSOLUTA: sua resposta é SEMPRE o texto de UMA mensagem de WhatsApp pronta para enviar ao lead — você NUNCA faz perguntas, NUNCA pede esclarecimento, NUNCA comenta sobre a tarefa nem fala com o operador. Se faltar alguma informação, use o melhor palpite pelo contexto e escreva a mensagem mesmo assim.';
 
-function buildWhatsappUserPrompt({ company, contact, observation, learned, previous, product }) {
+function buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product }) {
   const who = `${contact?.name || 'o contato'}${contact?.role ? ` (${contact.role})` : ''}${company ? ` — empresa ${company.name}${company.sector ? `, setor ${company.sector}` : ''}` : ''}`;
+
+  // Bloco de REGRAS APRENDIDAS estruturado (v2), separando global x canal.
+  let rulesBlock = '';
+  if (rules && (rules.global?.length || rules.channel?.length)) {
+    rulesBlock = '\n# REGRAS APRENDIDAS com o revisor (aplique SEMPRE)';
+    if (rules.global?.length)  rulesBlock += '\nGerais:\n' + rules.global.map(x => `- ${x}`).join('\n');
+    if (rules.channel?.length) rulesBlock += '\nEspecíficas de WhatsApp:\n' + rules.channel.map(x => `- ${x}`).join('\n');
+    rulesBlock += '\n';
+  }
+  // Teto de tokens (#5): limita histórico e exemplos negativos a fatias do orçamento.
+  const cap = (s, n) => s && s.length > n ? s.slice(0, n) + '\n…(histórico anterior omitido)' : s;
+  const histBlock = (threadHistory && threadHistory.trim())
+    ? `\n# HISTÓRICO DA THREAD (respeite: não repita saudações/nome já usados; responda ao último ponto do lead)\n${cap(threadHistory, Math.floor(MAX_PROMPT_CHARS / 2))}\n`
+    : '';
+  const negBlock = (negExamples && negExamples.trim())
+    ? `\n# EXEMPLOS NEGATIVOS (reprovados — NÃO repita estes erros)\n${cap(negExamples, Math.floor(MAX_PROMPT_CHARS / 3))}\n`
+    : '';
+
   return `# Tarefa
 Gere uma nova versão de uma mensagem de WhatsApp para ${who}. Objetivo: conseguir uma reunião curta.
 ${product ? `\n# Produto/serviço sendo vendido (é ISTO que a mensagem oferece — mencione de forma natural)\n${product}\n` : ''}
@@ -1339,7 +1587,7 @@ A mensagem acima foi reprovada. Corrija EXATAMENTE isto: "${observation}".
 Mude só o necessário para atender a correção — mantenha o mesmo assunto/produto e objetivo (a não ser que a correção seja justamente sobre trocar o assunto).`
   : `# O que fazer
 NÃO houve reprovação. Gere uma VARIAÇÃO diferente da mensagem acima: mesmo assunto, mesmo produto/oferta e mesmo objetivo — mudando apenas a abordagem e a redação (abertura, ângulo, tom, estrutura). NÃO troque o tema nem remova o produto/assunto que a mensagem atual menciona.`}
-${contact?.context ? `\n# Sobre a pessoa (personalize)\n${contact.context}\n` : ''}${learned ? `\n# Regras aprendidas com o revisor (aplique SEMPRE)\n${learned}\n` : ''}
+${contact?.context ? `\n# Sobre a pessoa (personalize)\n${contact.context}\n` : ''}${rulesBlock}${histBlock}${negBlock}
 # Regras
 - Mantenha o assunto/produto da mensagem atual.
 - Não pareça IA nem template; soe como um humano no WhatsApp.
@@ -1361,8 +1609,9 @@ function looksLikeMeta(t) {
   return false;
 }
 
-async function generateWhatsapp(company, contact, observation, learned, previous, product) {
-  const userPrompt = buildWhatsappUserPrompt({ company, contact, observation, learned, previous, product });
+async function generateWhatsapp(company, contact, observation, ctx, previous, product) {
+  const { rules, negExamples, threadHistory } = ctx || {};
+  const userPrompt = buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product });
   let out = (await callClaude(WA_SYSTEM, userPrompt, 400) || '').trim();
   if (!out || /^\[ERRO API/.test(out)) return { error: 'Falha ao gerar (IA indisponível)' };
   if (looksLikeMeta(out)) {
@@ -1385,10 +1634,16 @@ app.post('/api/messages/:id/regenerate', async (req, res) => {
   const company = msg.company_id ? db.prepare('SELECT * FROM companies WHERE id=?').get(msg.company_id) : null;
   const role = contact?.role || 'other';
   const observation = (req.body.observation || msg.score_comment || '').toString().trim();
-  const learned = buildLearnedContext(db, msg.channel || 'whatsapp', role);
+  const channel = msg.channel || 'whatsapp';
+  // v2: blocos estruturados (regras + negativos ancorados + histórico da thread) — não mais o blob legado.
+  const ctx = {
+    rules: buildRules(db, channel, role),
+    negExamples: buildNegativeExamples(db, channel),
+    threadHistory: buildThreadHistory(db, msg.thread_id, msg.seq_no),
+  };
   db.close();
 
-  const gen = await generateWhatsapp(company, contact, observation, learned, msg.content || msg.ai_original || '', msg.product || '');
+  const gen = await generateWhatsapp(company, contact, observation, ctx, msg.content || msg.ai_original || '', msg.product || '');
   if (gen.error) return res.status(502).json({ error: gen.error });
   const newText = gen.text;
   const userPrompt = gen.prompt;
@@ -1624,6 +1879,9 @@ app.post('/api/companies/:id/find-contact', async (req, res) => {
   }
 
   const roleKey = roleFromText(result.role);
+  // Zera qualquer primário existente antes de marcar este como primário,
+  // evitando múltiplos contatos com is_primary=1 (que duplicam a conversa no inbox).
+  clearPrimaryContact(db2, company.id);
   const cr = db2.prepare(
     "INSERT INTO contacts (company_id, name, role, email, whatsapp, linkedin, is_primary, enrich_status, enrich_source) VALUES (?,?,?,?,?,?,1,?,?)"
   ).run(
@@ -1823,11 +2081,29 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
   db.prepare('DELETE FROM messages WHERE company_id=? AND contact_id=?').run(req.params.id, contact.id);
 
   const roleInfo = ROLE_PROFILES[contact.role] || ROLE_PROFILES.other;
-  const hook = company.research_hook || `Olá ${contact.name},`;
   const productValue = req.body.product_value || 'solução de automação de vendas com IA';
   const golden = db.prepare('SELECT title, content FROM golden_cases WHERE score>=4 LIMIT 3').all();
   const socialProof = golden.map(g => `- ${g.title}: ${g.content.substring(0, 80)}...`).join('\n');
   db.close();
+
+  // Prepara o contexto conforme o TIPO DE CALL (cold dispara busca; warm/frozen não).
+  const callCtx = await prepareCallContext(company, contact, productValue);
+  const callType = callCtx.call_type;
+  const hook = callCtx.hook || company.research_hook || `Olá ${contact.name},`;
+  const manualContext = (callCtx.manualContext || '').trim();
+  // Warm exige contexto manual: é a única fonte da mensagem (sem busca automática).
+  if (callType === 'warm' && !manualContext) {
+    return res.status(400).json({
+      error: 'Contato warm sem contexto: preencha o contexto do lead manualmente antes de gerar a mensagem (o warm não faz busca automática).',
+      code: 'WARM_CONTEXT_REQUIRED',
+    });
+  }
+  const callGuidance = {
+    cold:   'ABORDAGEM FRIA (cold call): primeiro contato, o lead NÃO conhece a empresa. Use o gancho pesquisado para abrir de forma relevante e conquistar atenção.',
+    warm:   'ABORDAGEM WARM: o lead JÁ é qualificado. Use EXCLUSIVAMENTE o contexto fornecido pelo operador abaixo — não invente fatos externos nem faça pesquisa. Personalize a partir desse contexto.',
+    frozen: 'ABORDAGEM FROZEN: o lead JÁ conhece a empresa. Escreva uma mensagem de RECONEXÃO — NÃO se apresente como se fosse o primeiro contato; retome o relacionamento existente.',
+  }[callType];
+  const manualBlock = manualContext ? `Contexto fornecido pelo operador (use fielmente):\n${manualContext}` : '';
 
   const painPoint = req.body.pain_point || req.body.selected_pain || req.body.selected_pain_point || '';
   const painLine = painPoint ? ('Dor principal do lead: ' + painPoint) : '';
@@ -1842,10 +2118,12 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
     }[tpl.channel];
 
     const prompt = `
+${callGuidance}
 Empresa: ${company.name} (setor: ${company.sector || 'não definido'})
 Contato: ${contact.name}, cargo ${contact.role}
 Gancho: ${hook}
 Produto: ${productValue}
+${manualBlock}
 ${painLine}
 Tom: ${roleInfo.tone} | Foco: ${roleInfo.focus}
 Canal / Dia ${tpl.day}: ${channelDesc}
@@ -1865,7 +2143,7 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
   const db4 = getDb();
   db4.prepare("UPDATE companies SET status='sequence_created' WHERE id=?").run(req.params.id);
   db4.close();
-  res.json({ sequence: results, messages: results, contact });
+  res.json({ sequence: results, messages: results, contact, call_type: callType, auto_researched: callCtx.autoResearched });
 });
 
 // ── Geração de sequência em lote (multi-lead, multi-produto) ─────────────────
@@ -1884,6 +2162,7 @@ function buildLearnedContext(db, channel, role) {
     const patterns = db.prepare(
       `SELECT pattern FROM learned_patterns
        WHERE channel=? AND (role=? OR role IS NULL OR role='')
+         AND (status IS NULL OR status='active')
        ORDER BY confidence DESC LIMIT 5`
     ).all(channel, role);
     if (patterns.length) {
@@ -1926,20 +2205,198 @@ function buildLearnedContext(db, channel, role) {
   return '--- SUAS OBSERVAÇÕES / ESTILO APRENDIDO (siga à risca) ---\n' + parts.join('\n\n') + '\n--- FIM DAS OBSERVAÇÕES ---';
 }
 
-// Monta o userPrompt de uma mensagem da sequência. Usado na geração real e no preview.
-function buildSequenceUserPrompt({ companyName, sector, contactName, role, hook, productValue, day, channel, socialProof, learned }) {
+// ── RLHF v2: blocos estruturados (regras / exemplos / histórico) ─────────────
+
+// Teto de caracteres do userPrompt (#5). ~4 chars/token → ~1.5k tokens de contexto para os
+// blocos, deixando folga para a resposta. Seções opcionais são descartadas se estourar.
+const MAX_PROMPT_CHARS = 6000;
+
+// Regras destiladas, separadas por escopo (global vs específico do canal). Só ativas.
+function buildRules(db, channel, role) {
+  const out = { global: [], channel: [] };
+  try {
+    const rows = db.prepare(
+      `SELECT pattern, scope, channel FROM learned_patterns
+       WHERE (status IS NULL OR status='active')
+         AND (role=? OR role IS NULL OR role='')
+       ORDER BY confidence DESC, id DESC`
+    ).all(role);
+    for (const r of rows) {
+      if (r.scope === 'global' || !r.channel) {
+        if (out.global.length < 8) out.global.push(r.pattern);
+      } else if (r.channel === channel) {
+        if (out.channel.length < 5) out.channel.push(r.pattern);
+      }
+    }
+  } catch (_) { /* tabela/coluna ausente */ }
+  return out;
+}
+
+// Exemplos POSITIVOS: mensagens aprovadas (rotuladas, isoladas dos negativos).
+function buildPositiveExamples(db, channel, k = 2) {
+  try {
+    const rows = db.prepare(
+      `SELECT content FROM messages
+       WHERE channel=? AND approved=1 AND score>=4 AND content IS NOT NULL
+       ORDER BY score DESC, id DESC LIMIT ?`
+    ).all(channel, k);
+    return rows.map(e => `### POSITIVO (canal: ${channel})\n"""${(e.content || '').slice(0, 300)}"""`).join('\n\n');
+  } catch (_) { return ''; }
+}
+
+// Exemplos NEGATIVOS: crítica COLADA à mensagem que a originou (par ancorado — P2).
+// Ciclo de vida (#3): ignora mensagens já corrigidas (human_correction) ou já aprovadas —
+// o modelo não deve "aprender a evitar" algo que já foi consertado.
+function buildNegativeExamples(db, channel, k = 2) {
+  try {
+    const rows = db.prepare(
+      `SELECT channel, ai_original, criticized_text, score, score_comment, human_correction FROM messages
+       WHERE channel=? AND ai_original IS NOT NULL AND ai_original!=''
+         AND (approved IS NULL OR approved=0)
+         AND (human_correction IS NULL OR human_correction='')
+         AND ((score IS NOT NULL AND score<=2) OR (score_comment IS NOT NULL AND score_comment!=''))
+       ORDER BY (CASE WHEN score IS NOT NULL THEN 0 ELSE 1 END), score ASC, id DESC LIMIT ?`
+    ).all(channel, k);
+    const blocks = [];
+    for (const n of rows) {
+      const critica = n.score_comment
+        || (n.human_correction ? `O avaliador preferiu reescrever assim: "${(n.human_correction || '').slice(0, 200)}"` : '');
+      if (!critica) continue;
+      // Usa o texto congelado no momento da crítica; só cai no ai_original se não houver snapshot.
+      const criticized = n.criticized_text || n.ai_original || '';
+      blocks.push(
+`### NEGATIVO (canal: ${n.channel || channel})
+Mensagem gerada:
+"""${criticized.slice(0, 300)}"""
+Crítica do avaliador:
+"""${critica}"""`);
+    }
+    return blocks.join('\n\n');
+  } catch (_) { return ''; }
+}
+
+// Histórico cronológico da thread (enviadas + recebidas + status) — resolve P3.
+// Orçamento de contexto (#4): as `fullTurns` trocas mais recentes vão na íntegra;
+// as anteriores são truncadas (~140 chars) para o prompt não crescer sem teto.
+function buildThreadHistory(db, threadId, beforeSeq, fullTurns = 6) {
+  if (!threadId) return '';
+  try {
+    const hasBefore = beforeSeq != null;
+    const rows = db.prepare(
+      `SELECT day, channel, direction, status, approved, content, ai_original
+       FROM messages
+       WHERE thread_id=? ${hasBefore ? 'AND COALESCE(seq_no, id) < ?' : ''}
+       ORDER BY COALESCE(seq_no, id) ASC`
+    ).all(...(hasBefore ? [threadId, beforeSeq] : [threadId]));
+    const items = rows
+      .map(r => ({ ...r, txt: (r.content || r.ai_original || '').trim() }))
+      .filter(r => r.txt);
+    const cutoff = Math.max(0, items.length - fullTurns); // itens antes disto são resumidos
+    const lines = items.map((r, i) => {
+      const truncate = i < cutoff;
+      const body = truncate && r.txt.length > 140 ? r.txt.slice(0, 140) + '…' : r.txt;
+      if (r.direction === 'inbound') return `[Dia ${r.day} · ${r.channel} · recebida] ${body}`;
+      const st = r.approved ? 'aprovada' : (r.status || 'pendente');
+      return `[Dia ${r.day} · ${r.channel} · enviada · ${st}] ${body}`;
+    });
+    return lines.join('\n');
+  } catch (_) { return ''; }
+}
+
+// Histórico do simulador como turnos estruturados p/ a API do Claude (#7).
+// `aiRole`: 'client' quando a IA responde COMO o prospect (então mensagens do cliente = assistant);
+//          'vendor' quando a IA responde COMO o vendedor (mensagens do vendedor = assistant).
+function buildSimTurns(db, companyId, contactId, aiRole) {
+  if (!companyId || !contactId) return [];
+  try {
+    const rows = db.prepare(
+      `SELECT content, status FROM messages
+       WHERE company_id=? AND contact_id=? AND channel='whatsapp'
+       ORDER BY id ASC`
+    ).all(companyId, contactId);
+    return rows
+      .map(r => (r.content || '').trim())
+      .map((txt, i) => ({ txt, isClient: rows[i].status === 'received' }))
+      .filter(r => r.txt)
+      .map(r => {
+        const clientRole = aiRole === 'client' ? 'assistant' : 'user';
+        const vendorRole = aiRole === 'client' ? 'user' : 'assistant';
+        return { role: r.isClient ? clientRole : vendorRole, content: r.txt };
+      });
+  } catch (_) { return []; }
+}
+
+// Aloca um thread_id novo por sequência gerada (#6): evita que reruns/campanhas do mesmo
+// contato ao longo do tempo colidam numa única thread. Mantém contact_id como vínculo p/ inbound.
+function nextThreadId(db) {
+  try { return (db.prepare('SELECT COALESCE(MAX(thread_id),0)+1 AS n FROM messages').get().n) || 1; }
+  catch (_) { return 1; }
+}
+
+// Descobre a thread mais recente de um contato (para anexar respostas inbound sem thread_id explícito).
+function latestThreadForContact(db, contactId) {
+  if (!contactId) return null;
+  try {
+    const r = db.prepare(
+      `SELECT thread_id FROM messages WHERE contact_id=? AND thread_id IS NOT NULL
+       ORDER BY COALESCE(seq_no, id) DESC, id DESC LIMIT 1`
+    ).get(contactId);
+    return r ? r.thread_id : null;
+  } catch (_) { return null; }
+}
+
+// Monta o userPrompt de uma mensagem da sequência (RLHF v2 — seções rotuladas).
+// Usado na geração real e no preview. `rules`/`posExamples`/`negExamples`/`threadHistory`
+// são opcionais; quando ausentes as seções são omitidas (funciona na 1ª e na 5ª mensagem).
+function buildSequenceUserPrompt({ companyName, sector, contactName, role, hook, productValue, day, channel, socialProof, learned, rules, posExamples, negExamples, threadHistory }) {
   const roleInfo = ROLE_PROFILES[role] || ROLE_PROFILES.other;
-  return `
+  const desc = CHANNEL_DESC[channel] || channel;
+  const sections = [];
+
+  sections.push(
+`## BRIEFING
 Empresa: ${companyName} (setor: ${sector || 'não definido'})
 Contato: ${contactName}, cargo ${role}
-Gancho: ${hook}
 Produto: ${productValue}
+Gancho de pesquisa: ${hook}
 Tom: ${roleInfo.tone} | Foco: ${roleInfo.focus}
-Canal / Dia ${day}: ${CHANNEL_DESC[channel]}
-${socialProof ? 'Casos de sucesso:\n' + socialProof : ''}
-${learned ? '\n' + learned + '\n' : ''}
-Escreva APENAS o texto da mensagem, sem explicações.
+Tarefa: escrever a mensagem do Dia ${day} — canal ${channel} (${desc}).`);
+
+  // REGRAS APRENDIDAS (persistentes, acionáveis) — separadas de exemplos e críticas pontuais.
+  if (rules && (rules.global?.length || rules.channel?.length)) {
+    let r = '## REGRAS APRENDIDAS (obrigatórias — siga à risca)';
+    if (rules.global?.length)  r += '\nGerais:\n' + rules.global.map(x => `- ${x}`).join('\n');
+    if (rules.channel?.length) r += `\nEspecíficas do canal ${channel}:\n` + rules.channel.map(x => `- ${x}`).join('\n');
+    sections.push(r);
+  } else if (learned) {
+    sections.push(learned); // fallback legado
+  }
+
+  // HISTÓRICO DA THREAD — sempre presente (com fallback explícito na 1ª mensagem).
+  sections.push(
+    '## HISTÓRICO DA THREAD (ordem cronológica; gere a PRÓXIMA mensagem)\n' +
+    ((threadHistory && threadHistory.trim())
+      ? threadHistory
+      : 'Esta é a PRIMEIRA mensagem da sequência. Não há histórico.'));
+
+  // Seções opcionais marcadas com prioridade de descarte (menor = descartada primeiro) para o teto de tokens (#5).
+  const optional = [];
+  if (socialProof) optional.push({ prio: 1, text: '## CASOS DE SUCESSO\n' + socialProof });
+  if (posExamples) optional.push({ prio: 2, text: '## EXEMPLOS POSITIVOS (aprovados — imite o estilo, não copie o conteúdo)\n' + posExamples });
+  if (negExamples) optional.push({ prio: 3, text: '## EXEMPLOS NEGATIVOS (reprovados — NÃO repita estes erros)\n' + negExamples });
+
+  const taskSection =
+`## SUA TAREFA
+Escreva APENAS o texto da mensagem do Dia ${day} (${channel}), sem explicações, sem rótulos, sem aspas ao redor.
+Respeite o histórico acima (não repita saudações/nome já usados; responda ao último ponto do lead, se houver).
 CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO tente vender diretamente.`;
+
+  // Teto global de tokens (#5): enquanto o prompt passar do limite, descarta a seção opcional
+  // de menor prioridade (casos de sucesso → positivos → negativos). Regras e histórico ficam.
+  const assemble = () => '\n' + [...sections, ...optional.map(o => o.text), taskSection].join('\n\n') + '\n';
+  optional.sort((a, b) => b.prio - a.prio); // mantém as de maior prioridade
+  while (assemble().length > MAX_PROMPT_CHARS && optional.length) optional.pop();
+  return assemble();
 }
 
 async function generateSequenceForCompany(companyId, productValue, painPoint = '') {
@@ -1957,18 +2414,24 @@ async function generateSequenceForCompany(companyId, productValue, painPoint = '
   const golden = db.prepare('SELECT title, content FROM golden_cases WHERE score>=4 LIMIT 3').all();
   const socialProof = golden.map(g => `- ${g.title}: ${g.content.substring(0, 80)}...`).join('\n');
 
+  const threadId = nextThreadId(db); // thread própria por sequência/campanha (#6)
   const results = [];
   for (const tpl of SEQUENCE_CHANNELS) {
-    const learned = buildLearnedContext(db, tpl.channel, contact.role);
+    const rules       = buildRules(db, tpl.channel, contact.role);
+    const posExamples = buildPositiveExamples(db, tpl.channel);
+    const negExamples = buildNegativeExamples(db, tpl.channel);
+    const threadHistory = buildThreadHistory(db, threadId);
     const prompt = buildSequenceUserPrompt({
       companyName: company.name, sector: company.sector, contactName: contact.name, role: contact.role,
-      hook, productValue, day: tpl.day, channel: tpl.channel, socialProof, learned,
+      hook, productValue, day: tpl.day, channel: tpl.channel, socialProof,
+      rules, posExamples, negExamples, threadHistory,
     });
 
     const content = await callClaude(SEQ_SYSTEM, prompt, 400);
     const promptUsed = `[SYSTEM]\n${SEQ_SYSTEM}\n\n[USER]\n${prompt}`;
     const dbW = getDb();
-    const r = dbW.prepare("INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, created_at, prompt_used) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?)").run(contact.id, companyId, tpl.channel, tpl.day, tpl.type, content, content, 'pending', promptUsed);
+    const seqNo = dbW.prepare('SELECT COALESCE(MAX(seq_no),0)+1 AS n FROM messages WHERE thread_id=?').get(threadId).n;
+    const r = dbW.prepare("INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, created_at, prompt_used, thread_id, seq_no, direction) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,'outbound')").run(contact.id, companyId, tpl.channel, tpl.day, tpl.type, content, content, 'pending', promptUsed, threadId, seqNo);
     dbW.close();
     results.push({ id: r.lastInsertRowid, channel: tpl.channel, day: tpl.day, content, status: 'pending', approved: 0, contact_name: contact.name });
   }
@@ -2111,10 +2574,12 @@ app.post('/api/companies/:id/simulator/inbound', async (req, res) => {
   // 1. Abre a janela de 24h
   db.prepare("UPDATE contacts SET last_wa_interaction = datetime('now') WHERE id=?").run(contact_id);
 
-  // 2. Insere a mensagem recebida no banco como recebida
+  // 2. Insere a mensagem recebida no banco como recebida (com thread_id/seq_no/direction — #6/#2)
+  const threadId = latestThreadForContact(db, contact_id) || nextThreadId(db);
+  const seqNo = (db.prepare('SELECT COALESCE(MAX(seq_no),0)+1 AS n FROM messages WHERE thread_id=?').get(threadId).n) || 1;
   const receivedIns = db.prepare(
-    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, 'received', 1, datetime('now'))"
-  ).run(contact_id, companyId, response_text, response_text);
+    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, direction, thread_id, seq_no, created_at) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, 'received', 1, 'inbound', ?, ?, datetime('now'))"
+  ).run(contact_id, companyId, response_text, response_text, threadId, seqNo);
   const receivedMsgId = receivedIns.lastInsertRowid;
   db.close();
 
@@ -2150,6 +2615,7 @@ Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou
   db2.prepare('INSERT INTO notifications (company_id,contact_id,message_id,type,title,body) VALUES (?,?,?,?,?,?)')
     .run(companyId, contact_id, receivedMsgId, notifType, notifTitle, response_text);
   db2.close();
+  broadcastInboxUpdate();
 
   // Modo treino: NÃO gera a resposta do bot automaticamente. A resposta da IA é criada
   // só quando o operador clica em "Simular resposta do Bot" / "Responder com IA" — assim
@@ -2171,6 +2637,8 @@ app.post('/api/companies/:id/simulator/bot-reply', async (req, res) => {
   const lastReceived = db.prepare(
     "SELECT content FROM messages WHERE company_id=? AND contact_id=? AND channel='whatsapp' AND status='received' ORDER BY id DESC LIMIT 1"
   ).get(companyId, contact_id);
+  // Histórico como turnos estruturados (#7): a IA é o VENDEDOR nesta chamada.
+  const priorTurns = buildSimTurns(db, companyId, contact_id, 'vendor');
   db.close();
 
   const lastMsg = lastReceived?.content;
@@ -2178,18 +2646,27 @@ app.post('/api/companies/:id/simulator/bot-reply', async (req, res) => {
     return res.status(400).json({ error: 'Nenhuma mensagem recebida para responder. Simule uma resposta do prospect primeiro.' });
   }
 
-  const draftPrompt = `O prospect enviou: "${lastMsg}"\nEscreva a resposta do vendedor (bot) via WhatsApp: curta (máx 80 palavras), objetiva, tom consultivo e profissional. Se fizer sentido, convide para uma conversa de 15 minutos. Escreva APENAS o texto da mensagem.`;
-  const draft_reply = await callClaude('Você é SDR especialista em respostas rápidas para prospects.', draftPrompt, 200);
+  const draftPrompt = `Escreva a PRÓXIMA mensagem do VENDEDOR (bot) via WhatsApp, dando continuidade natural à conversa acima.
+Regras:
+- Responda ao que o cliente disse por último; avance a conversa
+- NÃO repita pontos, argumentos ou perguntas que você (vendedor) já fez antes
+- Curta (máx 80 palavras), objetiva, tom consultivo e profissional
+- Se fizer sentido, convide para uma conversa de 15 minutos
+- Escreva APENAS o texto da mensagem`;
+  const draft_reply = await callClaude('Você é SDR especialista em respostas rápidas para prospects.', draftPrompt, 200, priorTurns);
 
   // Modo treino: resposta do bot sempre como rascunho pendente para revisão/avaliação.
   const status   = 'pending';
   const approved = 0;
 
   const db2 = getDb();
+  const threadId = latestThreadForContact(db2, contact_id) || nextThreadId(db2);
+  const seqNo = (db2.prepare('SELECT COALESCE(MAX(seq_no),0)+1 AS n FROM messages WHERE thread_id=?').get(threadId).n) || 1;
   const ins = db2.prepare(
-    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, ?, ?, datetime('now'))"
-  ).run(contact_id, companyId, draft_reply.trim(), draft_reply.trim(), status, approved);
+    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, direction, thread_id, seq_no, created_at) VALUES (?, ?, 'whatsapp', 1, 'text', ?, ?, ?, ?, 'outbound', ?, ?, datetime('now'))"
+  ).run(contact_id, companyId, draft_reply.trim(), draft_reply.trim(), status, approved, threadId, seqNo);
   db2.close();
+  broadcastInboxUpdate();
 
   res.json({ ok: true, id: ins.lastInsertRowid, content: draft_reply.trim(), status });
 });
@@ -2204,37 +2681,39 @@ app.post('/api/companies/:id/simulator/generate-prospect-reply', async (req, res
   const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(contact_id);
   if (!contact) { db.close(); return res.status(404).json({ error: 'Contato não encontrado' }); }
 
-  // Busca a última mensagem WhatsApp enviada para este contato
-  const lastSent = db.prepare(
-    "SELECT content FROM messages WHERE company_id=? AND contact_id=? AND channel='whatsapp' AND status IN ('pending','approved','sent') ORDER BY id DESC LIMIT 1"
-  ).get(req.params.id, contact_id);
-  db.close();
-
-  const lastMsg = lastSent?.content || '(sem mensagem prévia)';
   const toneMap = {
     interested: 'O prospect é receptivo e demonstra interesse genuíno, quer saber mais.',
     skeptical:  'O prospect é cético, tem dúvidas técnicas ou sobre ROI, pede mais detalhes antes de se comprometer.',
     negative:   'O prospect não tem interesse no momento, já tem solução ou não é o decisor.',
     random:     'Escolha aleatoriamente um perfil realista de resposta (pode ser qualquer um dos anteriores).',
   };
-  const toneInstruction = toneMap[tone] || toneMap.random;
+  // Persona persistente (#4): se um tom concreto foi pedido, salva; senão reaproveita o já salvo.
+  let effectiveTone = (tone && tone !== 'random') ? tone : (contact.sim_tone || 'random');
+  if (!toneMap[effectiveTone]) effectiveTone = 'random';
+  if (effectiveTone !== 'random' && effectiveTone !== contact.sim_tone) {
+    db.prepare('UPDATE contacts SET sim_tone=? WHERE id=?').run(effectiveTone, contact_id);
+  }
+  const toneInstruction = toneMap[effectiveTone];
 
-  const prompt = `
-Empresa: ${company.name} (setor: ${company.sector || 'não definido'})
+  // Histórico como turnos estruturados (#7): a IA responde COMO o prospect/Cliente.
+  const priorTurns = buildSimTurns(db, req.params.id, contact_id, 'client');
+  db.close();
+
+  const prompt = `Empresa: ${company.name} (setor: ${company.sector || 'não definido'})
 Contato: ${contact.name}, cargo: ${contact.role}
 
-Mensagem de prospecção recebida pelo prospect:
-"${lastMsg}"
-
-Sua tarefa: escreva a resposta que esse prospect enviaria de volta via WhatsApp.
+Sua tarefa: escreva a PRÓXIMA mensagem que você (o prospect/Cliente) enviaria via WhatsApp, dando
+continuidade natural à conversa acima. Se não houver conversa anterior, responda à primeira abordagem.
 Perfil do prospect nessa simulação: ${toneInstruction}
 Regras:
+- Reaja à última mensagem do vendedor; faça a conversa AVANÇAR
+- NÃO repita o que você (Cliente) já disse antes — nem as mesmas objeções ou perguntas
 - Escreva APENAS o texto da resposta, sem aspas nem explicações
 - Tom informal, como WhatsApp real (pode ter erros de digitação leves, abreviações)
 - Máx 60 palavras
 - NÃO invente informações da empresa`;
 
-  const reply = await callClaude('Você é um prospect B2B respondendo uma mensagem de prospecção via WhatsApp.', prompt, 150);
+  const reply = await callClaude('Você é um prospect B2B respondendo uma mensagem de prospecção via WhatsApp.', prompt, 150, priorTurns);
   res.json({ generated_reply: reply.trim() });
 });
 
@@ -2433,8 +2912,20 @@ app.post('/api/messages/:id/score', (req, res) => {
     sets.push('score=?'); vals.push(score);
   }
   if (hasComment) { sets.push('score_comment=?'); vals.push(String(req.body.comment || '')); }
+  // Tipagem de sinal (#2): 'rule' (vira regra global via destilação), 'ephemeral' (crítica
+  // pontual desta mensagem — não deve virar regra), ou null (comportamento padrão).
+  if (req.body.feedback_kind !== undefined) {
+    const fk = ['rule', 'ephemeral', 'example_pos', 'example_neg'].includes(req.body.feedback_kind) ? req.body.feedback_kind : null;
+    sets.push('feedback_kind=?'); vals.push(fk);
+  }
   if (!sets.length) return res.status(400).json({ error: 'Nada para atualizar' });
   const db = getDb();
+  // #1: congela o texto atual da mensagem como o "texto criticado", para a âncora não deslizar
+  // se a mensagem for regenerada depois. Só grava snapshot quando há comentário de verdade.
+  if (hasComment && String(req.body.comment || '').trim()) {
+    const cur = db.prepare('SELECT content, ai_original FROM messages WHERE id=?').get(req.params.id);
+    sets.push('criticized_text=?'); vals.push((cur && (cur.content || cur.ai_original)) || null);
+  }
   // Escopo do comentário: 'global' (todos os canais) ou 'channel' (só o canal desta mensagem)
   if (hasComment && req.body.scope !== undefined) {
     let scope = 'global';
@@ -2447,6 +2938,7 @@ app.post('/api/messages/:id/score', (req, res) => {
   vals.push(req.params.id);
   db.prepare(`UPDATE messages SET ${sets.join(',')} WHERE id=?`).run(...vals);
   db.close();
+  if (hasComment) maybeAutoDistill(); // #7: comentário mal avaliado pode virar regra
   res.json({ ok: true });
 });
 
@@ -2460,7 +2952,28 @@ app.post('/api/messages/:id/correct', (req, res) => {
   versions.push({ content: msg.content, prompt_used: msg.prompt_used || null, score: msg.score ?? null, score_comment: msg.score_comment || null, created_at: msg.created_at || null });
   db.prepare('UPDATE messages SET human_correction=?,content=?,versions=? WHERE id=?').run(correction, correction, JSON.stringify(versions), req.params.id);
   db.close();
+  maybeAutoDistill(); // #7: destila em segundo plano se houver correções novas suficientes
   res.json({ ok: true, original: msg.ai_original, correction });
+});
+
+// Registra uma resposta recebida do lead como uma linha própria na thread (direction='inbound').
+// Sem isto o histórico (P3) fica incompleto: o modelo não vê a que objeção está respondendo.
+app.post('/api/messages/inbound', (req, res) => {
+  const { contact_id, company_id, channel, day, content, thread_id } = req.body || {};
+  if (!content || !String(content).trim()) return res.status(400).json({ error: 'content obrigatório' });
+  const db = getDb();
+  try {
+    const threadId = thread_id || latestThreadForContact(db, contact_id) || contact_id;
+    if (!threadId) { db.close(); return res.status(400).json({ error: 'thread_id ou contact_id obrigatório' }); }
+    const seqNo = db.prepare('SELECT COALESCE(MAX(seq_no),0)+1 AS n FROM messages WHERE thread_id=?').get(threadId).n;
+    const r = db.prepare(
+      `INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, status, direction, thread_id, seq_no, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
+    ).run(contact_id || null, company_id || null, channel || 'whatsapp', day || 1, 'inbound', String(content), 'received', 'inbound', threadId, seqNo);
+    res.json({ ok: true, id: r.lastInsertRowid, thread_id: threadId, seq_no: seqNo });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  } finally { db.close(); }
 });
 
 app.post('/api/messages/:id/send', (req, res) => {
@@ -2472,6 +2985,7 @@ app.post('/api/messages/:id/send', (req, res) => {
     db.prepare("UPDATE companies SET status='contacted' WHERE id=? AND status NOT IN ('hot_lead','meeting_set')").run(msg.company_id);
   }
   db.close();
+  broadcastInboxUpdate();
   const delays = { linkedin: '2–4 min', email: '0–30 seg', whatsapp: '1–3 min' };
   res.json({ ok: true, simulated_delay: delays[msg.channel] || '1–2 min', note: 'Delay simulado' });
 });
@@ -2595,6 +3109,7 @@ app.post('/api/schedule/slots', async (req, res) => {
         "INSERT INTO messages (contact_id,company_id,channel,day,msg_type,content,ai_original,status,approved,created_at) VALUES (?,?,'whatsapp',1,'meeting_confirm',?,?,'sent',1,datetime('now'))"
       ).run(contact_id, company_id, confirmMsg, confirmMsg);
       db2.close();
+      broadcastInboxUpdate();
     } catch (e) {
       console.error('[Agenda] Erro ao enviar confirmação WhatsApp:', e.message);
     }
@@ -2626,6 +3141,27 @@ app.delete('/api/schedule/slots/:id', (req, res) => {
 });
 
 // ── WhatsApp Inbox ────────────────────────────────────────────────────────────
+// Stream SSE: o frontend abre esta conexão e recebe um evento sempre que o inbox muda.
+app.get('/api/whatsapp/stream', (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  res.write('event: connected\ndata: {"ok":true}\n\n');
+  inboxSseClients.add(res);
+  // Ping periódico para manter a conexão viva através de proxies
+  const keepAlive = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch (_) { /* ignore */ }
+  }, 25_000);
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    inboxSseClients.delete(res);
+  });
+});
+
 // Retorna todas as empresas que têm mensagens WhatsApp, com última mensagem e contagem de não lidas
 app.get('/api/whatsapp/inbox', (req, res) => {
   const db = getDb();
@@ -2654,7 +3190,12 @@ app.get('/api/whatsapp/inbox', (req, res) => {
       GROUP BY company_id
     ) latest ON latest.company_id = co.id
     JOIN messages m ON m.id = latest.max_id
-    LEFT JOIN contacts ct ON ct.company_id = co.id AND ct.is_primary = 1
+    LEFT JOIN contacts ct ON ct.id = (
+      SELECT c2.id FROM contacts c2
+      WHERE c2.company_id = co.id
+      ORDER BY c2.is_primary DESC, c2.id ASC
+      LIMIT 1
+    )
     ORDER BY m.id DESC
   `).all();
   db.close();
@@ -2675,6 +3216,15 @@ app.get('/api/whatsapp/:companyId/messages', (req, res) => {
   const contacts = db.prepare('SELECT * FROM contacts WHERE company_id=?').all(req.params.companyId);
   db.close();
   res.json({ messages: msgs, company, contacts });
+});
+
+// DELETE /api/whatsapp/:companyId/messages — apaga o histórico de conversa WhatsApp da empresa
+app.delete('/api/whatsapp/:companyId/messages', (req, res) => {
+  const db = getDb();
+  const r = db.prepare("DELETE FROM messages WHERE company_id=? AND channel='whatsapp'").run(req.params.companyId);
+  db.close();
+  broadcastInboxUpdate();
+  res.json({ ok: true, deleted: r.changes });
 });
 
 // ── Notifications ─────────────────────────────────────────────────────────────
@@ -2746,6 +3296,7 @@ app.post('/api/notifications/:id/confirm-meeting', async (req, res) => {
       "INSERT INTO messages (contact_id,company_id,channel,day,msg_type,content,ai_original,status,approved,created_at) VALUES (?,?,'whatsapp',1,'text',?,?,'sent',1,datetime('now'))"
     ).run(contact.id, notif.company_id, confirmMsg, confirmMsg);
     db2.close();
+    broadcastInboxUpdate();
   }
 
   res.json({ ok: true, date_time: slot.date_time, meeting_link: slot.meeting_link });
@@ -2824,11 +3375,14 @@ app.get('/api/messages/:id/prompt', (req, res) => {
     // Fallback para mensagens geradas antes desta feature
     const golden = db.prepare('SELECT title, content FROM golden_cases WHERE score>=4 LIMIT 3').all();
     const socialProof = golden.map(g => `- ${g.title}: ${(g.content || '').substring(0, 80)}...`).join('\n');
-    const learned = buildLearnedContext(db, m.channel, m.contact_role);
     const userPrompt = buildSequenceUserPrompt({
       companyName: m.company_name || '—', sector: m.company_sector, contactName: m.contact_name || '—',
       role: m.contact_role || 'other', hook: m.hook || `Olá ${m.contact_name || ''},`,
-      productValue: '(produto informado na geração)', day: m.day, channel: m.channel, socialProof, learned,
+      productValue: '(produto informado na geração)', day: m.day, channel: m.channel, socialProof,
+      rules: buildRules(db, m.channel, m.contact_role),
+      posExamples: buildPositiveExamples(db, m.channel),
+      negExamples: buildNegativeExamples(db, m.channel),
+      threadHistory: buildThreadHistory(db, m.thread_id, m.seq_no),
     });
     db.close();
     res.json({ prompt_used: `[SYSTEM]\n${SEQ_SYSTEM}\n\n[USER]\n${userPrompt}`, system: SEQ_SYSTEM, reconstructed: true });
@@ -2846,15 +3400,19 @@ app.get('/api/learn/prompt-preview', (req, res) => {
   try {
     const golden = db.prepare('SELECT title, content FROM golden_cases WHERE score>=4 LIMIT 3').all();
     const socialProof = golden.map(g => `- ${g.title}: ${(g.content || '').substring(0, 80)}...`).join('\n');
-    const learned = buildLearnedContext(db, channel, role);
+    const rules = buildRules(db, channel, role);
+    const posExamples = buildPositiveExamples(db, channel);
+    const negExamples = buildNegativeExamples(db, channel);
     const userPromptTemplate = buildSequenceUserPrompt({
       companyName: '{empresa}', sector: '{setor}', contactName: '{contato}', role,
       hook: '{gancho de pesquisa}', productValue: '{produto}',
       day: (SEQUENCE_CHANNELS.find(c => c.channel === channel) || {}).day || 1,
-      channel, socialProof, learned,
+      channel, socialProof, rules, posExamples, negExamples,
+      threadHistory: '{histórico da thread — enviadas + respostas do lead}',
     });
+    const hasLearned = !!(rules.global.length || rules.channel.length || posExamples || negExamples);
     db.close();
-    res.json({ systemPrompt: SEQ_SYSTEM, userPromptTemplate, hasLearned: !!learned, channel, role });
+    res.json({ systemPrompt: SEQ_SYSTEM, userPromptTemplate, hasLearned, channel, role });
   } catch (e) {
     db.close();
     res.status(500).json({ error: String(e.message || e) });
@@ -3073,72 +3631,281 @@ app.get('/api/learn/progress', (req, res) => {
   }
 });
 
+// Normaliza texto de regra para comparação (acumulação de confiança / dedup).
+function normRule(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+const MAX_RULES_PER_GROUP = 8;
+
+// Núcleo da destilação de feedback → regras acionáveis. Reutilizado pelo endpoint manual
+// e pelo gatilho automático (#7). Faz acumulação de confiança em vez de reescrita destrutiva (#5)
+// e promove regras que aparecem em ≥2 canais a escopo global (#8).
+async function runDistillation(db) {
+  // Fonte 1: reescritas (human_correction) — mostram o "antes → depois".
+  const corrections = db.prepare(
+    `SELECT m.id AS id, m.channel AS channel, ct.role AS role, m.ai_original AS ai_original, m.human_correction AS human_correction
+     FROM messages m LEFT JOIN contacts ct ON ct.id = m.contact_id
+     WHERE m.human_correction IS NOT NULL AND m.human_correction != ''
+       AND m.ai_original IS NOT NULL
+       AND (m.feedback_kind IS NULL OR m.feedback_kind != 'ephemeral')
+       AND ABS(LENGTH(m.human_correction) - LENGTH(m.ai_original)) > 10`
+  ).all();
+
+  // Fonte 2: comentários puros (score_comment) de mensagens mal avaliadas, SEM reescrita.
+  // Antes esses sinais nunca viravam regra — só apareciam como negativos ancorados a cada geração.
+  const comments = db.prepare(
+    `SELECT m.id AS id, m.channel AS channel, ct.role AS role, m.ai_original AS ai_original, m.content AS content, m.score_comment AS score_comment
+     FROM messages m LEFT JOIN contacts ct ON ct.id = m.contact_id
+     WHERE m.score_comment IS NOT NULL AND m.score_comment != ''
+       AND (m.human_correction IS NULL OR m.human_correction = '')
+       AND (m.feedback_kind IS NULL OR m.feedback_kind != 'ephemeral')
+       AND m.score IS NOT NULL AND m.score <= 2`
+  ).all();
+
+  const totalSignals = corrections.length + comments.length;
+  if (totalSignals < 2) {
+    return { ok: false, message: 'Sem feedback suficiente ainda. Continue avaliando!' };
+  }
+
+  const groups = {};
+  const push = (c, kind) => {
+    const key = `${c.channel || 'geral'}|${c.role || 'other'}`;
+    (groups[key] = groups[key] || []).push({ ...c, kind });
+  };
+  corrections.forEach(c => push(c, 'rewrite'));
+  comments.forEach(c => push(c, 'comment'));
+
+  const analyzed = [];
+  for (const [key, items] of Object.entries(groups)) {
+    const [channel, role] = key.split('|');
+    const examples = items.slice(0, 10).map((c, i) =>
+      c.kind === 'rewrite'
+        ? `Exemplo ${i + 1} (reescrita):\nORIGINAL (IA): ${c.ai_original}\nCORRIGIDO (humano): ${c.human_correction}`
+        : `Exemplo ${i + 1} (crítica direta):\nMENSAGEM (IA): ${c.ai_original || c.content}\nCRÍTICA DO AVALIADOR: ${c.score_comment}`
+    ).join('\n\n');
+
+    const prompt =
+      `Analise o feedback humano abaixo (canal: ${channel}, cargo: ${role}) — inclui reescritas e críticas diretas — ` +
+      `e destile de 2 a 4 REGRAS ACIONÁVEIS escritas como INSTRUÇÕES IMPERATIVAS (não transcreva a reclamação; diga o que fazer/evitar). ` +
+      `Responda APENAS com um array JSON de strings curtas, ` +
+      `ex: ["Não abra a mensagem com o nome do contato depois da primeira", "Nunca use asteriscos de markdown (**) — não parece humano"].\n\n${examples}`;
+
+    let rules = [];
+    try {
+      const raw = await callClaude('Você é analista de estilo de escrita comercial. Responda só com JSON.', prompt, 400);
+      const match = String(raw).match(/\[[\s\S]*\]/);
+      rules = match ? JSON.parse(match[0]) : [];
+    } catch (_) { rules = []; }
+    rules = (rules || []).filter(r => typeof r === 'string' && r.trim()).slice(0, 4);
+    if (!rules.length) { analyzed.push({ channel, role, rules_extracted: 0 }); continue; }
+
+    const sourceIds = JSON.stringify(items.map(c => c.id).filter(Boolean));
+    const sample = items.length;
+    const bump = db.prepare(
+      `UPDATE learned_patterns SET confidence=?, sample_size=?, source_message_ids=?, updated_at=datetime('now') WHERE id=?`
+    );
+    const ins = db.prepare(
+      `INSERT INTO learned_patterns (channel, role, pattern, confidence, sample_size, scope, status, source_message_ids, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,datetime('now'))`
+    );
+
+    // Acumulação: regra que já existe (mesmo texto normalizado) sobe confiança; nova é inserida.
+    const existing = db.prepare(
+      `SELECT id, pattern, confidence FROM learned_patterns
+       WHERE channel=? AND role=? AND (status IS NULL OR status='active')`
+    ).all(channel, role);
+    const byNorm = new Map(existing.map(e => [normRule(e.pattern), e]));
+
+    for (const r of rules) {
+      const prev = byNorm.get(normRule(r));
+      if (prev) {
+        const conf = Math.min(0.98, (prev.confidence || 0.5) + 0.1); // concordância repetida → sobe
+        bump.run(conf, sample, sourceIds, prev.id);
+      } else {
+        const conf = Math.min(0.9, 0.5 + sample * 0.1);
+        ins.run(channel, role, r, conf, sample, 'channel', 'active', sourceIds);
+      }
+    }
+
+    // Detecção de contradição semântica (#3): pede ao modelo os pares de regras opostas;
+    // aposenta a mais ANTIGA de cada par (recência vence).
+    await retireContradictions(db, channel, role);
+
+    // Anti-crescimento: mantém só as MAX_RULES_PER_GROUP mais confiantes; aposenta o resto.
+    const overflow = db.prepare(
+      `SELECT id FROM learned_patterns
+       WHERE channel=? AND role=? AND (status IS NULL OR status='active')
+       ORDER BY confidence DESC, id DESC LIMIT -1 OFFSET ?`
+    ).all(channel, role, MAX_RULES_PER_GROUP);
+    for (const o of overflow) {
+      db.prepare(`UPDATE learned_patterns SET status='retired', updated_at=datetime('now') WHERE id=?`).run(o.id);
+    }
+
+    analyzed.push({ channel, role, rules_extracted: rules.length });
+  }
+
+  // Escopo global (#8): regra (texto normalizado) ativa em ≥2 canais vira 'global'; se cair
+  // para <2 canais, é rebaixada de volta para 'channel' (demotion).
+  try {
+    const active = db.prepare(`SELECT id, pattern, channel, scope FROM learned_patterns WHERE status IS NULL OR status='active'`).all();
+    const chansByNorm = new Map();
+    for (const a of active) {
+      const n = normRule(a.pattern);
+      if (!chansByNorm.has(n)) chansByNorm.set(n, new Set());
+      chansByNorm.get(n).add(a.channel);
+    }
+    for (const a of active) {
+      const spread = chansByNorm.get(normRule(a.pattern)).size;
+      const target = spread >= 2 ? 'global' : 'channel';
+      if ((a.scope || 'channel') !== target) {
+        db.prepare(`UPDATE learned_patterns SET scope=?, updated_at=datetime('now') WHERE id=?`).run(target, a.id);
+      }
+    }
+  } catch (_) { /* best-effort */ }
+
+  return { ok: true, analyzed };
+}
+
+// Pergunta ao modelo quais regras ativas de um grupo se contradizem e aposenta a mais antiga do par.
+async function retireContradictions(db, channel, role) {
+  try {
+    const active = db.prepare(
+      `SELECT id, pattern FROM learned_patterns
+       WHERE channel=? AND role=? AND (status IS NULL OR status='active') ORDER BY id ASC`
+    ).all(channel, role);
+    if (active.length < 2) return;
+    const list = active.map(r => `${r.id}: ${r.pattern}`).join('\n');
+    const prompt =
+      `Abaixo há regras de estilo (id: texto). Identifique pares que se CONTRADIZEM diretamente ` +
+      `(uma manda fazer X, outra manda não fazer X). Responda APENAS um array JSON de pares de ids, ` +
+      `ex: [[3,7],[5,9]]. Se não houver contradição, responda [].\n\n${list}`;
+    const raw = await callClaude('Você detecta contradições lógicas entre regras. Responda só com JSON.', prompt, 200);
+    const m = String(raw).match(/\[[\s\S]*\]/);
+    const pairs = m ? JSON.parse(m[0]) : [];
+    const valid = new Set(active.map(r => r.id));
+    for (const pair of (Array.isArray(pairs) ? pairs : [])) {
+      if (!Array.isArray(pair) || pair.length !== 2) continue;
+      const [a, b] = pair.map(Number);
+      if (!valid.has(a) || !valid.has(b)) continue;
+      const older = Math.min(a, b); // id menor = mais antigo → aposenta
+      db.prepare(`UPDATE learned_patterns SET status='superseded', updated_at=datetime('now') WHERE id=?`).run(older);
+      valid.delete(older);
+    }
+  } catch (_) { /* best-effort — contradição é refinamento, não pode quebrar a destilação */ }
+}
+
+// Dispara a destilação em segundo plano (não bloqueia a resposta) quando há correções novas (#7).
+// Debounce (#7): evita rodar várias destilações concorrentes se o avaliador dá vários feedbacks seguidos.
+let _distilling = false;
+function maybeAutoDistill() {
+  if (_distilling) return; // já há uma destilação em andamento
+  try {
+    const db = getDb();
+    // Conta correções ainda não incorporadas em nenhuma regra ativa (heurística por data).
+    const lastRule = db.prepare(`SELECT MAX(updated_at) AS t FROM learned_patterns WHERE status IS NULL OR status='active'`).get().t;
+    const newCorr = db.prepare(
+      `SELECT COUNT(*) AS n FROM messages
+       WHERE (feedback_kind IS NULL OR feedback_kind != 'ephemeral')
+         AND (
+           (human_correction IS NOT NULL AND human_correction != '')
+           OR (score_comment IS NOT NULL AND score_comment != '' AND score IS NOT NULL AND score <= 2)
+         )
+         AND (? IS NULL OR COALESCE(created_at,'') > ?)`
+    ).get(lastRule, lastRule).n;
+    db.close();
+    if (newCorr >= 3) {
+      _distilling = true;
+      const db2 = getDb();
+      runDistillation(db2).catch(() => {}).finally(() => { db2.close(); _distilling = false; });
+    }
+  } catch (_) { _distilling = false; /* best-effort */ }
+}
+
 // Analisa correções humanas e extrai regras de estilo (padrões aprendidos)
 app.post('/api/learn/analyze', async (req, res) => {
   const db = getDb();
-  let corrections;
   try {
-    corrections = db.prepare(
-      `SELECT m.channel AS channel, ct.role AS role, m.ai_original AS ai_original, m.human_correction AS human_correction
-       FROM messages m LEFT JOIN contacts ct ON ct.id = m.contact_id
-       WHERE m.human_correction IS NOT NULL AND m.human_correction != ''
-         AND m.ai_original IS NOT NULL
-         AND ABS(LENGTH(m.human_correction) - LENGTH(m.ai_original)) > 10`
-    ).all();
-  } catch (e) {
-    db.close();
-    return res.status(500).json({ error: String(e.message || e) });
-  }
-
-  if (!corrections || corrections.length < 2) {
-    db.close();
-    return res.json({ ok: false, message: 'Sem correções suficientes ainda. Continue avaliando!' });
-  }
-
-  // Agrupa por canal+cargo
-  const groups = {};
-  for (const c of corrections) {
-    const key = `${c.channel || 'geral'}|${c.role || 'other'}`;
-    (groups[key] = groups[key] || []).push(c);
-  }
-
-  const analyzed = [];
-  try {
-    for (const [key, items] of Object.entries(groups)) {
-      const [channel, role] = key.split('|');
-      const examples = items.slice(0, 8).map((c, i) =>
-        `Exemplo ${i + 1}:\nORIGINAL (IA): ${c.ai_original}\nCORRIGIDO (humano): ${c.human_correction}`
-      ).join('\n\n');
-
-      const prompt =
-        `Analise as correções humanas abaixo (canal: ${channel}, cargo: ${role}) e extraia de 2 a 4 REGRAS DE ESTILO objetivas ` +
-        `que expliquem como o humano prefere as mensagens. Responda APENAS com um array JSON de strings curtas, ` +
-        `ex: ["Evite abrir com o nome do lead", "Use perguntas em vez de afirmações"].\n\n${examples}`;
-
-      let rules = [];
-      try {
-        const raw = await callClaude('Você é analista de estilo de escrita comercial. Responda só com JSON.', prompt, 400);
-        const match = String(raw).match(/\[[\s\S]*\]/);
-        rules = match ? JSON.parse(match[0]) : [];
-      } catch (_) {
-        rules = [];
-      }
-      rules = (rules || []).filter(r => typeof r === 'string' && r.trim()).slice(0, 4);
-
-      const confidence = Math.min(0.95, 0.5 + items.length * 0.1);
-      const ins = db.prepare(
-        'INSERT INTO learned_patterns (channel, role, pattern, confidence, sample_size) VALUES (?,?,?,?,?)'
-      );
-      for (const r of rules) ins.run(channel, role, r, confidence, items.length);
-
-      analyzed.push({ channel, role, rules_extracted: rules.length });
-    }
-    res.json({ ok: true, analyzed });
+    const out = await runDistillation(db);
+    res.json(out);
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
   } finally {
     db.close();
   }
+});
+
+// Gestão de regras aprendidas (#9): listar, editar, aposentar/remover manualmente.
+app.get('/api/learn/rules', (req, res) => {
+  const db = getDb();
+  try {
+    const rows = db.prepare(
+      `SELECT id, channel, role, pattern, confidence, sample_size, scope, status, updated_at, created_at
+       FROM learned_patterns ORDER BY (status='active') DESC, confidence DESC, id DESC`
+    ).all();
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  finally { db.close(); }
+});
+
+app.patch('/api/learn/rules/:id', (req, res) => {
+  const sets = [], vals = [];
+  if (req.body.pattern !== undefined) { sets.push('pattern=?'); vals.push(String(req.body.pattern)); }
+  if (req.body.status  !== undefined && ['active','retired','superseded'].includes(req.body.status)) { sets.push('status=?'); vals.push(req.body.status); }
+  if (req.body.scope   !== undefined && ['global','channel'].includes(req.body.scope)) { sets.push('scope=?'); vals.push(req.body.scope); }
+  if (req.body.confidence !== undefined) { const c = Math.max(0, Math.min(1, Number(req.body.confidence))); if (!Number.isNaN(c)) { sets.push('confidence=?'); vals.push(c); } }
+  if (!sets.length) return res.status(400).json({ error: 'Nada para atualizar' });
+  sets.push("updated_at=datetime('now')");
+  const db = getDb();
+  try {
+    vals.push(req.params.id);
+    const r = db.prepare(`UPDATE learned_patterns SET ${sets.join(',')} WHERE id=?`).run(...vals);
+    if (!r.changes) return res.status(404).json({ error: 'Regra não encontrada' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  finally { db.close(); }
+});
+
+app.delete('/api/learn/rules/:id', (req, res) => {
+  const db = getDb();
+  try {
+    const r = db.prepare('DELETE FROM learned_patterns WHERE id=?').run(req.params.id);
+    if (!r.changes) return res.status(404).json({ error: 'Regra não encontrada' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  finally { db.close(); }
+});
+
+// Impacto das regras (#4): compara o score médio das mensagens do canal ANTES e DEPOIS de
+// cada regra passar a existir (learned_patterns.updated_at). Fecha o loop mostrando se aprender
+// a regra melhorou a qualidade. Sem mudança de schema — usa messages.created_at + score.
+app.get('/api/learn/rule-impact', (req, res) => {
+  const db = getDb();
+  try {
+    const rules = db.prepare(
+      `SELECT id, channel, role, pattern, scope, status, updated_at, created_at FROM learned_patterns
+       ORDER BY (status='active') DESC, confidence DESC`
+    ).all();
+    const out = rules.map(r => {
+      const ref = r.updated_at || r.created_at;
+      const before = db.prepare(
+        `SELECT ROUND(AVG(score),2) AS avg, COUNT(*) AS n FROM messages
+         WHERE channel=? AND score IS NOT NULL AND COALESCE(created_at,'') < ?`
+      ).get(r.channel, ref);
+      const after = db.prepare(
+        `SELECT ROUND(AVG(score),2) AS avg, COUNT(*) AS n FROM messages
+         WHERE channel=? AND score IS NOT NULL AND COALESCE(created_at,'') >= ?`
+      ).get(r.channel, ref);
+      const delta = (before.avg != null && after.avg != null) ? Math.round((after.avg - before.avg) * 100) / 100 : null;
+      return {
+        id: r.id, channel: r.channel, role: r.role, pattern: r.pattern, scope: r.scope, status: r.status,
+        avg_before: before.avg, n_before: before.n, avg_after: after.avg, n_after: after.n, delta,
+      };
+    });
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  finally { db.close(); }
 });
 
 // Catch-all route to serve React frontend for non-API requests

@@ -17,11 +17,19 @@ const STATUS_BADGES = {
 
 const PAGE_SIZE = 15;
 
+// Metadados dos 3 tipos de call (cold/warm/frozen) — usados em badges e seletores.
+const CALL_META = {
+  cold:   { label: '❄️ Cold', cls: 'bg-info-subtle text-info border-info-subtle', hint: 'Lead novo — o sistema busca internet + base de conhecimento antes de gerar a mensagem.' },
+  warm:   { label: '🔥 Warm', cls: 'bg-warning-subtle text-warning-emphasis border-warning-subtle', hint: 'Lead qualificado — preencha o contexto abaixo; a mensagem usa exatamente essas informações (sem busca).' },
+  frozen: { label: '🧊 Frozen', cls: 'bg-primary-subtle text-primary border-primary-subtle', hint: 'Lead que já conhece a empresa — mensagem de reconexão.' },
+};
+const callMeta = (t) => CALL_META[t] || CALL_META.cold;
+
 // ── AddForm ────────────────────────────────────────────────────────────────────
 export function AddForm({ onAdded, toast }) {
   const [form, setForm] = useState({
     companyName: '', sector: '',
-    contactName: '', role: 'other', email: '', linkedin: '', whatsapp: '', country: 'BR',
+    contactName: '', role: 'other', email: '', linkedin: '', whatsapp: '', country: 'BR', callType: 'cold',
   });
   const [loading, setLoading] = useState(false);
 
@@ -45,12 +53,13 @@ export function AddForm({ onAdded, toast }) {
           contact_linkedin: form.linkedin.trim(),
           contact_whatsapp: form.whatsapp.trim(),
           contact_country: form.country,
+          contact_call_type: form.callType,
         }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       toast('Empresa adicionada!', 'success');
-      setForm({ companyName: '', sector: '', contactName: '', role: 'other', email: '', linkedin: '', whatsapp: '', country: 'BR' });
+      setForm({ companyName: '', sector: '', contactName: '', role: 'other', email: '', linkedin: '', whatsapp: '', country: 'BR', callType: 'cold' });
       onAdded();
     } catch (err) {
       toast(err.message || 'Erro ao adicionar', 'danger');
@@ -80,6 +89,19 @@ export function AddForm({ onAdded, toast }) {
           <option value="engineer">Engenheiro / TI</option>
           <option value="other">Outro</option>
         </select>
+      </div>
+      <div className="mb-2">
+        <label className="form-label small text-muted mb-1">Tipo de call</label>
+        <select className="form-select form-select-sm" value={form.callType} onChange={set('callType')}>
+          <option value="cold">❄️ Cold — lead novo, sem vínculo (busca automática)</option>
+          <option value="warm">🔥 Warm — lead qualificado (contexto manual)</option>
+          <option value="frozen">🧊 Frozen — já conhece a empresa (reconexão)</option>
+        </select>
+        <div className="form-text small">
+          {form.callType === 'cold' && 'O sistema pesquisará internet + base de conhecimento antes de gerar a mensagem.'}
+          {form.callType === 'warm' && 'Preencha o contexto do lead manualmente; nenhuma busca automática será disparada.'}
+          {form.callType === 'frozen' && 'Mensagem de reconexão: o lead já conhece a empresa.'}
+        </div>
       </div>
       <div className="mb-2">
         <input className="form-control form-control-sm" placeholder="E-mail" type="email" value={form.email} onChange={set('email')} />
@@ -390,8 +412,43 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversati
   const [ctx, setCtx]           = useState(contact.context || '');
   const [open, setOpen]         = useState(false);
   const [saving, setSaving]     = useState(false);
+  const [callType, setCallType] = useState(contact.call_type || 'cold');
+  const [logs, setLogs]         = useState(null);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [logsLoading, setLogsLoading] = useState(false);
 
   const hasContext = !!(savedCtx && savedCtx.trim());
+
+  async function toggleLogs() {
+    if (logsOpen) { setLogsOpen(false); return; }
+    setLogsOpen(true);
+    setLogsLoading(true);
+    try {
+      const res = await fetch(`${API}/api/contacts/${contact.id}/search-logs`);
+      const d = await res.json();
+      setLogs(Array.isArray(d) ? d : []);
+    } catch {
+      setLogs([]);
+    } finally {
+      setLogsLoading(false);
+    }
+  }
+
+  async function saveCallType(newType) {
+    setCallType(newType);
+    try {
+      const res = await fetch(`${API}/api/contacts/${contact.id}/call-type`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ call_type: newType }),
+      });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      toast(`Tipo de call: ${CALL_META[newType].label}`, 'success');
+    } catch (err) {
+      toast(err.message || 'Erro ao salvar tipo de call', 'danger');
+    }
+  }
 
   async function saveContext() {
     setSaving(true);
@@ -427,6 +484,9 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversati
                 <i className="bi bi-person-lines-fill me-1"></i>com contexto
               </span>
             )}
+            <span className={`badge border ms-2 ${CALL_META[callType].cls}`} style={{ fontSize: '.65rem' }} title={CALL_META[callType].hint}>
+              {CALL_META[callType].label}
+            </span>
           </div>
           {cargoDe(contact) && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-briefcase me-1"></i>{cargoDe(contact)}</div>}
           {contact.email && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-envelope me-1"></i>{contact.email}</div>}
@@ -456,6 +516,42 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversati
       >
         <i className="bi bi-whatsapp me-1"></i>Iniciar conversa
       </button>
+
+      <div className="mt-2">
+        <label className="form-label small text-muted mb-1">Tipo de call</label>
+        <select className="form-select form-select-sm" value={callType} onChange={(e) => saveCallType(e.target.value)}>
+          <option value="cold">❄️ Cold — lead novo (busca automática)</option>
+          <option value="warm">🔥 Warm — qualificado (contexto manual)</option>
+          <option value="frozen">🧊 Frozen — já conhece a empresa</option>
+        </select>
+        <div className="form-text small">{CALL_META[callType].hint}</div>
+      </div>
+
+      {callType === 'cold' && (
+        <div className="mt-2">
+          <button className="btn btn-sm btn-outline-info w-100" style={{ fontSize: '.75rem' }} onClick={toggleLogs}>
+            <i className="bi bi-search me-1"></i>{logsOpen ? 'Ocultar buscas da IA' : 'Ver buscas da IA (internet + base)'}
+          </button>
+          {logsOpen && (
+            <div className="mt-2 p-2 rounded" style={{ background: '#f8f9fa', border: '1px solid #dee2e6', fontSize: '.72rem' }}>
+              {logsLoading && <div className="text-muted">Carregando...</div>}
+              {!logsLoading && logs && logs.length === 0 && (
+                <div className="text-muted">Nenhuma busca registrada ainda. Gere a sequência para disparar a pesquisa.</div>
+              )}
+              {!logsLoading && logs && logs.map((l) => (
+                <div key={l.id} className="mb-1 pb-1 border-bottom">
+                  <span className={`badge ${l.source === 'web' ? 'bg-info-subtle text-info' : 'bg-secondary-subtle text-secondary'} me-1`}>
+                    {l.source === 'web' ? '🌐 internet' : '📚 base'}
+                  </span>
+                  <span className="text-muted">{l.created_at}</span>
+                  <div><strong>Query:</strong> {l.query}</div>
+                  {l.result_summary && <div className="text-muted"><strong>Resultado:</strong> {l.result_summary}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <button
         className={`btn btn-sm ${hasContext ? 'btn-outline-primary' : 'btn-outline-secondary'} w-100 mt-2`}
@@ -491,7 +587,7 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversati
 
 // ── ExpandedRow ────────────────────────────────────────────────────────────────
 function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onContactAdded, onStartConversation, toast }) {
-  const [addForm, setAddForm] = useState({ name: '', role: 'other', email: '', whatsapp: '', linkedin: '', country: 'BR' });
+  const [addForm, setAddForm] = useState({ name: '', role: 'other', email: '', whatsapp: '', linkedin: '', country: 'BR', callType: 'cold' });
   const [adding, setAdding] = useState(false);
   const set = (k) => (e) => setAddForm((f) => ({ ...f, [k]: e.target.value }));
 
@@ -509,12 +605,13 @@ function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onCont
           whatsapp: addForm.whatsapp.trim(),
           linkedin: addForm.linkedin.trim(),
           country: addForm.country,
+          call_type: addForm.callType,
         }),
       });
       const d = await res.json();
       if (d.error) throw new Error(d.error);
       toast('Contato adicionado!', 'success');
-      setAddForm({ name: '', role: 'other', email: '', whatsapp: '', linkedin: '', country: 'BR' });
+      setAddForm({ name: '', role: 'other', email: '', whatsapp: '', linkedin: '', country: 'BR', callType: 'cold' });
       onContactAdded();
     } catch (err) {
       toast(err.message || 'Erro', 'danger');
@@ -573,6 +670,11 @@ function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onCont
             <option value="engineer">Engenheiro / TI</option>
             <option value="other">Outro</option>
           </select>
+          <select className="form-select form-select-sm mb-1" value={addForm.callType} onChange={set('callType')} title="Tipo de call">
+            <option value="cold">❄️ Cold — lead novo (busca automática)</option>
+            <option value="warm">🔥 Warm — qualificado (contexto manual)</option>
+            <option value="frozen">🧊 Frozen — já conhece a empresa</option>
+          </select>
           <input className="form-control form-control-sm mb-1" placeholder="E-mail" type="email" value={addForm.email} onChange={set('email')} />
           <input className="form-control form-control-sm mb-1" placeholder="WhatsApp" value={addForm.whatsapp} onChange={set('whatsapp')} />
           <input className="form-control form-control-sm mb-1" placeholder="LinkedIn URL" value={addForm.linkedin} onChange={set('linkedin')} />
@@ -592,7 +694,7 @@ function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onCont
 }
 
 // ── CompanyRow ─────────────────────────────────────────────────────────────────
-function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onEnrich, onFindContact, onRemoveContact, onContactAdded, onStartConversation, toast, flagMap }) {
+function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onEnrich, onFindContact, onRemoveContact, onRemoveCompany, onContactAdded, onStartConversation, toast, flagMap }) {
   const badge = STATUS_BADGES[company.status] || STATUS_BADGES.new;
   const contacts = company.contacts || [];
 
@@ -628,6 +730,16 @@ function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onE
           <span className="badge" style={{ background: '#eff4ff', color: '#1a44be', fontSize: '.75rem' }}>
             {contacts.length}
           </span>
+          {['cold', 'warm', 'frozen'].map((t) => {
+            const n = contacts.filter((c) => (c.call_type || 'cold') === t).length;
+            if (!n) return null;
+            const m = callMeta(t);
+            return (
+              <span key={t} className={`badge border ms-1 ${m.cls}`} style={{ fontSize: '.6rem' }} title={`${n} ${m.label}`}>
+                {m.label.split(' ')[0]}{n > 1 ? ` ${n}` : ''}
+              </span>
+            );
+          })}
         </td>
         <td>
           <span className={`badge ${badge.cls}`} style={{ fontSize: '.75rem' }}>{badge.label}</span>
@@ -648,6 +760,13 @@ function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onE
                 <i className="bi bi-stars"></i>
               </button>
             )}
+            <button
+              className="btn btn-sm btn-outline-danger btn-xs-touch"
+              onClick={() => onRemoveCompany(company.id, company.name)}
+              title="Remover empresa"
+            >
+              <i className="bi bi-trash"></i>
+            </button>
           </div>
         </td>
       </tr>
@@ -835,6 +954,21 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
       if (refreshData) refreshData();
     } catch (err) {
       toast(err.message || 'Erro ao remover', 'danger');
+    }
+  }
+
+  async function handleRemoveCompany(companyId, companyName) {
+    if (!window.confirm(`Remover a empresa "${companyName}" e todos os seus contatos? Esta ação não pode ser desfeita.`)) return;
+    try {
+      const res = await fetch(`${API}/api/companies/${companyId}`, { method: 'DELETE' });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      toast('Empresa removida', 'success');
+      loadCompanies();
+      if (loadStats) loadStats();
+      if (refreshData) refreshData();
+    } catch (err) {
+      toast(err.message || 'Erro ao remover empresa', 'danger');
     }
   }
 
@@ -1035,6 +1169,7 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
                     onEnrich={handleEnrichContact}
                     onFindContact={handleFindContact}
                     onRemoveContact={handleRemoveContact}
+                    onRemoveCompany={handleRemoveCompany}
                     onContactAdded={() => { loadCompanies(); if (loadStats) loadStats(); }}
                     onStartConversation={onOpenWhatsApp}
                     toast={toast}

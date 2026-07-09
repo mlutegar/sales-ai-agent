@@ -267,6 +267,7 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
   const [commentFor,      setCommentFor]      = useState(null)
   const [commentText,     setCommentText]     = useState('')
   const [commentChannelOnly, setCommentChannelOnly] = useState(false)
+  const [commentKind, setCommentKind] = useState(null) // null | 'ephemeral' | 'rule'
   const bottomRef = useRef(null)
 
   const load = useCallback(async () => {
@@ -356,10 +357,11 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
     setCommentFor(msg.id)
     setCommentText(msg.score_comment || '')
     setCommentChannelOnly((msg.comment_scope && msg.comment_scope !== 'global'))
+    setCommentKind(msg.feedback_kind || null)
   }
   async function saveComment(msgId) {
     const scope = commentChannelOnly ? 'channel' : 'global'
-    if (await saveFeedback(msgId, { comment: commentText, scope })) {
+    if (await saveFeedback(msgId, { comment: commentText, scope, feedback_kind: commentKind })) {
       toast('Comentário salvo.', 'success')
       setCommentFor(null)
       setCommentText('')
@@ -689,6 +691,18 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
                         onChange={e => setCommentText(e.target.value)}
                         style={{ fontSize: '.8rem' }}
                       />
+                      <div className="btn-group btn-group-sm mt-1" role="group" style={{ fontSize: '.68rem' }}>
+                        <button type="button" title="Vira uma regra permanente aplicada a toda geração futura"
+                          className={`btn ${commentKind === 'rule' ? 'btn-primary' : 'btn-outline-secondary'}`}
+                          onClick={() => setCommentKind(commentKind === 'rule' ? null : 'rule')}>
+                          <i className="bi bi-infinity me-1" />Vira regra
+                        </button>
+                        <button type="button" title="Crítica só desta mensagem — NÃO vira regra global"
+                          className={`btn ${commentKind === 'ephemeral' ? 'btn-warning' : 'btn-outline-secondary'}`}
+                          onClick={() => setCommentKind(commentKind === 'ephemeral' ? null : 'ephemeral')}>
+                          <i className="bi bi-pin me-1" />Só esta msg
+                        </button>
+                      </div>
                       <div className="d-flex gap-2 mt-1 align-items-center">
                         <button className="btn btn-sm btn-info" style={{ fontSize: '.7rem' }} onClick={() => saveComment(msg.id)}>
                           <i className="bi bi-check-lg me-1" />Salvar observação
@@ -778,64 +792,86 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
           <i className="bi bi-calendar-check me-2" />Marcar Reunião na Agenda
         </button>
 
-        {/* Simular resposta */}
+        {/* Simulador de conversa (treino) */}
         <div style={{ border: '1px solid #e2e8f0', borderRadius: 10, padding: 12 }}>
-          <div className="fw-semibold mb-2" style={{ fontSize: '.82rem', color: '#333' }}>
-            <i className="bi bi-bug me-1" />Simular Resposta
+          <div className="fw-semibold mb-1" style={{ fontSize: '.82rem', color: '#333' }}>
+            <i className="bi bi-flask me-1" />Simulador de conversa (treino)
           </div>
-          <div className="d-flex gap-1 mb-2">
-            <select
-              className="form-select form-select-sm"
-              value={simulateTone}
-              onChange={e => setSimulateTone(e.target.value)}
-              disabled={loadingGen || loadingSim}
-              style={{ flex: 1, fontSize: '.75rem' }}
-            >
-              <option value="random">🎲 Aleatório</option>
-              <option value="interested">🔥 Interessado</option>
-              <option value="skeptical">🤔 Cético</option>
-              <option value="negative">👎 Negativo</option>
-            </select>
+          <div className="text-muted mb-2" style={{ fontSize: '.7rem' }}>
+            Encene a conversa: primeiro o cliente responde, depois a IA responde para você avaliar.
+          </div>
+
+          {/* ── Passo 1: o cliente responde ───────────────────────── */}
+          <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <div className="fw-semibold mb-2" style={{ fontSize: '.76rem', color: '#166534' }}>
+              <i className="bi bi-person-fill me-1" />Passo 1 — O cliente responde
+            </div>
+            <div className="d-flex gap-1 mb-2">
+              <select
+                className="form-select form-select-sm"
+                value={simulateTone}
+                onChange={e => setSimulateTone(e.target.value)}
+                disabled={loadingGen || loadingSim}
+                style={{ flex: 1, fontSize: '.75rem' }}
+              >
+                <option value="random">🎲 Aleatório</option>
+                <option value="interested">🔥 Interessado</option>
+                <option value="skeptical">🤔 Cético</option>
+                <option value="negative">👎 Negativo</option>
+              </select>
+              <button
+                className="btn btn-outline-primary btn-sm"
+                onClick={generateProspectReply}
+                disabled={loadingGen || loadingSim}
+                title="Gerar a fala do cliente com IA"
+                style={{ whiteSpace: 'nowrap', fontSize: '.75rem' }}
+              >
+                {loadingGen ? <span className="spinner-border spinner-border-sm" /> : <><i className="bi bi-stars" /> IA</>}
+              </button>
+            </div>
+            <textarea
+              className="form-control form-control-sm mb-2"
+              rows={3}
+              placeholder="Escreva (ou gere com IA) o que o CLIENTE diria…"
+              value={simulateText}
+              onChange={e => setSimulateText(e.target.value)}
+              disabled={loadingSim || loadingGen}
+              style={{ fontSize: '.8rem', resize: 'vertical' }}
+            />
             <button
-              className="btn btn-outline-primary btn-sm"
-              onClick={generateProspectReply}
-              disabled={loadingGen || loadingSim}
-              title="Gerar com IA"
-              style={{ whiteSpace: 'nowrap', fontSize: '.75rem' }}
+              className="btn btn-success btn-sm w-100"
+              onClick={simulateResponse}
+              disabled={loadingSim || loadingGen || !simulateText.trim()}
+              title="Registra esta fala como mensagem recebida do cliente e classifica o sentimento"
             >
-              {loadingGen ? <span className="spinner-border spinner-border-sm" /> : <><i className="bi bi-stars" /> IA</>}
+              {loadingSim
+                ? <><span className="spinner-border spinner-border-sm me-1" />Analisando…</>
+                : <><i className="bi bi-person-fill me-1" />Enviar como cliente</>
+              }
             </button>
           </div>
-          <textarea
-            className="form-control form-control-sm mb-2"
-            rows={3}
-            placeholder="Resposta do prospect…"
-            value={simulateText}
-            onChange={e => setSimulateText(e.target.value)}
-            disabled={loadingSim || loadingGen}
-            style={{ fontSize: '.8rem', resize: 'vertical' }}
-          />
-          <button
-            className="btn btn-outline-success btn-sm w-100"
-            onClick={simulateResponse}
-            disabled={loadingSim || loadingGen || !simulateText.trim()}
-          >
-            {loadingSim
-              ? <><span className="spinner-border spinner-border-sm me-1" />Analisando…</>
-              : <><i className="bi bi-whatsapp me-1" />Simular (prospect)</>
-            }
-          </button>
-          <button
-            className="btn btn-outline-secondary btn-sm w-100 mt-2"
-            onClick={simulateBotReply}
-            disabled={loadingBot || loadingSim || loadingGen}
-            title="Gera e adiciona a resposta do bot à última mensagem recebida — sem apagar o histórico"
-          >
-            {loadingBot
-              ? <><span className="spinner-border spinner-border-sm me-1" />Gerando…</>
-              : <><i className="bi bi-robot me-1" />Simular resposta do Bot</>
-            }
-          </button>
+
+          {/* ── Passo 2: a IA responde ────────────────────────────── */}
+          <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: 10 }}>
+            <div className="fw-semibold mb-1" style={{ fontSize: '.76rem', color: '#334155' }}>
+              <i className="bi bi-robot me-1" />Passo 2 — A IA responde ao cliente
+            </div>
+            <div className="text-muted mb-2" style={{ fontSize: '.68rem' }}>
+              Gera um rascunho da resposta do vendedor à última fala do cliente — fica pendente para você avaliar (não envia).
+            </div>
+            <button
+              className="btn btn-dark btn-sm w-100"
+              onClick={simulateBotReply}
+              disabled={loadingBot || loadingSim || loadingGen}
+              title="Gera e adiciona a resposta da IA à última mensagem recebida — sem apagar o histórico"
+            >
+              {loadingBot
+                ? <><span className="spinner-border spinner-border-sm me-1" />Gerando…</>
+                : <><i className="bi bi-robot me-1" />Gerar resposta da IA</>
+              }
+            </button>
+          </div>
+
           {sentimentResult && sentCfg && (
             <div className="mt-2 p-2 rounded" style={{ background: '#f8f9fa', border: '1px solid #e2e8f0', fontSize: '.76rem' }}>
               <span className={`badge bg-${sentCfg.badge} me-1`}>{sentCfg.label}</span>
@@ -932,9 +968,37 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
 
   useEffect(() => {
     load()
-    pollRef.current = setInterval(load, 20_000)
-    return () => clearInterval(pollRef.current)
+
+    // Tempo real via SSE: o servidor emite um evento sempre que o inbox muda.
+    let es
+    try {
+      es = new EventSource(`${API}/api/whatsapp/stream`)
+      es.addEventListener('inbox', () => load())
+    } catch { /* navegador sem EventSource → cai no fallback abaixo */ }
+
+    // Fallback: se o SSE cair (proxy, rede), um poll lento garante consistência.
+    pollRef.current = setInterval(load, 60_000)
+
+    return () => {
+      if (es) es.close()
+      clearInterval(pollRef.current)
+    }
   }, [load])
+
+  async function handleDeleteConversation(companyId, companyName, e) {
+    e.stopPropagation()  // não selecionar o item ao clicar na lixeira
+    if (!window.confirm(`Apagar a conversa de "${companyName}"? As mensagens serão removidas.`)) return
+    try {
+      const res = await fetch(`${API}/api/whatsapp/${companyId}/messages`, { method: 'DELETE' })
+      const d = await res.json()
+      if (d.error) throw new Error(d.error)
+      if (selected === companyId) setSelected(null)   // limpa o painel direito
+      toast?.('Conversa apagada', 'success')
+      load()                                           // recarrega a inbox
+    } catch (err) {
+      toast?.(err.message || 'Erro ao apagar conversa', 'danger')
+    }
+  }
 
   const filtered = inbox.filter(c =>
     !search || c.company_name?.toLowerCase().includes(search.toLowerCase())
@@ -1017,8 +1081,16 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
                       <span style={{ fontWeight: 600, fontSize: '.85rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 130 }}>
                         {c.company_name}
                       </span>
-                      <span style={{ fontSize: '.68rem', color: '#999', flexShrink: 0 }}>
-                        {timeAgo(c.last_at)}
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                        <span style={{ fontSize: '.68rem', color: '#999' }}>
+                          {timeAgo(c.last_at)}
+                        </span>
+                        <i
+                          className="bi bi-trash"
+                          title="Apagar conversa"
+                          onClick={(e) => handleDeleteConversation(c.company_id, c.company_name, e)}
+                          style={{ fontSize: '.8rem', color: '#c0392b', cursor: 'pointer', opacity: .7 }}
+                        />
                       </span>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>

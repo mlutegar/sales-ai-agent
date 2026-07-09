@@ -15,6 +15,10 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
   const [editText, setEditText] = useState('')
   const [promptFor, setPromptFor] = useState(null)
   const [promptData, setPromptData] = useState(null)
+  const [rules, setRules] = useState([])
+  const [showRetired, setShowRetired] = useState(false)
+  const [ruleEditId, setRuleEditId] = useState(null)
+  const [ruleEditText, setRuleEditText] = useState('')
 
   const viewPrompt = async (id) => {
     if (promptFor === id) { setPromptFor(null); setPromptData(null); return }
@@ -59,10 +63,41 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
     }
   }
 
+  const loadRules = async () => {
+    try {
+      const [list, impact] = await Promise.all([
+        api('/api/learn/rules'),
+        api('/api/learn/rule-impact').catch(() => []),
+      ])
+      const impById = Object.fromEntries((impact || []).map(i => [i.id, i]))
+      setRules((list || []).map(r => ({ ...r, impact: impById[r.id] })))
+    } catch (e) {
+      console.warn('Erro ao carregar regras:', e)
+    }
+  }
+
+  const patchRule = async (id, body, okMsg) => {
+    try {
+      await api(`/api/learn/rules/${id}`, 'PATCH', body)
+      if (okMsg) toast(okMsg, 'success')
+      setRuleEditId(null)
+      loadRules(); loadLearnStats()
+    } catch (e) { toast('Erro ao atualizar regra', 'danger') }
+  }
+
+  const deleteRule = async (id) => {
+    try {
+      await api(`/api/learn/rules/${id}`, 'DELETE')
+      toast('Regra removida', 'success')
+      loadRules(); loadLearnStats()
+    } catch (e) { toast('Erro ao remover regra', 'danger') }
+  }
+
   useEffect(() => {
     loadLearnStats()
     loadLearnProgress()
     loadRLHF()
+    loadRules()
   }, [])
 
   // Foco vindo do botão "Editar mensagem" (aba WhatsApp): abre a mensagem na aba certa,
@@ -100,6 +135,7 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
       setAnalyzing(false)
       loadLearnStats()
       loadLearnProgress()
+      loadRules()
     }
   }
 
@@ -251,6 +287,77 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
               </div>
             </div>
           )}
+        </div>
+
+        {/*  ── Gestão de Regras Aprendidas (#9) ────────────────────────────────────  */}
+        <div className="card p-3 mb-3">
+          <div className="d-flex justify-content-between align-items-start mb-3">
+            <div>
+              <h6 className="fw-bold mb-1"><i className="bi bi-sliders me-1 text-primary"></i>Regras Aprendidas (memória de longo prazo)</h6>
+              <p className="text-muted small mb-0">Instruções destiladas do seu feedback e injetadas em toda geração. Edite, aposente ou remova para controlar o que a IA aplica.</p>
+            </div>
+            <div className="d-flex gap-2 align-items-center">
+              <div className="form-check form-switch mb-0">
+                <input className="form-check-input" type="checkbox" id="showRetired" checked={showRetired} onChange={e => setShowRetired(e.target.checked)} />
+                <label className="form-check-label small text-muted" htmlFor="showRetired">Mostrar inativas</label>
+              </div>
+              <button className="btn btn-outline-secondary btn-sm" onClick={loadRules}><i className="bi bi-arrow-clockwise"></i></button>
+            </div>
+          </div>
+
+          {(() => {
+            const visible = rules.filter(r => showRetired || r.status === 'active')
+            if (!visible.length) return <p className="text-muted small mb-0">Nenhuma regra {showRetired ? '' : 'ativa '}ainda. Corrija mensagens e clique em "Analisar Padrões".</p>
+            return (
+              <div className="table-responsive">
+                <table className="table table-sm align-middle mb-0">
+                  <thead><tr className="small text-muted">
+                    <th>Canal</th><th>Cargo</th><th>Regra</th><th>Escopo</th><th style={{width:70}}>Conf.</th><th style={{width:90}} title="Variação do score médio do canal depois que a regra passou a existir">Impacto</th><th>Status</th><th style={{width:120}}></th>
+                  </tr></thead>
+                  <tbody>
+                    {visible.map(r => (
+                      <tr key={r.id} className="small" style={{opacity: r.status === 'active' ? 1 : 0.55}}>
+                        <td>{r.channel === 'linkedin' ? <i className="bi bi-linkedin"></i> : r.channel === 'email' ? <i className="bi bi-envelope"></i> : r.channel === 'whatsapp' ? <i className="bi bi-whatsapp"></i> : r.channel}</td>
+                        <td>{roleLabel[r.role] || r.role}</td>
+                        <td style={{minWidth: 240}}>
+                          {ruleEditId === r.id ? (
+                            <div className="d-flex gap-1">
+                              <input className="form-control form-control-sm" value={ruleEditText} onChange={e => setRuleEditText(e.target.value)} />
+                              <button className="btn btn-success btn-sm" onClick={() => patchRule(r.id, { pattern: ruleEditText }, 'Regra atualizada')}><i className="bi bi-check2"></i></button>
+                              <button className="btn btn-link btn-sm text-decoration-none" onClick={() => setRuleEditId(null)}>×</button>
+                            </div>
+                          ) : esc(r.pattern)}
+                        </td>
+                        <td>
+                          <span className={`badge ${r.scope === 'global' ? 'bg-primary' : 'bg-light text-dark border'}`} role="button"
+                            title="Alternar global/canal" onClick={() => patchRule(r.id, { scope: r.scope === 'global' ? 'channel' : 'global' })}>
+                            {r.scope === 'global' ? 'global' : 'canal'}
+                          </span>
+                        </td>
+                        <td>{Math.round((r.confidence || 0) * 100)}%</td>
+                        <td>
+                          {r.impact && r.impact.delta != null ? (
+                            <span className={r.impact.delta > 0 ? 'text-success' : r.impact.delta < 0 ? 'text-danger' : 'text-muted'}
+                              title={`Antes: ${r.impact.avg_before ?? '—'} (${r.impact.n_before}) → Depois: ${r.impact.avg_after ?? '—'} (${r.impact.n_after})`}>
+                              {r.impact.delta > 0 ? `▲ +${r.impact.delta}` : r.impact.delta < 0 ? `▼ ${r.impact.delta}` : '– 0'}
+                            </span>
+                          ) : <span className="text-muted">—</span>}
+                        </td>
+                        <td><span className={`badge ${r.status === 'active' ? 'bg-success' : 'bg-secondary'}`}>{r.status || 'active'}</span></td>
+                        <td className="text-end">
+                          <button className="btn btn-outline-secondary btn-sm me-1" title="Editar" onClick={() => { setRuleEditId(r.id); setRuleEditText(r.pattern) }}><i className="bi bi-pencil"></i></button>
+                          {r.status === 'active'
+                            ? <button className="btn btn-outline-warning btn-sm me-1" title="Aposentar" onClick={() => patchRule(r.id, { status: 'retired' })}><i className="bi bi-pause"></i></button>
+                            : <button className="btn btn-outline-success btn-sm me-1" title="Reativar" onClick={() => patchRule(r.id, { status: 'active' })}><i className="bi bi-play"></i></button>}
+                          <button className="btn btn-outline-danger btn-sm" title="Remover" onClick={() => deleteRule(r.id)}><i className="bi bi-trash"></i></button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          })()}
         </div>
 
         {/*  ── Progresso do Aprendizado (evolução temporal) ────────────────────────  */}

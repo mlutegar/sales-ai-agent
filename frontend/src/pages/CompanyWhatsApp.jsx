@@ -536,11 +536,26 @@ export default function CompanyWhatsApp() {
               }}
             >
               <h6 className="fw-bold mb-1" style={{ color: '#444' }}>
-                <i className="bi bi-bug me-2" />Simular Resposta do Prospect
+                <i className="bi bi-flask me-2" />Simulador de conversa (treino)
               </h6>
               <div className="text-muted mb-3" style={{ fontSize: '.75rem' }}>
-                Ferramenta de desenvolvimento — simula uma resposta inbound via WhatsApp.
+                Ferramenta de desenvolvimento — encene a conversa: primeiro o cliente responde,
+                depois a IA responde para você avaliar.
               </div>
+
+              {/* ── Passo 1: o cliente responde ────────────────────────── */}
+              <div
+                style={{
+                  background: '#f0fdf4',
+                  border: '1px solid #bbf7d0',
+                  borderRadius: 10,
+                  padding: '12px 14px',
+                  marginBottom: 14,
+                }}
+              >
+                <div className="fw-semibold mb-2" style={{ fontSize: '.82rem', color: '#166534' }}>
+                  <i className="bi bi-person-fill me-1" />Passo 1 — O cliente responde
+                </div>
 
               {/* Tom + botão Gerar com IA */}
               <div className="d-flex gap-2 mb-2">
@@ -573,7 +588,7 @@ export default function CompanyWhatsApp() {
               <textarea
                 className="form-control mb-2"
                 rows={3}
-                placeholder="Clique em 'Gerar com IA' ou escreva manualmente a resposta do prospect…"
+                placeholder="Escreva (ou gere com IA) o que o CLIENTE diria…"
                 value={simulateText}
                 onChange={e => setSimulateText(e.target.value)}
                 disabled={loadingSim || loadingGen}
@@ -581,29 +596,49 @@ export default function CompanyWhatsApp() {
               />
 
               <button
-                className="btn btn-outline-success w-100"
+                className="btn btn-success w-100"
                 onClick={simulateResponse}
                 disabled={loadingSim || loadingGen || !simulateText.trim()}
+                title="Registra esta fala como mensagem recebida do cliente e classifica o sentimento"
               >
                 {loadingSim ? (
                   <><span className="spinner-border spinner-border-sm me-2" />Analisando sentimento…</>
                 ) : (
-                  <><i className="bi bi-whatsapp me-2" />Simular Resposta do Prospect</>
+                  <><i className="bi bi-person-fill me-2" />Enviar como cliente</>
                 )}
               </button>
+              </div>
 
-              <button
-                className="btn btn-outline-secondary w-100 mt-2"
-                onClick={simulateBotReply}
-                disabled={loadingBot || loadingSim || loadingGen}
-                title="Gera e adiciona a resposta do bot à última mensagem recebida — sem apagar o histórico"
+              {/* ── Passo 2: a IA responde ─────────────────────────────── */}
+              <div
+                style={{
+                  background: '#f8fafc',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: 10,
+                  padding: '12px 14px',
+                }}
               >
-                {loadingBot ? (
-                  <><span className="spinner-border spinner-border-sm me-2" />Gerando resposta do bot…</>
-                ) : (
-                  <><i className="bi bi-robot me-2" />Simular Resposta do Bot</>
-                )}
-              </button>
+                <div className="fw-semibold mb-1" style={{ fontSize: '.82rem', color: '#334155' }}>
+                  <i className="bi bi-robot me-1" />Passo 2 — A IA responde ao cliente
+                </div>
+                <div className="text-muted mb-2" style={{ fontSize: '.72rem' }}>
+                  Gera um rascunho da resposta do vendedor à última fala do cliente — fica
+                  pendente para você avaliar (não envia).
+                </div>
+
+                <button
+                  className="btn btn-dark w-100"
+                  onClick={simulateBotReply}
+                  disabled={loadingBot || loadingSim || loadingGen}
+                  title="Gera e adiciona a resposta da IA à última mensagem recebida — sem apagar o histórico"
+                >
+                  {loadingBot ? (
+                    <><span className="spinner-border spinner-border-sm me-2" />Gerando resposta da IA…</>
+                  ) : (
+                    <><i className="bi bi-robot me-2" />Gerar resposta da IA</>
+                  )}
+                </button>
+              </div>
 
               {/* Resultado do sentimento */}
               {sentimentResult && sentCfg && (
