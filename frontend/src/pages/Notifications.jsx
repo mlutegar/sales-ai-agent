@@ -162,7 +162,8 @@ export default function Notifications({ toast, onUnreadChange }) {
     if (notif.type === 'meeting_request') {
       setMeetingNotif(notif)
     } else {
-      navigate(`/companies/${notif.company_id}/whatsapp`)
+      // Abre a aba WhatsApp na conversa desse cliente (com o histórico todo), não a tela antiga.
+      navigate('/whatsapp', { state: { companyId: notif.company_id, contactId: notif.contact_id } })
     }
   }
 
