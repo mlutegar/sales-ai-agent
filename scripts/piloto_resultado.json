@@ -1,0 +1,521 @@
+{
+  "generated_at": "2026-07-10T10:15:02.451Z",
+  "company_id": 114,
+  "contact_id": 122,
+  "funnel_status_final": "meeting_set",
+  "counts": {
+    "inbound": 3,
+    "outbound": 5,
+    "total": 8
+  },
+  "response_rate_funnel_pct": 60,
+  "metrics_overview": {
+    "by_channel": [
+      {
+        "channel": "email",
+        "total": 2,
+        "sent": 0,
+        "response_rate": 90
+      },
+      {
+        "channel": "linkedin",
+        "total": 2,
+        "sent": 0,
+        "response_rate": 0
+      },
+      {
+        "channel": "whatsapp",
+        "total": 36,
+        "sent": 3,
+        "response_rate": 30
+      }
+    ],
+    "by_role": [
+      {
+        "role": "c_level",
+        "total": 19
+      },
+      {
+        "role": "engineer",
+        "total": 3
+      },
+      {
+        "role": "manager",
+        "total": 9
+      },
+      {
+        "role": "other",
+        "total": 72
+      }
+    ],
+    "funnel": [
+      {
+        "status": "contacted",
+        "total": 2
+      },
+      {
+        "status": "hot_lead",
+        "total": 3
+      },
+      {
+        "status": "meeting_set",
+        "total": 3
+      },
+      {
+        "status": "new",
+        "total": 74
+      },
+      {
+        "status": "researched",
+        "total": 2
+      },
+      {
+        "status": "sequence_created",
+        "total": 12
+      }
+    ],
+    "ab_stats": {
+      "decided": 0,
+      "b_won": 0
+    }
+  },
+  "followup_pending": [
+    {
+      "id": 16,
+      "name": "Rodrigo Oliveira",
+      "role": "c_level",
+      "company": "Cirion",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 18,
+      "name": "Cleyton Ferreira",
+      "role": "c_level",
+      "company": "UOL",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 19,
+      "name": "Christian Reis",
+      "role": "c_level",
+      "company": "Magalu cloud",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 20,
+      "name": "Vitor Garcia",
+      "role": "c_level",
+      "company": "Embraer",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 21,
+      "name": "Fabio Napoli",
+      "role": "c_level",
+      "company": "Itaú",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 23,
+      "name": "Americo Coltacci",
+      "role": "c_level",
+      "company": "Santander",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 24,
+      "name": "Augusto Stracieri",
+      "role": "c_level",
+      "company": "Itau",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 26,
+      "name": "Rodrigo Assad",
+      "role": "other",
+      "company": "Claro",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 27,
+      "name": "Diuliana França",
+      "role": "other",
+      "company": "Claro",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 28,
+      "name": "Antonio Jose Silverio",
+      "role": "other",
+      "company": "Claro",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 29,
+      "name": "Luiz Bourdot",
+      "role": "other",
+      "company": "Claro",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 30,
+      "name": "Atila Xavier",
+      "role": "other",
+      "company": "TIM",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 31,
+      "name": "Auana Mattar",
+      "role": "other",
+      "company": "TIM",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 32,
+      "name": "Andre Sarcinelli",
+      "role": "other",
+      "company": "Claro",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 33,
+      "name": "Mario Rachid",
+      "role": "other",
+      "company": "Claro",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 35,
+      "name": "Roberto Cordaro",
+      "role": "other",
+      "company": "Santander",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 36,
+      "name": "Augusto Nellensen",
+      "role": "other",
+      "company": "Itau",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 37,
+      "name": "Fernando Kontopp",
+      "role": "other",
+      "company": "Itau",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 38,
+      "name": "Marcelo Cruzeiro",
+      "role": "other",
+      "company": "WEG",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 39,
+      "name": "Marcelo Consentino",
+      "role": "other",
+      "company": "TOTVS",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 40,
+      "name": "Gustavo Bastos",
+      "role": "other",
+      "company": "TOTVS",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 41,
+      "name": "Ramon Silva",
+      "role": "other",
+      "company": "TOTVS",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 42,
+      "name": "Vicente da Consolacao Pires Junior",
+      "role": "other",
+      "company": "TOTVS",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 43,
+      "name": "Fernando Pereira Campilho",
+      "role": "other",
+      "company": "BRADESCO SEGUROS",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 44,
+      "name": "Andre Schneiter",
+      "role": "other",
+      "company": "COFCO INTERNATIONAL",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 45,
+      "name": "Lucas Santana",
+      "role": "other",
+      "company": "DB - DIAGNOSTICOS DO BRASIL",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 46,
+      "name": "Wiliam Potenti",
+      "role": "other",
+      "company": "L'OREAL BRASIL",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 47,
+      "name": "Soraya Lemos Cortez",
+      "role": "other",
+      "company": "SICREDI",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 48,
+      "name": "Auana Mattar",
+      "role": "other",
+      "company": "TIM BRASIL",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 49,
+      "name": "Samantha Lopes Martins",
+      "role": "other",
+      "company": "ACHÉ LABORATORIOS",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 50,
+      "name": "Alexandre Telles",
+      "role": "other",
+      "company": "AJINOMOTO",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 51,
+      "name": "Zaima Mendes Oliveira Milazzo",
+      "role": "other",
+      "company": "ALGAR TELECOM",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 52,
+      "name": "Luiz Martins",
+      "role": "other",
+      "company": "ALLOS (ALIANSCE SONAE)",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 53,
+      "name": "Henrique Rabenhorst",
+      "role": "other",
+      "company": "AZUL LINHAS AEREAS",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 54,
+      "name": "Rodrigo Antonio Nardoni",
+      "role": "other",
+      "company": "B3",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 55,
+      "name": "Andre Luiz Alves",
+      "role": "other",
+      "company": "BANCO RENDIMENTO",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 56,
+      "name": "Ronaldo N Ribeiro",
+      "role": "other",
+      "company": "CENIBRA",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 57,
+      "name": "Ailton de Almeida Queiroz",
+      "role": "other",
+      "company": "COAMO AGROINDUSTRIAL",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 58,
+      "name": "Igor Freitas",
+      "role": "other",
+      "company": "COGNA - EDUCAÇÃO",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 59,
+      "name": "Fernando Cesar Ramos",
+      "role": "other",
+      "company": "COPASA",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 60,
+      "name": "Fabio Felizatti",
+      "role": "other",
+      "company": "CREDSYSTEM",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 61,
+      "name": "Rachel Rohlfs",
+      "role": "other",
+      "company": "DROGARIA ARAUJO",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 62,
+      "name": "Vitor Garcia",
+      "role": "other",
+      "company": "EMBRAER",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 63,
+      "name": "Luis Antonio Janssen",
+      "role": "other",
+      "company": "GRUPO DPSP",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 64,
+      "name": "Thiago Parreira",
+      "role": "other",
+      "company": "GRUPO EBD",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 65,
+      "name": "Afranio Lamy Spolador Junior",
+      "role": "other",
+      "company": "GRUPO ECORODOVIAS",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 66,
+      "name": "João Vicente Alvarenga",
+      "role": "other",
+      "company": "GRUPO FLEURY",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 67,
+      "name": "Luiz Carlos Dias",
+      "role": "other",
+      "company": "GRUPO JOSE ALVES",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 68,
+      "name": "Nilton Mayrink",
+      "role": "other",
+      "company": "GRUPO MARTINS",
+      "sector": "",
+      "days_since": 14
+    },
+    {
+      "id": 69,
+      "name": "Claudia de Moya Partiti Ferraz",
+      "role": "other",
+      "company": "GRUPO OSWALDO CRUZ QUIMICA",
+      "sector": "",
+      "days_since": 14
+    }
+  ],
+  "transcript": [
+    {
+      "who": "VENDEDOR (gancho abertura)",
+      "text": "Fala, Carlos! Aqui é o Felipe, da NeuralGrid. Sei que clusters de GPU lotados e fila de treino travando o time são dor de cabeça real agora — a demanda por H100/L40S tá apertada no Brasil inteiro. A gente trabalha com servidores AMD EPYC + NVIDIA de alta densidade justamente pra esse cenário. Vale 15 min técnicos essa semana pra eu te mostrar como outros times de IA resolveram esse gargalo?"
+    },
+    {
+      "who": "PROSPECT (interessado)",
+      "text": "Oi Felipe, que bom que chegou! A fila de treino tá me matando mesmo hehe\n\nBora sim, 15 min eu consigo essa semana. Quinta ou sexta de manhã funciona pra vc?\n\nMe manda mais info sobre a solução enquanto isso — fico curioso sobre a latência e como fica o setup pra workloads de LLM",
+      "meta": "sentimento=wants_meeting score=8"
+    },
+    {
+      "who": "VENDEDOR (IA)",
+      "text": "Ótimo, quinta ou sexta de manhã funciona bem! Me diz qual prefere e marco já.\n\nSobre sua dúvida: pra workloads de LLM a latência fica abaixo de 10ms p99, e o setup é bem direto — integração via API REST, sem mudança na sua infra atual. A maioria dos clientes coloca em produção em menos de 1 dia.\n\nConfirma o dia e já te mando o invite! 🚀"
+    },
+    {
+      "who": "PROSPECT (cético (preço/specs))",
+      "text": "Quinta tá bom, pode marcar\n\nMas antes de entrar na call, uma dúvida: esse p99 abaixo de 10ms é pra inferência ou treino? Porque pra fine-tuning de LLM grande o gargalo meu é outro — é throughput de dados mesmo, não latência\n\nE essa API REST, tem suporte a multi-node ou é single instance só?",
+      "meta": "sentimento=wants_meeting score=8"
+    },
+    {
+      "who": "VENDEDOR (IA)",
+      "text": "Boa pergunta — o p99 é pra inferência, não treino. Você tocou num ponto importante.\n\nPra fine-tuning com throughput alto, a conversa muda um pouco: suportamos multi-node sim, e temos clientes usando exatamente nesse cenário com LLMs grandes. Mas os detalhes de configuração dependem do seu stack atual.\n\nQuinta vai ser perfeito pra destrinchar isso direitinho. Que horário te serve melhor?"
+    },
+    {
+      "who": "PROSPECT (quer reunião)",
+      "text": "Perfeito, ficou claro. Podemos marcar uma call de 15 min essa semana pra fechar specs e proposta dos servidores com GPU? Quinta 15h funciona pra mim.",
+      "meta": "sentimento=wants_meeting score=9"
+    },
+    {
+      "who": "VENDEDOR (IA)",
+      "text": "Marcado! Quinta às 15h, 15 minutos.\n\nPara aproveitar bem o tempo, me passa rapidinho antes da call:\n\n— Quantos nós você está pensando?\n— Qual modelo base pro fine-tuning (tamanho em parâmetros)?\n\nAssim já chego com as specs e números certos pra você. Vou te mandar o invite agora! 🎯"
+    },
+    {
+      "who": "SISTEMA",
+      "text": "Reunião agendada para 2026-07-16T15:00:00 (15 min) — status da empresa => meeting_set"
+    }
+  ]
+}

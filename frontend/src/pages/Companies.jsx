@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import PropensityModal from './PropensityModal.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
 
 const API = '';
 
@@ -59,6 +60,7 @@ export function AddForm({ onAdded, toast }) {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       toast('Empresa adicionada!', 'success');
+      if (data.warning) toast(data.warning, 'warning');
       setForm({ companyName: '', sector: '', contactName: '', role: 'other', email: '', linkedin: '', whatsapp: '', country: 'BR', callType: 'cold' });
       onAdded();
     } catch (err) {
@@ -295,7 +297,7 @@ function CSVImport({ toast, onAdded }) {
 }
 
 // ── FiltersBar ─────────────────────────────────────────────────────────────────
-function FiltersBar({ filters, setFilters, sectors, importSources, count, flagCatalog }) {
+function FiltersBar({ filters, setFilters, sectors, importSources, count, flagCatalog, user }) {
   return (
     <div className="d-flex gap-2 mb-2 flex-wrap align-items-center">
       <input
@@ -359,9 +361,18 @@ function FiltersBar({ filters, setFilters, sectors, importSources, count, flagCa
         />
         <label className="form-check-label small" htmlFor="filtroSemContato">Sem contato</label>
       </div>
+      {user?.username && (
+        <button
+          className={`btn btn-sm ${filters.mine ? 'btn-primary' : 'btn-outline-primary'}`}
+          onClick={() => setFilters((f) => ({ ...f, mine: !f.mine }))}
+          title="Mostrar apenas os leads que eu criei"
+        >
+          <i className="bi bi-person-check me-1"></i>Meus leads
+        </button>
+      )}
       <button
         className="btn btn-outline-secondary btn-sm"
-        onClick={() => setFilters({ search: '', status: '', sector: '', importSource: '', flag: '', semContato: false })}
+        onClick={() => setFilters({ search: '', status: '', sector: '', importSource: '', flag: '', semContato: false, mine: false })}
       >
         ✕ Limpar
       </button>
@@ -586,6 +597,81 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversati
 }
 
 // ── ExpandedRow ────────────────────────────────────────────────────────────────
+// Painel de histórico/contagem de abordagens (cold/warm/frozen) disparadas para a empresa.
+// Os totais já vêm na listagem (company.cold_calls/warm_calls/frozen_calls);
+// o histórico detalhado é carregado sob demanda via /api/companies/:id/call-stats.
+function CallHistoryPanel({ company }) {
+  const [open, setOpen] = useState(false);
+  const [history, setHistory] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const counts = {
+    cold: company.cold_calls || 0,
+    warm: company.warm_calls || 0,
+    frozen: company.frozen_calls || 0,
+  };
+  const total = counts.cold + counts.warm + counts.frozen;
+
+  async function toggle() {
+    if (open) { setOpen(false); return; }
+    setOpen(true);
+    if (history) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`${API}/api/companies/${company.id}/call-stats`);
+      const d = await res.json();
+      setHistory(d && Array.isArray(d.history) ? d.history : []);
+    } catch {
+      setHistory([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="mb-2 p-2 border rounded bg-white">
+      <div className="d-flex align-items-center gap-2 flex-wrap">
+        <span className="fw-bold small"><i className="bi bi-clock-history me-1"></i>Abordagens disparadas</span>
+        {['cold', 'warm', 'frozen'].map((t) => {
+          const m = callMeta(t);
+          return (
+            <span key={t} className={`badge border ${m.cls}`} style={{ fontSize: '.65rem' }} title={m.hint}>
+              {m.label}: {counts[t]}
+            </span>
+          );
+        })}
+        <button className="btn btn-link btn-sm p-0 ms-auto" onClick={toggle} disabled={total === 0}>
+          {open ? 'Ocultar histórico' : 'Ver histórico'}
+        </button>
+      </div>
+      {open && (
+        <div className="mt-2">
+          {loading && <div className="small text-muted">Carregando…</div>}
+          {!loading && history && history.length === 0 && (
+            <div className="small text-muted">Nenhuma abordagem disparada ainda.</div>
+          )}
+          {!loading && history && history.length > 0 && (
+            <ul className="list-unstyled small mb-0" style={{ maxHeight: 180, overflowY: 'auto' }}>
+              {history.map((h, i) => {
+                const m = callMeta(h.call_type);
+                return (
+                  <li key={i} className="d-flex justify-content-between border-bottom py-1">
+                    <span>
+                      <span className={`badge border me-1 ${m.cls}`} style={{ fontSize: '.6rem' }}>{m.label}</span>
+                      {h.contact_name || 'Contato removido'}
+                    </span>
+                    <span className="text-muted">{h.created_at}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onContactAdded, onStartConversation, toast }) {
   const [addForm, setAddForm] = useState({ name: '', role: 'other', email: '', whatsapp: '', linkedin: '', country: 'BR', callType: 'cold' });
   const [adding, setAdding] = useState(false);
@@ -611,6 +697,7 @@ function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onCont
       const d = await res.json();
       if (d.error) throw new Error(d.error);
       toast('Contato adicionado!', 'success');
+      if (d.warning) toast(d.warning, 'warning');
       setAddForm({ name: '', role: 'other', email: '', whatsapp: '', linkedin: '', country: 'BR', callType: 'cold' });
       onContactAdded();
     } catch (err) {
@@ -624,6 +711,7 @@ function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onCont
 
   return (
     <div style={{ background: '#f8f9fa', padding: '12px 16px', borderTop: '1px solid #dee2e6' }}>
+      <CallHistoryPanel company={company} />
       <div className="d-flex gap-3 flex-wrap">
         <div style={{ flex: 1, minWidth: 300 }}>
           <p className="fw-bold small mb-2"><i className="bi bi-people me-1"></i>Contatos ({contacts.length})</p>
@@ -716,6 +804,14 @@ function CompanyRow({ company, selected, onToggle, expanded, onToggleExpand, onE
         </td>
         <td className="fw-semibold">
           {company.name}
+          {company.has_prior_relationship && (
+            <i className="bi bi-link-45deg text-warning ms-1" title="Relacionamento prévio — contato existente na base"></i>
+          )}
+          {(company.created_by_name || company.created_by_username) && (
+            <div className="text-muted fw-normal" style={{ fontSize: '.68rem' }}>
+              <i className="bi bi-person me-1"></i>criado por {company.created_by_name || company.created_by_username}
+            </div>
+          )}
           {(company.flags || []).length > 0 && (
             <div className="mt-1">
               {(company.flags || []).map((k) => {
@@ -845,11 +941,12 @@ function GlobalContactSearch() {
 // ── Main Companies Component ───────────────────────────────────────────────────
 export default function Companies({ toast, loadStats, refreshData, onOpenWhatsApp }) {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [companies, setCompanies] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState([]);
   const [expanded, setExpanded] = useState([]);
-  const [filters, setFilters] = useState({ search: '', status: '', sector: '', importSource: '', flag: '', semContato: false });
+  const [filters, setFilters] = useState({ search: '', status: '', sector: '', importSource: '', flag: '', semContato: false, mine: false });
   const [page, setPage] = useState(1);
   const [sectors, setSectors] = useState([]);
   const [importSources, setImportSources] = useState([]);
@@ -892,6 +989,7 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
     if (filters.importSource && c.import_source !== filters.importSource) return false;
     if (filters.flag && !(c.flags || []).includes(filters.flag)) return false;
     if (filters.semContato && (c.contacts || []).length > 0) return false;
+    if (filters.mine && user?.username && c.created_by_username !== user.username) return false;
     return true;
   });
 
@@ -1117,6 +1215,7 @@ export default function Companies({ toast, loadStats, refreshData, onOpenWhatsAp
             importSources={importSources}
             count={filtered.length}
             flagCatalog={flagCatalog}
+            user={user}
           />
 
           {/* Bulk toolbar */}

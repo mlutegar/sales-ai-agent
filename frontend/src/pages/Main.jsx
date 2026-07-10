@@ -15,6 +15,8 @@ import Metrics from './Metrics.jsx'
 import FollowUps from './FollowUps.jsx'
 import Notifications from './Notifications.jsx'
 import WhatsAppInbox from './WhatsAppInbox.jsx'
+import BlindTest from './BlindTest.jsx'
+import Users from './Users.jsx'
 import { api } from '../api.js'
 
 export default function Main({ toast }) {
@@ -91,6 +93,7 @@ export default function Main({ toast }) {
             <Route path="/companies/new" element={<CompanyNew     {...sharedProps} />} />
             <Route path="/companies"     element={<Companies     {...sharedProps} onOpenWhatsApp={(companyId, contactId) => navigate('/whatsapp', { state: { companyId, contactId } })} />} />
             <Route path="/whatsapp"      element={<WhatsAppInbox toast={toast} initialCompanyId={location.state?.companyId ?? null} initialContactId={location.state?.contactId ?? null} onEditMessage={(messageId) => navigate('/rlhf', { state: { messageId } })} />} />
+            <Route path="/blindtest"    element={<BlindTest toast={toast} />} />
             <Route path="/notifications" element={<Notifications toast={toast} onUnreadChange={setUnreadNotifications} />} />
             <Route path="/followup"      element={<FollowUps      {...sharedProps} />} />
             <Route path="/opportunities" element={<Opportunities  {...sharedProps} />} />
@@ -101,6 +104,7 @@ export default function Main({ toast }) {
             <Route path="/agenda"        element={<Agenda         {...sharedProps} />} />
             <Route path="/lgpd"          element={<LGPD           {...sharedProps} />} />
             <Route path="/metrics"       element={<Metrics        {...sharedProps} />} />
+            <Route path="/users"         element={<Users          {...sharedProps} />} />
             <Route path="*" element={<Navigate to="/companies" replace />} />
           </Routes>
         </div>

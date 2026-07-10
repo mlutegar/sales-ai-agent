@@ -507,6 +507,14 @@ function initDb() {
       created_at     TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_search_logs_contact ON search_logs(contact_id);
+    CREATE TABLE IF NOT EXISTS call_events (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id  INTEGER NOT NULL,
+      contact_id  INTEGER,
+      call_type   TEXT NOT NULL,
+      created_at  TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_call_events_company ON call_events(company_id);
     CREATE TABLE IF NOT EXISTS learned_patterns (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
       channel     TEXT,
@@ -552,8 +560,9 @@ function initDb() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(content_hash)');
 
   // Perfis de usuário (marketing x vendas) e identidade do remetente nas mensagens.
-  addColumnIfNotExists(db, 'users', 'user_type',    "TEXT DEFAULT 'vendas'");   // 'vendas' | 'marketing'
-  addColumnIfNotExists(db, 'users', 'company_name', "TEXT DEFAULT ''");          // marca usada pelo perfil marketing
+  addColumnIfNotExists(db, 'users', 'user_type',      "TEXT DEFAULT 'vendas'");  // 'vendas' | 'marketing'
+  addColumnIfNotExists(db, 'users', 'company_name',   "TEXT DEFAULT ''");         // marca usada pelo perfil marketing
+  addColumnIfNotExists(db, 'users', 'signature_name', "TEXT DEFAULT ''");         // (#6) pessoa p/ assinatura (opcional, marketing)
   // Atribuição do lead ao usuário que o gerou.
   addColumnIfNotExists(db, 'companies', 'created_by', 'INTEGER');
 
@@ -686,6 +695,20 @@ function initDb() {
   addColumnIfNotExists(db, 'contacts', 'enrich_status', "TEXT DEFAULT 'pending'");
   addColumnIfNotExists(db, 'contacts', 'enrich_source', "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'contacts', 'enrich_at',     "TEXT DEFAULT ''");
+
+  // ── LinkedIn: busca pontual (1 lead) + validação humana ─────────────────────
+  // Fluxo assistido/manual: o operador cola o texto do perfil, a IA estrutura os
+  // dados, e nada é gravado nos campos finais sem confirmação humana.
+  // linkedin_status: '' | 'pending_review' | 'confirmed' | 'rejected'
+  addColumnIfNotExists(db, 'contacts', 'linkedin_status',          "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'contacts', 'linkedin_parsed',          "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'contacts', 'linkedin_raw',             "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'contacts', 'linkedin_headline',        "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'contacts', 'linkedin_current_role',    "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'contacts', 'linkedin_current_company', "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'contacts', 'linkedin_location',        "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'contacts', 'linkedin_summary',         "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'contacts', 'linkedin_reviewed_at',     "TEXT DEFAULT ''");
 
   // Rastreamento de origem da importação
   addColumnIfNotExists(db, 'contacts',  'import_source', "TEXT DEFAULT ''");
@@ -1029,6 +1052,18 @@ function companyIsBlocked(db, id) {
   for (const k of companyFlagKeys(db, id)) if (BLOCKING_FLAG_KEYS.has(k)) return true;
   return false;
 }
+
+// Etiquetas que indicam "relacionamento prévio" — a empresa já é um contato existente
+// na base (já atendida ou cliente ativo), não um lead totalmente novo. Usado para
+// sinalizar (sem bloquear) quando um lead COLD é criado para uma empresa já contatada.
+const RELATIONSHIP_FLAG_KEYS = new Set(['empresa_ja_atendida', 'cliente_ativo']);
+function companyHasPriorRelationship(db, id) {
+  for (const k of companyFlagKeys(db, id)) if (RELATIONSHIP_FLAG_KEYS.has(k)) return true;
+  return false;
+}
+const PRIOR_RELATIONSHIP_WARNING =
+  'Esta empresa já possui relacionamento prévio (contato existente na base). '
+  + 'Considere usar "warm" ou "frozen" em vez de "cold" para evitar abordagem duplicada ou desalinhada.';
 
 // ── Enriquecimento de contatos ────────────────────────────────────────────────
 
@@ -1478,13 +1513,14 @@ app.use('/api', requireLogin);
 // Me
 app.get('/api/me', (req, res) => {
   const db = getDb();
-  const u = db.prepare('SELECT username, name, user_type, company_name FROM users WHERE id=?').get(req.session.userId);
+  const u = db.prepare('SELECT username, name, user_type, company_name, signature_name FROM users WHERE id=?').get(req.session.userId);
   db.close();
   res.json({
     username: req.session.username,
     name: req.session.name,
     user_type: u?.user_type || 'vendas',
     company_name: u?.company_name || '',
+    signature_name: u?.signature_name || '',
   });
 });
 
@@ -1504,8 +1540,29 @@ app.get('/api/stats', (req, res) => {
     total_opportunities: db.prepare('SELECT COUNT(*) as c FROM opportunities').get().c,
     pipeline_value:      db.prepare("SELECT COALESCE(SUM(value),0) as v FROM opportunities WHERE stage NOT IN ('lost')").get().v,
     enriched_contacts:   db.prepare("SELECT COUNT(*) as c FROM contacts WHERE email IS NOT NULL AND email!=''").get().c,
+    cold_calls_total:    db.prepare("SELECT COUNT(*) as c FROM call_events WHERE call_type='cold'").get().c,
+    warm_calls_total:    db.prepare("SELECT COUNT(*) as c FROM call_events WHERE call_type='warm'").get().c,
+    frozen_calls_total:  db.prepare("SELECT COUNT(*) as c FROM call_events WHERE call_type='frozen'").get().c,
   });
   db.close();
+});
+
+// Contagem e histórico de abordagens (cold/warm/frozen) de uma empresa.
+app.get('/api/companies/:id/call-stats', (req, res) => {
+  const db = getDb();
+  const company = db.prepare('SELECT id FROM companies WHERE id=?').get(req.params.id);
+  if (!company) { db.close(); return res.status(404).json({ error: 'Empresa não encontrada' }); }
+  const rows = db.prepare('SELECT call_type, COUNT(*) as c FROM call_events WHERE company_id=? GROUP BY call_type').all(req.params.id);
+  const counts = { cold: 0, warm: 0, frozen: 0 };
+  for (const r of rows) { if (counts[r.call_type] !== undefined) counts[r.call_type] = r.c; }
+  const total = counts.cold + counts.warm + counts.frozen;
+  const history = db.prepare(
+    `SELECT e.call_type, e.contact_id, e.created_at, c.name as contact_name
+     FROM call_events e LEFT JOIN contacts c ON c.id = e.contact_id
+     WHERE e.company_id=? ORDER BY e.created_at DESC, e.id DESC LIMIT 50`
+  ).all(req.params.id);
+  db.close();
+  res.json({ ...counts, total, history });
 });
 
 // ── Companies ─────────────────────────────────────────────────────────────────
@@ -1516,6 +1573,9 @@ app.get('/api/companies', (req, res) => {
       COUNT(ct.id) as contact_count,
       GROUP_CONCAT(ct.name || ' (' || ct.role || ')', '||') as contacts_summary,
       u.name as created_by_name, u.username as created_by_username,
+      (SELECT COUNT(*) FROM call_events e WHERE e.company_id=c.id AND e.call_type='cold')   as cold_calls,
+      (SELECT COUNT(*) FROM call_events e WHERE e.company_id=c.id AND e.call_type='warm')   as warm_calls,
+      (SELECT COUNT(*) FROM call_events e WHERE e.company_id=c.id AND e.call_type='frozen') as frozen_calls,
       (SELECT GROUP_CONCAT(cf.flag) FROM company_flags cf WHERE cf.company_id=c.id) as flags
     FROM companies c
     LEFT JOIN contacts ct ON ct.company_id = c.id
@@ -1527,6 +1587,7 @@ app.get('/api/companies', (req, res) => {
   for (const row of rows) {
     row.contacts = db.prepare('SELECT * FROM contacts WHERE company_id=? ORDER BY is_primary DESC, created_at ASC').all(row.id);
     row.flags = row.flags ? row.flags.split(',') : [];
+    row.has_prior_relationship = row.flags.some((k) => RELATIONSHIP_FLAG_KEYS.has(k));
   }
 
   db.close();
@@ -1593,8 +1654,14 @@ app.post('/api/companies', (req, res) => {
     contactId = cr.lastInsertRowid;
     db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(companyId, contactId, 'contact_added', `Contato "${contact_name.trim()}" adicionado`);
   }
+  // Empresa recém-criada: só sinaliza se ela já tiver, de cara, etiqueta de relacionamento
+  // prévio (ex.: importada/marcada) e o contato inicial for cold.
+  let warning = null;
+  if (contactId && contactCallType === 'cold' && companyHasPriorRelationship(db, companyId)) {
+    warning = PRIOR_RELATIONSHIP_WARNING;
+  }
   db.close();
-  res.json({ id: companyId, contact_id: contactId });
+  res.json({ id: companyId, contact_id: contactId, warning });
 });
 
 // Mapeia cargo em texto livre (ex.: "Diretor Comercial") para a categoria do sistema.
@@ -1747,8 +1814,14 @@ app.post('/api/companies/:id/contacts', (req, res) => {
   const callType = normalizeCallType(req.body.call_type);
   const r = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, call_type) VALUES (?,?,?,?,?,?,?,?)').run(req.params.id, name, role || 'other', email || '', linkedin || '', normalizedWa, isPrimary, callType);
   db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(req.params.id, r.lastInsertRowid, 'contact_added', `Contato "${name}" adicionado`);
+  // Sinaliza (sem bloquear) quando um lead COLD é criado para uma empresa já contatada.
+  let warning = null;
+  if (callType === 'cold' && companyHasPriorRelationship(db, req.params.id)) {
+    warning = PRIOR_RELATIONSHIP_WARNING;
+    db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(req.params.id, r.lastInsertRowid, 'cold_on_prior_relationship', `Lead cold criado para empresa com relacionamento prévio`);
+  }
   db.close();
-  res.json({ id: r.lastInsertRowid });
+  res.json({ id: r.lastInsertRowid, warning });
 });
 
 app.patch('/api/companies/:companyId/contacts/:contactId', (req, res) => {
@@ -1868,7 +1941,7 @@ app.post('/api/companies/:id/message', (req, res) => {
 function getSessionUser(db, req) {
   const uid = req?.session?.userId;
   if (!uid) return null;
-  try { return db.prepare('SELECT id, username, name, user_type, company_name FROM users WHERE id=?').get(uid) || null; }
+  try { return db.prepare('SELECT id, username, name, user_type, company_name, signature_name FROM users WHERE id=?').get(uid) || null; }
   catch { return null; }
 }
 
@@ -1880,8 +1953,10 @@ function buildSenderBlock(user) {
   const type = (user.user_type || 'vendas').toLowerCase();
   if (type === 'marketing') {
     const brand = (user.company_name || '').trim() || user.name || 'nossa empresa';
+    const sig = (user.signature_name || '').trim();
+    const assinatura = sig ? `"${brand} — ${sig}" (a marca em primeiro lugar; a pessoa apenas complementa)` : `"${brand}" ou "Equipe ${brand}"`;
     return `\n# REMETENTE (quem apresenta/assina — OBRIGATÓRIO)
-Você escreve em nome da EMPRESA "${brand}" (equipe de marketing). Apresente-se SEMPRE como a empresa "${brand}" — NUNCA use um nome de pessoa como remetente. Assine como "${brand}" ou "Equipe ${brand}".\n`;
+Você escreve em nome da EMPRESA "${brand}" (equipe de marketing). Apresente-se SEMPRE como a empresa "${brand}" — NUNCA use um nome de pessoa isolado como remetente. Assine como ${assinatura}.\n`;
   }
   const full = (user.name || '').trim() || user.username || 'o vendedor';
   const first = full.split(/\s+/)[0];
@@ -1895,7 +1970,9 @@ function senderLine(user) {
   const type = (user.user_type || 'vendas').toLowerCase();
   if (type === 'marketing') {
     const brand = (user.company_name || '').trim() || user.name || 'nossa empresa';
-    return `Remetente: empresa "${brand}" (perfil marketing — apresente-se como a EMPRESA, nunca como pessoa; assine "${brand}")`;
+    const sig = (user.signature_name || '').trim();
+    const assina = sig ? `"${brand} — ${sig}"` : `"${brand}"`;
+    return `Remetente: empresa "${brand}" (perfil marketing — apresente-se como a EMPRESA, nunca como pessoa isolada; assine ${assina})`;
   }
   const full = (user.name || '').trim() || user.username || 'o vendedor';
   return `Remetente: ${full} (perfil vendas — apresente-se pelo primeiro nome e assine como ${full})`;
@@ -2202,6 +2279,123 @@ app.post('/api/contacts/enrich', async (req, res) => {
 
   const result = await enrichContact(contact_id, companyName);
   res.json(result);
+});
+
+// ── LinkedIn (pontual, 1 lead) — Passo 1: analisar texto colado do perfil ──────
+// Fluxo assistido/manual: o operador cola o conteúdo do perfil do LinkedIn e a IA
+// estrutura os dados. NADA é gravado nos campos finais aqui — só fica em revisão.
+// SEM MOCK: se a chave da Anthropic não estiver configurada, retorna erro claro.
+const LINKEDIN_EXTRACT_SYSTEM = 'Você extrai dados estruturados de um texto de perfil do LinkedIn colado por um operador de vendas. Responda SOMENTE com um objeto JSON válido (sem markdown, sem comentários) com EXATAMENTE estas chaves: name (string), headline (string), current_role (string), current_company (string), location (string), summary (string), experience (array de strings), education (array de strings), skills (array de strings), profile_url (string). Use "" para strings ausentes e [] para listas ausentes. NUNCA invente dados que não estejam no texto.';
+
+app.post('/api/contacts/:id/linkedin/parse', async (req, res) => {
+  const contactId = req.params.id;
+  const { raw_text, profile_url } = req.body || {};
+
+  if (!raw_text || !raw_text.trim()) {
+    return res.status(400).json({ ok: false, error: 'Cole o conteúdo do perfil do LinkedIn antes de analisar.' });
+  }
+
+  // SEM MOCK: exige chave real da Anthropic. Se não houver, avisa o operador.
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || apiKey === 'sk-ant-sua-chave-aqui') {
+    return res.status(503).json({ ok: false, error: 'IA indisponível: configure ANTHROPIC_API_KEY para analisar o perfil do LinkedIn.' });
+  }
+
+  const db0 = getDb();
+  const contact = db0.prepare('SELECT * FROM contacts WHERE id=?').get(contactId);
+  db0.close();
+  if (!contact) return res.status(404).json({ ok: false, error: 'Contato não encontrado' });
+
+  let parsed;
+  try {
+    const raw = await callClaude(
+      LINKEDIN_EXTRACT_SYSTEM,
+      `Texto do perfil do LinkedIn (colado pelo operador):\n"""\n${raw_text.slice(0, 12000)}\n"""`,
+      1200
+    );
+    parsed = JSON.parse(extractJsonLoose(raw));
+  } catch (e) {
+    console.warn('[linkedin/parse] Falha ao interpretar resposta da IA:', e.message);
+    return res.status(502).json({ ok: false, error: 'Não foi possível interpretar o perfil. Tente colar o texto novamente.' });
+  }
+
+  if (profile_url && profile_url.trim() && !parsed.profile_url) parsed.profile_url = profile_url.trim();
+
+  const db = getDb();
+  db.prepare(`
+    UPDATE contacts
+    SET linkedin_status = 'pending_review',
+        linkedin_parsed = ?,
+        linkedin_raw    = ?,
+        linkedin        = CASE WHEN (linkedin IS NULL OR linkedin='') AND ?!='' THEN ? ELSE linkedin END
+    WHERE id = ?
+  `).run(
+    JSON.stringify(parsed),
+    raw_text.slice(0, 20000),
+    parsed.profile_url || '', parsed.profile_url || '',
+    contactId
+  );
+  db.close();
+
+  res.json({ ok: true, status: 'pending_review', parsed });
+});
+
+// ── LinkedIn (pontual, 1 lead) — Passo 2: validação humana (confirmar/rejeitar) ─
+// Só aqui os dados do perfil são efetivamente gravados no contato — e apenas se o
+// operador confirmar que o perfil é realmente daquela pessoa.
+app.post('/api/contacts/:id/linkedin/confirm', (req, res) => {
+  const contactId = req.params.id;
+  const { action, fields } = req.body || {};
+
+  const db0 = getDb();
+  const contact = db0.prepare('SELECT * FROM contacts WHERE id=?').get(contactId);
+  db0.close();
+  if (!contact) return res.status(404).json({ ok: false, error: 'Contato não encontrado' });
+
+  if (action === 'reject') {
+    const db = getDb();
+    db.prepare("UPDATE contacts SET linkedin_status='rejected', linkedin_reviewed_at=datetime('now') WHERE id=?").run(contactId);
+    db.close();
+    return res.json({ ok: true, status: 'rejected' });
+  }
+
+  if (action !== 'confirm') {
+    return res.status(400).json({ ok: false, error: "action deve ser 'confirm' ou 'reject'" });
+  }
+
+  // Usa os campos editados pelo operador; se ausentes, cai no que foi extraído.
+  let data = fields;
+  if (!data) {
+    try { data = JSON.parse(contact.linkedin_parsed || '{}'); } catch { data = {}; }
+  }
+  const str = v => (v == null ? '' : String(v)).trim();
+
+  const db = getDb();
+  db.prepare(`
+    UPDATE contacts
+    SET linkedin_status           = 'confirmed',
+        linkedin_reviewed_at      = datetime('now'),
+        linkedin_headline         = ?,
+        linkedin_current_role     = ?,
+        linkedin_current_company  = ?,
+        linkedin_location         = ?,
+        linkedin_summary          = ?,
+        linkedin        = CASE WHEN ?!='' THEN ? ELSE linkedin END,
+        role            = CASE WHEN (role IS NULL OR role='' OR role='other') AND ?!='' THEN ? ELSE role END
+    WHERE id = ?
+  `).run(
+    str(data.headline),
+    str(data.current_role),
+    str(data.current_company),
+    str(data.location),
+    str(data.summary),
+    str(data.profile_url), str(data.profile_url),
+    str(data.current_role), str(data.current_role),
+    contactId
+  );
+  db.close();
+
+  res.json({ ok: true, status: 'confirmed' });
 });
 
 // Enriquecer em lote contatos sem e-mail (máx 50)
@@ -2619,6 +2813,9 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
 
   const db4 = getDb();
   db4.prepare("UPDATE companies SET status='sequence_created' WHERE id=?").run(req.params.id);
+  // Registra a abordagem disparada (histórico/contagem de cold/warm/frozen por empresa).
+  db4.prepare("INSERT INTO call_events (company_id, contact_id, call_type, created_at) VALUES (?,?,?,datetime('now'))")
+     .run(req.params.id, contact.id, callType);
   db4.close();
   res.json({ sequence: results, messages: results, contact, call_type: callType, auto_researched: callCtx.autoResearched });
 });
@@ -4227,7 +4424,7 @@ const VALID_USER_TYPES = ['vendas', 'marketing'];
 
 app.get('/api/users', (req, res) => {
   const db = getDb();
-  res.json(db.prepare('SELECT id, username, name, user_type, company_name, created_at FROM users ORDER BY created_at DESC').all());
+  res.json(db.prepare('SELECT id, username, name, user_type, company_name, signature_name, created_at FROM users ORDER BY created_at DESC').all());
   db.close();
 });
 
@@ -4235,6 +4432,7 @@ app.post('/api/users', (req, res) => {
   const { username, password, name } = req.body;
   const userType = VALID_USER_TYPES.includes(req.body.user_type) ? req.body.user_type : 'vendas';
   const companyName = (req.body.company_name || '').trim();
+  const signatureName = (req.body.signature_name || '').trim();
   if (!username || !password) return res.status(400).json({ error: 'Usuário e senha são obrigatórios' });
   if (userType === 'marketing' && !companyName) {
     return res.status(400).json({ error: 'Perfil marketing exige o nome da empresa/marca' });
@@ -4246,8 +4444,8 @@ app.post('/api/users', (req, res) => {
   const exists = db.prepare('SELECT id FROM users WHERE username=?').get(username);
   if (exists) { db.close(); return res.status(409).json({ error: 'Usuário já existe' }); }
   const hash = bcrypt.hashSync(password, 10);
-  const r = db.prepare('INSERT INTO users (username, password, name, user_type, company_name) VALUES (?,?,?,?,?)')
-    .run(username, hash, name || '', userType, companyName);
+  const r = db.prepare('INSERT INTO users (username, password, name, user_type, company_name, signature_name) VALUES (?,?,?,?,?,?)')
+    .run(username, hash, name || '', userType, companyName, signatureName);
   db.close();
   res.json({ id: r.lastInsertRowid });
 });

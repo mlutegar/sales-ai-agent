@@ -111,8 +111,38 @@ export default function Login({ toast }) {
         </form>
 
         <hr style={{ borderColor: '#eef0f3', margin: '1.75rem 0' }} />
-        <div style={{ fontSize: '.78rem', color: '#98a2b3', textAlign: 'center' }}>
-          Primeiro acesso? <strong style={{ color: '#475467' }}>admin</strong> / <strong style={{ color: '#475467' }}>admin123</strong>
+        <div style={{ fontSize: '.72rem', color: '#98a2b3', textTransform: 'uppercase', letterSpacing: '.04em', fontWeight: 600, marginBottom: 8 }}>
+          Contas de demonstração
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {[
+            { user: 'vendas',    pass: 'vendas123',    label: 'Vendas',    desc: 'assina com o nome do vendedor', icon: 'bi-person-badge', color: '#1d4ed8' },
+            { user: 'marketing', pass: 'marketing123', label: 'Marketing', desc: 'assina com o nome da empresa',   icon: 'bi-megaphone',    color: '#059669' },
+            { user: 'admin',     pass: 'admin123',     label: 'Admin',     desc: 'acesso completo',                icon: 'bi-shield-lock',  color: '#475467' },
+          ].map(a => (
+            <button
+              key={a.user}
+              type="button"
+              onClick={() => { setUsername(a.user); setPassword(a.pass); setError('') }}
+              title={`Preencher com ${a.user}`}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+                background: '#f9fafb', border: '1px solid #e4e7ec', borderRadius: 8,
+                padding: '.55rem .75rem', cursor: 'pointer', width: '100%',
+              }}
+            >
+              <i className={`bi ${a.icon}`} style={{ color: a.color, fontSize: '1rem' }} />
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: 'block', fontSize: '.82rem', fontWeight: 600, color: '#1a2233' }}>
+                  {a.label} <span style={{ color: '#98a2b3', fontWeight: 400 }}>— {a.desc}</span>
+                </span>
+                <span style={{ fontSize: '.75rem', color: '#667085' }}>
+                  {a.user} / {a.pass}
+                </span>
+              </span>
+              <i className="bi bi-box-arrow-in-right" style={{ color: '#98a2b3' }} />
+            </button>
+          ))}
         </div>
       </div>
     </div>

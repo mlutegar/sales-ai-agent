@@ -784,6 +784,62 @@
 </div>
 
 <!-- ═══ COMPANY DETAIL MODAL ════════════════════════════════════════════════ -->
+<!-- ── Modal: busca pontual de perfil no LinkedIn + validação humana ──────────── -->
+<div class="modal fade" id="linkedinModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-linkedin text-primary me-2"></i>Perfil do LinkedIn — <span id="li-title-name">contato</span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+
+        <!-- Passo 1: buscar e colar -->
+        <div id="li-step1">
+          <p class="text-muted small">
+            Busca <strong>pontual</strong>, um lead por vez, para respeitar a política do LinkedIn.
+            Abra a busca, copie o conteúdo do perfil correto e cole abaixo — a IA vai estruturar os dados
+            para você <strong>validar</strong> antes de salvar.
+          </p>
+          <button class="btn btn-outline-primary btn-sm mb-3" onclick="openLinkedInSearch()">
+            <i class="bi bi-box-arrow-up-right me-1"></i>Abrir busca no LinkedIn
+          </button>
+          <div class="mb-2">
+            <label class="form-label small mb-0">URL do perfil (opcional)</label>
+            <input class="form-control form-control-sm" id="li-url" placeholder="https://www.linkedin.com/in/...">
+          </div>
+          <div class="mb-2">
+            <label class="form-label small mb-0">Conteúdo do perfil (cole aqui)</label>
+            <textarea class="form-control form-control-sm" id="li-raw" rows="8" placeholder="Cole aqui o texto copiado da página do perfil (nome, cargo, experiência, etc.)"></textarea>
+          </div>
+          <button class="btn btn-primary btn-sm" id="li-parse-btn" onclick="runLinkedInParse()">
+            <i class="bi bi-robot me-1"></i>Analisar com IA
+          </button>
+        </div>
+
+        <!-- Passo 2: revisar e validar -->
+        <div id="li-step2" class="d-none">
+          <div class="alert alert-warning py-2 small">
+            <i class="bi bi-exclamation-triangle me-1"></i>
+            Confirme que este perfil é realmente de <strong id="li-title-name-2"></strong>. Revise/edite os campos abaixo.
+          </div>
+          <div id="li-review"></div>
+        </div>
+
+      </div>
+      <div class="modal-footer" id="li-footer">
+        <div class="w-100 d-flex justify-content-between">
+          <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Fechar</button>
+          <div class="d-none" id="li-step2-actions">
+            <button class="btn btn-outline-danger btn-sm" onclick="confirmLinkedIn('reject')"><i class="bi bi-x-lg me-1"></i>Rejeitar</button>
+            <button class="btn btn-success btn-sm" onclick="confirmLinkedIn('confirm')"><i class="bi bi-check-lg me-1"></i>Confirmar que é este contato</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal fade" id="companyModal" tabindex="-1">
   <div class="modal-dialog modal-xl modal-dialog-scrollable">
     <div class="modal-content">
@@ -1553,6 +1609,7 @@ async function toggleCompanyExpand(companyId) {
 
   const data = await api(`/api/companies/${companyId}`);
   const contacts = data.contacts;
+  const companyName = data.company.name;
 
   let contactsHtml = contacts.length
     ? `<table class="table table-sm mb-2">
@@ -1565,6 +1622,7 @@ async function toggleCompanyExpand(companyId) {
               <td>
                 ${ct.email ? `<a href="mailto:${esc(ct.email)}">${esc(ct.email)}</a>` : '<span class="text-muted">—</span>'}
                 ${enrichBadge(ct)}
+                ${linkedInBadge(ct)}
               </td>
               <td>${esc(ct.whatsapp)||'—'}</td>
               <td class="d-flex gap-1 flex-wrap">
@@ -1573,6 +1631,11 @@ async function toggleCompanyExpand(companyId) {
                   onclick="enrichSingleContact(${ct.id}, ${companyId})" title="Buscar e-mail e telefone">
                   <i class="bi bi-search"></i>
                 </button>` : ''}
+                <button class="btn btn-outline-primary btn-sm py-0"
+                  onclick="openLinkedInModal(${ct.id}, ${companyId}, ${jsStr(ct.name)}, ${jsStr(companyName || '')})"
+                  title="Buscar perfil no LinkedIn (pontual, com validação)">
+                  <i class="bi bi-linkedin"></i>
+                </button>
                 <button class="btn btn-outline-danger btn-sm py-0" onclick="removeContact(${companyId}, ${ct.id})">
                   <i class="bi bi-trash"></i>
                 </button>
@@ -2272,6 +2335,139 @@ function enrichBadge(ct) {
     pending:   ct.email ? '' : '<span class="badge bg-light text-dark border ms-1" style="font-size:.65rem">Pendente</span>',
   };
   return map[ct.enrich_status] || '';
+}
+
+// ── LinkedIn: busca pontual (1 lead) + validação humana ───────────────────────
+// Gera um literal de string JS seguro dentro de um atributo HTML aspas-duplas.
+function jsStr(s) {
+  return "'" + String(s == null ? '' : s)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;') + "'";
+}
+
+function linkedInBadge(ct) {
+  const url = ct.linkedin ? `<a href="${esc(ct.linkedin)}" target="_blank" rel="noopener" class="ms-1" title="Abrir perfil"><i class="bi bi-linkedin text-primary"></i></a>` : '';
+  const map = {
+    confirmed:      '<span class="badge ms-1" style="background:#0a66c2;font-size:.65rem" title="Perfil validado por humano">LinkedIn ✓</span>',
+    pending_review: '<span class="badge bg-warning text-dark ms-1" style="font-size:.65rem" title="Aguardando validação">Revisar</span>',
+    rejected:       '<span class="badge bg-secondary ms-1" style="font-size:.65rem" title="Perfil rejeitado">Rejeitado</span>',
+  };
+  return (map[ct.linkedin_status] || '') + url;
+}
+
+// Estado do fluxo de LinkedIn em andamento no modal.
+let _liCtx = { contactId: null, companyId: null, name: '', company: '' };
+
+function openLinkedInModal(contactId, companyId, name, company) {
+  _liCtx = { contactId, companyId, name: name || '', company: company || '' };
+  const modalEl = document.getElementById('linkedinModal');
+  document.getElementById('li-title-name').textContent = name || 'contato';
+  document.getElementById('li-title-name-2').textContent = name || 'contato';
+  // Reset para o Passo 1
+  document.getElementById('li-step1').classList.remove('d-none');
+  document.getElementById('li-step2').classList.add('d-none');
+  document.getElementById('li-step2-actions').classList.add('d-none');
+  document.getElementById('li-raw').value = '';
+  document.getElementById('li-url').value = '';
+  document.getElementById('li-parse-btn').disabled = false;
+  document.getElementById('li-parse-btn').innerHTML = '<i class="bi bi-robot me-1"></i>Analisar com IA';
+  if (!window._liModal) window._liModal = new bootstrap.Modal(modalEl);
+  window._liModal.show();
+}
+
+function openLinkedInSearch() {
+  const q = `${_liCtx.name} ${_liCtx.company}`.trim();
+  const url = 'https://www.linkedin.com/search/results/people/?keywords=' + encodeURIComponent(q);
+  window.open(url, '_blank', 'noopener');
+}
+
+async function runLinkedInParse() {
+  const raw = document.getElementById('li-raw').value.trim();
+  const url = document.getElementById('li-url').value.trim();
+  if (!raw) { toast('Cole o conteúdo do perfil do LinkedIn primeiro.', 'warning'); return; }
+
+  const btn = document.getElementById('li-parse-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Analisando...';
+
+  try {
+    // fetch direto (não via api()) para exibir a mensagem de aviso exata do backend,
+    // inclusive quando a IA está indisponível (sem ANTHROPIC_API_KEY).
+    const res = await fetch(`/api/contacts/${_liCtx.contactId}/linkedin/parse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw_text: raw, profile_url: url }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      toast(data.error || `Erro ${res.status} ao analisar o perfil.`, 'danger');
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-robot me-1"></i>Analisar com IA';
+      return;
+    }
+    renderLinkedInReview(data.parsed || {});
+  } catch (e) {
+    toast('Sem conexão com o servidor.', 'danger');
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-robot me-1"></i>Analisar com IA';
+  }
+}
+
+function renderLinkedInReview(p) {
+  const field = (id, label, val) => `
+    <div class="mb-2">
+      <label class="form-label small mb-0">${label}</label>
+      <input class="form-control form-control-sm" id="li-f-${id}" value="${esc(val || '')}">
+    </div>`;
+  const listField = (id, label, arr) => `
+    <div class="mb-2">
+      <label class="form-label small mb-0">${label}</label>
+      <textarea class="form-control form-control-sm" id="li-f-${id}" rows="2">${esc((arr || []).join('\n'))}</textarea>
+    </div>`;
+
+  document.getElementById('li-review').innerHTML =
+    field('name', 'Nome', p.name) +
+    field('headline', 'Headline', p.headline) +
+    field('current_role', 'Cargo atual', p.current_role) +
+    field('current_company', 'Empresa atual', p.current_company) +
+    field('location', 'Localização', p.location) +
+    field('profile_url', 'URL do perfil', p.profile_url) +
+    `<div class="mb-2"><label class="form-label small mb-0">Resumo</label>
+       <textarea class="form-control form-control-sm" id="li-f-summary" rows="3">${esc(p.summary || '')}</textarea></div>` +
+    listField('experience', 'Experiência (1 por linha)', p.experience) +
+    listField('education', 'Formação (1 por linha)', p.education) +
+    listField('skills', 'Skills (1 por linha)', p.skills);
+
+  document.getElementById('li-step1').classList.add('d-none');
+  document.getElementById('li-step2').classList.remove('d-none');
+  document.getElementById('li-step2-actions').classList.remove('d-none');
+}
+
+async function confirmLinkedIn(action) {
+  let fields = null;
+  if (action === 'confirm') {
+    const v = id => (document.getElementById(`li-f-${id}`)?.value || '').trim();
+    const lines = id => v(id).split('\n').map(s => s.trim()).filter(Boolean);
+    fields = {
+      name: v('name'), headline: v('headline'),
+      current_role: v('current_role'), current_company: v('current_company'),
+      location: v('location'), profile_url: v('profile_url'), summary: v('summary'),
+      experience: lines('experience'), education: lines('education'), skills: lines('skills'),
+    };
+  }
+  try {
+    const data = await api(`/api/contacts/${_liCtx.contactId}/linkedin/confirm`, 'POST', { action, fields });
+    if (data.ok) {
+      toast(action === 'confirm' ? '✓ Perfil validado e salvo no contato.' : 'Perfil rejeitado.', action === 'confirm' ? 'success' : 'info');
+      window._liModal?.hide();
+      expandedRows.delete(_liCtx.companyId);
+      await toggleCompanyExpand(_liCtx.companyId);
+    }
+  } catch {
+    toast('Erro ao salvar a validação.', 'danger');
+  }
 }
 
 async function enrichSingleContact(contactId, companyId) {

@@ -41,6 +41,15 @@ export default function Dashboard({ toast }) {
     ? (scoredCompanies.reduce((sum, c) => sum + c.interest_score, 0) / scoredCompanies.length).toFixed(1)
     : '—'
 
+  // Abordagens disparadas (cold/warm/frozen) — soma por empresa
+  const callTotals = companies.reduce((acc, c) => {
+    acc.cold += c.cold_calls || 0
+    acc.warm += c.warm_calls || 0
+    acc.frozen += c.frozen_calls || 0
+    return acc
+  }, { cold: 0, warm: 0, frozen: 0 })
+  const callTotalAll = callTotals.cold + callTotals.warm + callTotals.frozen
+
   // Top 5
   const top5 = [...companies]
     .filter(c => c.interest_score > 0)
@@ -90,6 +99,37 @@ export default function Dashboard({ toast }) {
             </div>
           </div>
           
+          {/* Abordagens disparadas por tipo (cold/warm/frozen) */}
+          <div className="col-12">
+            <div className="card p-3">
+              <h6 className="fw-bold mb-3"><i className="bi bi-telephone-outbound me-1"></i>Abordagens disparadas por tipo</h6>
+              <div className="d-flex gap-2 flex-wrap">
+                {[
+                  { key: 'cold', label: '❄️ Cold', color: '#0e7490' },
+                  { key: 'warm', label: '🔥 Warm', color: '#b45309' },
+                  { key: 'frozen', label: '🧊 Frozen', color: '#1d4ed8' },
+                ].map(({ key, label, color }) => (
+                  <div key={key} style={{
+                    flex: '1 1 0', minWidth: 110, textAlign: 'center', borderRadius: 8,
+                    padding: '14px 8px', background: callTotals[key] > 0 ? color : '#f9fafb',
+                    color: callTotals[key] > 0 ? '#fff' : '#98a2b3',
+                    border: callTotals[key] > 0 ? 'none' : '1px solid #eef0f3',
+                  }}>
+                    <div style={{ fontSize: '1.7rem', fontWeight: 700, lineHeight: 1 }}>{callTotals[key]}</div>
+                    <div style={{ fontSize: '.72rem', marginTop: 5 }}>{label}</div>
+                  </div>
+                ))}
+                <div style={{
+                  flex: '1 1 0', minWidth: 110, textAlign: 'center', borderRadius: 8,
+                  padding: '14px 8px', background: '#111827', color: '#fff',
+                }}>
+                  <div style={{ fontSize: '1.7rem', fontWeight: 700, lineHeight: 1 }}>{callTotalAll}</div>
+                  <div style={{ fontSize: '.72rem', marginTop: 5 }}>Total</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div className="col-12 col-md-6">
             <div className="card p-3">
               <h6 className="fw-bold mb-3"><i className="bi bi-pie-chart me-1"></i>Distribuição por Setor</h6>

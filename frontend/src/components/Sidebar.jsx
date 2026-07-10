@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext.jsx'
 export const TABS = [
   { key: 'companies',      path: '/companies',     icon: 'bi-building',          label: 'Empresas' },
   { key: 'whatsapp',       path: '/whatsapp',      icon: 'bi-whatsapp',          label: 'WhatsApp' },
+  { key: 'blindtest',      path: '/blindtest',     icon: 'bi-incognito',          label: 'Teste cego' },
   { key: 'notifications',  path: '/notifications', icon: 'bi-bell-fill',         label: 'Notificações', badgeKey: 'notifications' },
   { key: 'followup',       path: '/followup',      icon: 'bi-clock-history',     label: 'Follow-ups' },
   { key: 'opportunities',  path: '/opportunities', icon: 'bi-funnel',            label: 'Oportunidades' },
@@ -14,6 +15,7 @@ export const TABS = [
   { key: 'agenda',         path: '/agenda',        icon: 'bi-calendar-check',    label: 'Agenda' },
   { key: 'lgpd',           path: '/lgpd',          icon: 'bi-shield-lock',       label: 'LGPD' },
   { key: 'metrics',        path: '/metrics',       icon: 'bi-graph-up-arrow',    label: 'Métricas' },
+  { key: 'users',          path: '/users',         icon: 'bi-people',            label: 'Usuários' },
 ]
 
 export default function Sidebar({
@@ -66,9 +68,19 @@ export default function Sidebar({
         </nav>
 
         <div className="sidebar-footer">
-          <span className="sidebar-user" title={user?.name || user?.username || '—'}>
+          <span className="sidebar-user" title={`${user?.name || user?.username || '—'}${user?.user_type ? ` · perfil ${user.user_type}` : ''}`}>
             <i className="bi bi-person-circle" />
-            <span className="sidebar-label">{user?.name || user?.username || '—'}</span>
+            <span className="sidebar-label">
+              {user?.name || user?.username || '—'}
+              {user?.user_type && (
+                <span
+                  className={`badge ms-1 ${user.user_type === 'marketing' ? 'bg-success' : 'bg-primary'}`}
+                  style={{ fontSize: '.6rem', verticalAlign: 'middle' }}
+                >
+                  {user.user_type === 'marketing' ? 'Marketing' : 'Vendas'}
+                </span>
+              )}
+            </span>
           </span>
           <a href="/logout" className="sidebar-logout" title="Sair">
             <i className="bi bi-box-arrow-right" />
