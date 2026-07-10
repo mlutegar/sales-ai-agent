@@ -331,6 +331,20 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
     if (await saveFeedback(msgId, { score: n })) toast(n >= 4 ? '👍 Marcada como boa' : '👎 Marcada como ruim', 'success')
   }
 
+  // (#7) Aciona o LLM-judge da rubrica "não parece bot" e guarda a nota na mensagem.
+  const [scoringId, setScoringId] = useState(null)
+  async function styleScore(msgId) {
+    setScoringId(msgId)
+    try {
+      const r = await fetch(`${API}/api/messages/${msgId}/style-score`, { method: 'POST' })
+      const res = await r.json()
+      setData(d => ({ ...d, messages: (d?.messages || []).map(m => m.id === msgId ? { ...m, style_score: res.total, style_report: JSON.stringify(res) } : m) }))
+      toast(`Rubrica: ${res.total ?? '?'}/5 — ${res.verdict || ''}`, res.verdict === 'passou' ? 'success' : 'warning')
+    } catch {
+      toast('Erro ao avaliar a mensagem.', 'danger')
+    } finally { setScoringId(null) }
+  }
+
   // 👎 = marca como ruim E abre a caixa de observação (o motivo alimenta o aprendizado).
   function thumbsDown(msg) {
     scoreMessage(msg.id, 1)
@@ -609,10 +623,51 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
                   <div style={{ whiteSpace: 'pre-wrap', fontSize: '.88rem', lineHeight: 1.5 }}>
                     {msg.content || msg.ai_original}
                   </div>
+                  {/* (#1) Fontes clicáveis da pesquisa que embasou o gancho */}
+                  {!isInbound && (() => {
+                    let src = []; try { src = JSON.parse(msg.sources || '[]') } catch {}
+                    if (!src.length) return null
+                    return (
+                      <div style={{ marginTop: 4, fontSize: '.68rem', color: '#555' }}>
+                        <i className="bi bi-link-45deg me-1" />Fontes:{' '}
+                        {src.map((u, i) => {
+                          let host = u; try { host = new URL(u).hostname.replace(/^www\./, '') } catch {}
+                          return (
+                            <a key={i} href={u} target="_blank" rel="noopener noreferrer"
+                              className="me-2" style={{ color: '#1a44be', textDecoration: 'underline' }}
+                              title={u}>{host}</a>
+                          )
+                        })}
+                      </div>
+                    )
+                  })()}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
                     <span className={`badge bg-${cfg.bg}`} style={{ fontSize: '.65rem' }}>
                       <i className={`bi ${cfg.icon} me-1`} />{cfg.label}
                     </span>
+                    {/* (#6) Variante A/B */}
+                    {!isInbound && msg.variant_no && (
+                      <span className="badge bg-info text-dark" style={{ fontSize: '.62rem' }}
+                        title={msg.variant_angle || 'Variante A/B'}>
+                        <i className="bi bi-shuffle me-1" />Variante {msg.variant_no}
+                      </span>
+                    )}
+                    {/* (#1) Fact-check: cita fato específico → revisar antes de enviar */}
+                    {!isInbound && msg.needs_fact_check ? (
+                      <span className={`badge ${(() => { let s = []; try { s = JSON.parse(msg.sources || '[]') } catch {} return s.length ? 'bg-warning text-dark' : 'bg-danger' })()}`}
+                        style={{ fontSize: '.62rem' }}
+                        title={(() => { let s = []; try { s = JSON.parse(msg.sources || '[]') } catch {} let c = []; try { c = JSON.parse(msg.fact_claims || '[]') } catch {} return `Afirmações: ${c.join(' | ') || '—'}\nFontes: ${s.length ? s.join('\n') : 'SEM FONTE — verifique manualmente'}` })()}>
+                        <i className="bi bi-exclamation-triangle me-1" />
+                        {(() => { let s = []; try { s = JSON.parse(msg.sources || '[]') } catch {} return s.length ? 'Verificar fato' : 'Fato sem fonte' })()}
+                      </span>
+                    ) : null}
+                    {/* (#7) Nota da rubrica "não parece bot" */}
+                    {!isInbound && msg.style_score != null && (
+                      <span className={`badge ${msg.style_score >= 4 ? 'bg-success' : msg.style_score >= 3 ? 'bg-warning text-dark' : 'bg-danger'}`}
+                        style={{ fontSize: '.62rem' }} title="Nota da rubrica não-parece-bot (0-5)">
+                        <i className="bi bi-robot me-1" />{msg.style_score}/5
+                      </span>
+                    )}
                     {isInbound && (
                       <button
                         className="btn btn-success"
@@ -677,6 +732,17 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
                           title="Editar manualmente e ver/ajustar o prompt (vai para RLHF / Curadoria)"
                         >
                           <i className="bi bi-pencil me-1" />Editar
+                        </button>
+                        <button
+                          className="btn btn-outline-info"
+                          style={{ fontSize: '.65rem', padding: '1px 8px', borderRadius: 20 }}
+                          onClick={() => styleScore(msg.id)}
+                          disabled={scoringId === msg.id}
+                          title="Avalia pela rubrica 'não parece bot' (LLM-judge) e mostra a nota 0-5"
+                        >
+                          {scoringId === msg.id
+                            ? <><span className="spinner-border spinner-border-sm me-1" />Avaliando…</>
+                            : <><i className="bi bi-robot me-1" />Avaliar</>}
                         </button>
                       </span>
                     )}
