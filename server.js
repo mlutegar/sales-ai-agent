@@ -757,6 +757,7 @@ function initDb() {
   addColumnIfNotExists(db, 'contacts', 'linkedin_location',        "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'contacts', 'linkedin_summary',         "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'contacts', 'linkedin_reviewed_at',     "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'contacts', 'linkedin_reviewed_by',     "TEXT DEFAULT ''");
 
   // Rastreamento de origem da importação
   addColumnIfNotExists(db, 'contacts',  'import_source', "TEXT DEFAULT ''");
@@ -1051,7 +1052,7 @@ Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou
             ? `O prospect enviou: "${text}"\nDúvida técnica. Responda de forma objetiva (máx 80 palavras) e convide para conversa de 15 minutos. Tom consultivo.`
             : `O prospect enviou: "${text}"\nDemonstrou interesse. Confirme o interesse e proponha reunião de 15 minutos (máx 60 palavras). Tom entusiasmado mas profissional.`;
           let draft = await callClaude('Você é SDR especialista em respostas rápidas.', draftPrompt, 200);
-          draft = humanizeWhatsapp(draft, styleProfile());
+          draft = sanitizeOutbound(draft, styleProfile());
 
           // Salva draft e envia automaticamente
           db2.prepare(
@@ -1107,7 +1108,9 @@ const ANTI_TEMPLATE_RULES =
   '- PROIBIDO usar clichês de robô: "espero que esteja bem", "tudo bem?", "meu nome é ... e vim aqui porque", ' +
   '"passando para apresentar", "somos uma empresa que", "gostaria de agendar", "não perca essa oportunidade".\n' +
   '- Abra por uma situação/fato/dor REAL do lead — nunca por auto-apresentação genérica.\n' +
-  '- Soe como uma pessoa escrevendo no WhatsApp: direto, específico, sem jargão de marketing.';
+  '- Soe como uma pessoa escrevendo no WhatsApp: direto, específico, sem jargão de marketing.\n' +
+  '- PROIBIDO usar placeholders/campos a preencher como "[seu nome]", "[nome]", "{empresa}", "<link>". ' +
+  'Se você não souber um dado (ex.: seu próprio nome), NÃO o mencione e reescreva a frase sem ele — nunca deixe um espaço reservado.';
 
 // (#6) Ângulos distintos para as variantes A/B — cada uma abre por um caminho diferente.
 const VARIANT_ANGLES = [
@@ -1208,16 +1211,8 @@ function companyIsBlocked(db, id) {
 // lib/relationships.js (testável isoladamente). Reexporta-se aqui para uso local.
 const { RELATIONSHIP_FLAG_KEYS, PRIOR_RELATIONSHIP_WARNING, companyHasPriorRelationship, priorRelationshipInfo, contactCreationWarnings } = rel;
 
-// (#3) Detecta placeholders não resolvidos que não devem ir para o cliente.
-// Cobre [Colchetes], {chaves} e <angulares> com conteúdo alfabético (ex.: [Nome], {empresa}, <link>).
-function findUnresolvedPlaceholders(text) {
-  if (!text) return [];
-  const found = new Set();
-  const re = /\[[^\]\n]*[A-Za-zÀ-ÿ][^\]\n]*\]|\{[^}\n]*[A-Za-zÀ-ÿ][^}\n]*\}|<[^>\n]*[A-Za-zÀ-ÿ][^>\n]*>/g;
-  let m;
-  while ((m = re.exec(text)) !== null) found.add(m[0]);
-  return [...found];
-}
+// (#3) Detecção/limpeza de placeholders foi movida para lib/humanize.js
+// (findUnresolvedPlaceholders / stripPlaceholders / sanitizeOutbound) — importadas abaixo.
 
 // (#5/#7) Parser leve de data/hora em PT-BR para negociação de agenda.
 // Reconhece dia da semana (segunda..sexta/sáb/dom), "amanhã/hoje", e hora ("15h", "15:30", "às 9").
@@ -1731,10 +1726,9 @@ app.get('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
 });
 
-// ── Rota principal (protegida) ────────────────────────────────────────────────
-app.get('/', requireLogin, (req, res) => {
-  res.sendFile(path.join(__dirname, 'templates', 'index.html'));
-});
+// Nota: a rota principal `/` é servida pelo build React em `public/index.html`
+// via `express.static` (middleware no topo) e pelo catch-all no final do arquivo.
+// A antiga rota server-rendered (templates/index.html) foi removida por ser código morto.
 
 // ════════════════════════════════════════════════════════════════════════════
 // API — todas protegidas
@@ -1784,6 +1778,9 @@ app.get('/api/me', (req, res) => {
     user_type: u?.user_type || 'vendas',
     company_name: u?.company_name || '',
     signature_name: u?.signature_name || '',
+    // Nome pessoal utilizável para assinar/apresentar (null se só houver nome genérico).
+    // O front usa isto para avisar o vendedor a configurar o nome antes de gerar mensagens.
+    sales_name: resolveSalesName(u),
   });
 });
 
@@ -1850,7 +1847,11 @@ app.get('/api/companies', (req, res) => {
   for (const row of rows) {
     row.contacts = db.prepare('SELECT * FROM contacts WHERE company_id=? ORDER BY is_primary DESC, created_at ASC').all(row.id);
     row.flags = row.flags ? row.flags.split(',') : [];
-    row.has_prior_relationship = row.flags.some((k) => RELATIONSHIP_FLAG_KEYS.has(k));
+    // Indicador derivado de múltiplos sinais (etiqueta + contatos warm/frozen +
+    // mensagens + abordagens anteriores), não só da etiqueta manual.
+    const prior = priorRelationshipInfo(db, row.id);
+    row.has_prior_relationship = prior.has;
+    row.prior_relationship_reasons = prior.reasons;
   }
 
   db.close();
@@ -1896,35 +1897,38 @@ app.post('/api/companies', (req, res) => {
   const contactCallType = normalizeCallType(req.body.contact_call_type);
   if (!name) return res.status(400).json({ error: 'Nome da empresa é obrigatório' });
   const db = getDb();
-  // Deduplicação por chave normalizada (ignora acento/caixa/espaços):
-  // "Itaú" e "Itau" são tratadas como a mesma empresa.
-  const nameKey = normalizeCompanyKey(name);
-  const dup = db.prepare('SELECT id, name FROM companies').all().find((c) => normalizeCompanyKey(c.name) === nameKey);
-  if (dup) { db.close(); return res.status(409).json({ error: 'Empresa já cadastrada', existing_id: dup.id }); }
-  // Valida e-mail do primeiro contato antes de criar a empresa (evita órfã).
-  if (contact_name && contact_name.trim() && contact_email && !isValidEmailServer(contact_email)) {
+  try {
+    // Deduplicação por chave normalizada (ignora acento/caixa/espaços):
+    // "Itaú" e "Itau" são tratadas como a mesma empresa.
+    const nameKey = normalizeCompanyKey(name);
+    const dup = db.prepare('SELECT id, name FROM companies').all().find((c) => normalizeCompanyKey(c.name) === nameKey);
+    if (dup) return res.status(409).json({ error: 'Empresa já cadastrada', existing_id: dup.id });
+    // Valida e-mail do primeiro contato antes de criar a empresa (evita órfã).
+    if (contact_name && contact_name.trim() && contact_email && !isValidEmailServer(contact_email)) {
+      return res.status(400).json({ error: 'E-mail do contato inválido' });
+    }
+    const r = db.prepare('INSERT INTO companies (name, sector, created_by) VALUES (?, ?, ?)').run(name, sector || '', req.session.userId || null);
+    const companyId = r.lastInsertRowid;
+    db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?, ?, ?)').run(companyId, 'company_added', `Empresa "${name}" adicionada ao sistema`);
+    // Cria o primeiro contato (enviado pelo formulário "Nova Empresa") se informado.
+    let contactId = null;
+    let notice = { warning: null, prior_relationship: null, duplicate_contacts: [], suggested_call_type: null };
+    if (contact_name && contact_name.trim()) {
+      const normalizedWa = normalizePhone(contact_whatsapp);
+      const cr = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, call_type) VALUES (?,?,?,?,?,?,1,?)')
+        .run(companyId, contact_name.trim(), contact_role || 'other', contact_email || '', contact_linkedin || '', normalizedWa, contactCallType);
+      contactId = cr.lastInsertRowid;
+      db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(companyId, contactId, 'contact_added', `Contato "${contact_name.trim()}" adicionado`);
+      // Sinaliza relacionamento prévio (cold) e/ou contato duplicado em outra empresa.
+      notice = contactCreationWarnings(db, companyId, contactCallType, { email: contact_email, whatsapp: normalizedWa, linkedin: contact_linkedin });
+      if (notice.warning) {
+        db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(companyId, contactId, 'contact_warning', notice.warning);
+      }
+    }
+    res.json({ id: companyId, contact_id: contactId, ...notice });
+  } finally {
     db.close();
-    return res.status(400).json({ error: 'E-mail do contato inválido' });
   }
-  const r = db.prepare('INSERT INTO companies (name, sector, created_by) VALUES (?, ?, ?)').run(name, sector || '', req.session.userId || null);
-  const companyId = r.lastInsertRowid;
-  db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?, ?, ?)').run(companyId, 'company_added', `Empresa "${name}" adicionada ao sistema`);
-  // Cria o primeiro contato (enviado pelo formulário "Nova Empresa") se informado.
-  let contactId = null;
-  if (contact_name && contact_name.trim()) {
-    const cr = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, call_type) VALUES (?,?,?,?,?,?,1,?)')
-      .run(companyId, contact_name.trim(), contact_role || 'other', contact_email || '', contact_linkedin || '', normalizePhone(contact_whatsapp), contactCallType);
-    contactId = cr.lastInsertRowid;
-    db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(companyId, contactId, 'contact_added', `Contato "${contact_name.trim()}" adicionado`);
-  }
-  // Empresa recém-criada: só sinaliza se ela já tiver, de cara, etiqueta de relacionamento
-  // prévio (ex.: importada/marcada) e o contato inicial for cold.
-  let warning = null;
-  if (contactId && contactCallType === 'cold' && companyHasPriorRelationship(db, companyId)) {
-    warning = PRIOR_RELATIONSHIP_WARNING;
-  }
-  db.close();
-  res.json({ id: companyId, contact_id: contactId, warning });
 });
 
 // Mapeia cargo em texto livre (ex.: "Diretor Comercial") para a categoria do sistema.
@@ -2244,7 +2248,7 @@ Você escreve em nome da EMPRESA "${brand}" (equipe de marketing). Apresente-se 
   if (!full) {
     // Sem nome pessoal decente: proíbe assinatura genérica ("— Administrador") que soa a bot.
     return `\n# REMETENTE (quem assina — OBRIGATÓRIO)
-Escreva como uma pessoa real da equipe comercial. NÃO assine com nome de usuário/cargo genérico (ex.: "Administrador", "Suporte", "Sistema") e NÃO use assinatura corporativa. Encerre de forma natural e humana, sem bloco de assinatura.\n`;
+Escreva como uma pessoa real da equipe comercial. NÃO assine com nome de usuário/cargo genérico (ex.: "Administrador", "Suporte", "Sistema") e NÃO use assinatura corporativa. Encerre de forma natural e humana, sem bloco de assinatura. Como você NÃO tem um nome próprio definido, NÃO se apresente pelo nome e NUNCA escreva um placeholder como "[seu nome]" — simplesmente omita a auto-apresentação.\n`;
   }
   const first = full.split(/\s+/)[0];
   return `\n# REMETENTE (quem apresenta/assina — OBRIGATÓRIO)
@@ -2262,7 +2266,7 @@ function senderLine(user) {
     return `Remetente: empresa "${brand}" (perfil marketing — apresente-se como a EMPRESA, nunca como pessoa isolada; assine ${assina})`;
   }
   const full = resolveSalesName(user);
-  if (!full) return 'Remetente: pessoa real da equipe comercial — NÃO assine com nome genérico/de sistema ("Administrador", "Suporte") nem assinatura corporativa; encerre de forma natural, sem bloco de assinatura.';
+  if (!full) return 'Remetente: pessoa real da equipe comercial — NÃO assine com nome genérico/de sistema ("Administrador", "Suporte") nem assinatura corporativa; encerre de forma natural, sem bloco de assinatura. Sem nome próprio definido: NÃO se apresente pelo nome e NUNCA use placeholder como "[seu nome]" — omita a auto-apresentação.';
   return `Remetente: ${full} (perfil vendas — apresente-se pelo primeiro nome e assine como ${full})`;
 }
 
@@ -2271,7 +2275,13 @@ const {
   BOT_WORDS, botWordScan, similarity, maxSimilarity,
   styleProfile, humanizationBlock, humanizeWhatsapp,
   splitBubbles, humanDelayMs, offHours, qualityIssues,
+  findUnresolvedPlaceholders, stripPlaceholders, sanitizeOutbound,
+  productMentioned,
 } = require('./lib/humanize');
+
+// Contador monotônico para agrupar variantes A/B de uma mesma geração.
+// Evita Date.now() (não determinístico) e garante unicidade dentro do processo.
+let __variantGroupSeq = 0;
 
 const WA_SYSTEM = 'Você é um SDR brasileiro especialista em prospecção por WhatsApp. Escreve mensagens curtas, humanas e específicas para conseguir UMA reunião com a pessoa. Nunca soa como robô, template ou marketing genérico. Segue à risca as regras dadas pelo revisor humano. REGRA ABSOLUTA: sua resposta é SEMPRE o texto de UMA mensagem de WhatsApp pronta para enviar ao lead — você NUNCA faz perguntas, NUNCA pede esclarecimento, NUNCA comenta sobre a tarefa nem fala com o operador. Se faltar alguma informação, use o melhor palpite pelo contexto e escreva a mensagem mesmo assim.';
 
@@ -2379,7 +2389,7 @@ ATENÇÃO: NÃO faça perguntas nem comentários. Escreva AGORA apenas a mensage
       if (retry && !/^\[ERRO API/.test(retry) && !looksLikeMeta(retry)) out = retry;
       else if (previous) out = previous;
     }
-    out = humanizeWhatsapp(out, profile);
+    out = sanitizeOutbound(out, profile);
     const issues = qualityIssues(out, recentTexts || []);
     if (!best || issues.botMarks.length < best.issues.botMarks.length ||
         (issues.botMarks.length === best.issues.botMarks.length && issues.simScore < best.issues.simScore)) best = { text: out, issues };
@@ -2546,20 +2556,40 @@ app.post('/api/contacts/:id/linkedin/parse', async (req, res) => {
   db0.close();
   if (!contact) return res.status(404).json({ ok: false, error: 'Contato não encontrado' });
 
-  let parsed;
-  try {
-    const raw = await callClaude(
-      LINKEDIN_EXTRACT_SYSTEM,
-      `Texto do perfil do LinkedIn (colado pelo operador):\n"""\n${raw_text.slice(0, 12000)}\n"""`,
-      1200
-    );
-    parsed = JSON.parse(extractJsonLoose(raw));
-  } catch (e) {
-    console.warn('[linkedin/parse] Falha ao interpretar resposta da IA:', e.message);
+  const userPrompt = `Texto do perfil do LinkedIn (colado pelo operador):\n"""\n${raw_text.slice(0, 12000)}\n"""`;
+
+  // (#7) Fallback de parsing: tenta 1x; se o JSON vier inválido, reenvia com
+  // instrução mais rígida antes de desistir.
+  let parsed = null;
+  for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+    try {
+      const sys = attempt === 0
+        ? LINKEDIN_EXTRACT_SYSTEM
+        : LINKEDIN_EXTRACT_SYSTEM + ' ATENÇÃO: sua última resposta não era JSON válido. Responda ESTA vez APENAS com o objeto JSON, começando com { e terminando com }, sem nenhum texto ao redor.';
+      const raw = await callClaude(sys, userPrompt, 1200);
+      parsed = JSON.parse(extractJsonLoose(raw));
+    } catch (e) {
+      console.warn(`[linkedin/parse] tentativa ${attempt + 1} falhou:`, e.message);
+    }
+  }
+  if (!parsed) {
     return res.status(502).json({ ok: false, error: 'Não foi possível interpretar o perfil. Tente colar o texto novamente.' });
   }
 
   if (profile_url && profile_url.trim() && !parsed.profile_url) parsed.profile_url = profile_url.trim();
+
+  // (#6) Deduplicação: avisa se esta URL de perfil já está confirmada em OUTRO contato.
+  let dupWarning = null;
+  const urlNorm = (parsed.profile_url || '').replace(/\/+$/, '').toLowerCase();
+  if (urlNorm) {
+    const dbD = getDb();
+    const dup = dbD.prepare(
+      "SELECT ct.id, ct.name, c.name AS company FROM contacts ct JOIN companies c ON c.id=ct.company_id " +
+      "WHERE ct.id!=? AND ct.linkedin_status='confirmed' AND lower(rtrim(ct.linkedin,'/'))=?"
+    ).get(contactId, urlNorm);
+    dbD.close();
+    if (dup) dupWarning = `Esta URL de perfil já está confirmada para "${dup.name}" (${dup.company}). Verifique se não é um homônimo.`;
+  }
 
   const db = getDb();
   db.prepare(`
@@ -2577,7 +2607,7 @@ app.post('/api/contacts/:id/linkedin/parse', async (req, res) => {
   );
   db.close();
 
-  res.json({ ok: true, status: 'pending_review', parsed });
+  res.json({ ok: true, status: 'pending_review', parsed, dup_warning: dupWarning });
 });
 
 // ── LinkedIn (pontual, 1 lead) — Passo 2: validação humana (confirmar/rejeitar) ─
@@ -2592,9 +2622,11 @@ app.post('/api/contacts/:id/linkedin/confirm', (req, res) => {
   db0.close();
   if (!contact) return res.status(404).json({ ok: false, error: 'Contato não encontrado' });
 
+  const reviewer = (req.session && (req.session.name || req.session.username)) || 'desconhecido';
+
   if (action === 'reject') {
     const db = getDb();
-    db.prepare("UPDATE contacts SET linkedin_status='rejected', linkedin_reviewed_at=datetime('now') WHERE id=?").run(contactId);
+    db.prepare("UPDATE contacts SET linkedin_status='rejected', linkedin_reviewed_at=datetime('now'), linkedin_reviewed_by=? WHERE id=?").run(reviewer, contactId);
     db.close();
     return res.json({ ok: true, status: 'rejected' });
   }
@@ -2615,6 +2647,7 @@ app.post('/api/contacts/:id/linkedin/confirm', (req, res) => {
     UPDATE contacts
     SET linkedin_status           = 'confirmed',
         linkedin_reviewed_at      = datetime('now'),
+        linkedin_reviewed_by      = ?,
         linkedin_headline         = ?,
         linkedin_current_role     = ?,
         linkedin_current_company  = ?,
@@ -2624,6 +2657,7 @@ app.post('/api/contacts/:id/linkedin/confirm', (req, res) => {
         role            = CASE WHEN (role IS NULL OR role='' OR role='other') AND ?!='' THEN ? ELSE role END
     WHERE id = ?
   `).run(
+    reviewer,
     str(data.headline),
     str(data.current_role),
     str(data.current_company),
@@ -2636,6 +2670,34 @@ app.post('/api/contacts/:id/linkedin/confirm', (req, res) => {
   db.close();
 
   res.json({ ok: true, status: 'confirmed' });
+});
+
+// (#11) OCR de screenshot do perfil do LinkedIn. Recebe a imagem em base64
+// (data URL ou base64 puro) e devolve o texto reconhecido, para o operador colar.
+// Reusa o worker tesseract.js (por+eng) já usado no OCR de PDFs.
+app.post('/api/linkedin/ocr', async (req, res) => {
+  const { image } = req.body || {};
+  if (!image || typeof image !== 'string') {
+    return res.status(400).json({ ok: false, error: 'Envie uma imagem (base64) do perfil.' });
+  }
+  const b64 = image.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '');
+  let buffer;
+  try {
+    buffer = Buffer.from(b64, 'base64');
+    if (!buffer.length) throw new Error('vazio');
+  } catch {
+    return res.status(400).json({ ok: false, error: 'Imagem inválida.' });
+  }
+  try {
+    const worker = await getOcrWorker();
+    const { data } = await worker.recognize(buffer);
+    const text = (data.text || '').replace(/\n{3,}/g, '\n\n').trim();
+    if (!text) return res.status(422).json({ ok: false, error: 'Não foi possível ler texto na imagem.' });
+    res.json({ ok: true, text });
+  } catch (e) {
+    console.warn('[linkedin/ocr] falha:', e.message);
+    res.status(500).json({ ok: false, error: 'Falha ao processar a imagem (OCR indisponível).' });
+  }
 });
 
 // Enriquecer em lote contatos sem e-mail (máx 50)
@@ -2908,12 +2970,14 @@ ${learned ? '\nREGRAS OBRIGATÓRIAS aprendidas com o revisor humano — o "hook"
 
 Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com exatamente estas chaves:
 - "research_context": array de 2-3 strings curtas (uma frase cada), cada uma com um fato REAL encontrado
-- "hook": uma única string (máx 2 linhas) conectando um gancho real ao produto
+- "hook": uma única string (máx 2 linhas) cujo FOCO é a proposta de valor concreta de "${productValue}". O produto DEVE aparecer explicitamente e ser o assunto principal da oferta; use um fato real da empresa apenas como ponte de abertura, nunca como tema central. Não termine falando só da empresa.
 - "pain_points": array de exatamente 3 strings (dores específicas do setor/porte)
 - "value_proposition": uma única string
 - "sources": array de URLs usados como fonte (strings)
 
-Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em tendências reais do setor e indique isso. Responda APENAS com JSON válido, sem markdown, sem comentários.`;
+Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em tendências reais do setor e indique isso.
+No campo "hook": não use travessão "—", nem jargão de marketing (solução, otimizar, potencializar, etc.); escreva em tom casual de WhatsApp. PROIBIDO usar placeholders/campos a preencher como "[seu nome]", "[nome]", "{empresa}" ou "<link>": se não souber um dado, omita-o e reescreva sem espaço reservado.
+Responda APENAS com JSON válido, sem markdown, sem comentários.`;
 
   const result = await callClaudeWithSearch('Você é assistente de pesquisa de vendas B2B que usa busca na web para encontrar informações reais e atuais sobre empresas e seus executivos.', prompt, 2600);
   let hook, ctx, painPoints = [];
@@ -2922,6 +2986,23 @@ Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em ten
   if (jsonMatch) raw = jsonMatch[0];
   try { const p = JSON.parse(raw); hook = p.hook || result; ctx = JSON.stringify(p); painPoints = Array.isArray(p.pain_points) ? p.pain_points : []; }
   catch { hook = result; ctx = result; }
+
+  // Humaniza o hook (remove travessão "—", aspas de IA, etc.) e remove placeholders
+  // não resolvidos ("[seu nome]" & cia) antes de persistir/exibir.
+  // Defesa em profundidade: garante a limpeza mesmo se o modelo desobedecer o prompt.
+  if (hook) hook = sanitizeOutbound(hook, styleProfile());
+
+  // (#5) Garante que o produto seja central: se o gancho não menciona o produto,
+  // reescreve UMA vez usando o contexto real já pesquisado (barato, sem nova busca web).
+  if (hook && !productMentioned(hook, productValue)) {
+    const rewritePrompt =
+      `Reescreva este gancho de WhatsApp para que o FOCO seja o produto "${productValue}".\n` +
+      `Use um fato real do contexto abaixo apenas como abertura/ponte; o produto DEVE aparecer explicitamente e ser a oferta central.\n` +
+      `Não use travessão "—", nem jargão de marketing, nem placeholders. Máx 2 linhas, tom casual de WhatsApp.\n\n` +
+      `Contexto pesquisado: ${ctx}\nGancho atual: ${hook}\n\nDevolva APENAS o novo gancho.`;
+    const rew = await callClaude('Você é copywriter B2B especialista em WhatsApp.', rewritePrompt, 300);
+    if (rew && rew.trim() && !isAiError(rew)) hook = sanitizeOutbound(rew, styleProfile());
+  }
 
   const db2 = getDb();
   const prevHistRaw = db2.prepare('SELECT research_history FROM companies WHERE id=?').get(req.params.id);
@@ -2955,6 +3036,10 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
     contact = db.prepare('SELECT * FROM contacts WHERE company_id=? LIMIT 1').get(req.params.id);
   }
   if (!contact) { db.close(); return res.status(400).json({ error: 'Adicione ao menos um contato antes de gerar a sequência' }); }
+
+  // (#1) Detecta relacionamento prévio ANTES de disparar a abordagem — o momento
+  // de risco real. Computado com o banco aberto e antes de limpar as mensagens.
+  const priorInfo = priorRelationshipInfo(db, req.params.id);
 
   // Salvar histórico da sequência anterior
   const prevMsgs = db.prepare('SELECT * FROM messages WHERE company_id=? AND contact_id=?').all(req.params.id, contact.id);
@@ -3050,7 +3135,7 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
     // (#6) Primeira mensagem gera 2 variantes A/B (ângulos distintos); demais, 1.
     const isFirst = (tpl.day === 1 || tpl.type === 'first_outreach');
     const angles = isFirst ? VARIANT_ANGLES : [{ key: 'unico', label: '', guidance: '' }];
-    const variantGroup = `${contact.id}-${Date.now()}`;
+    const variantGroup = `${contact.id}-${++__variantGroupSeq}`;
 
     let variantNo = 0;
     for (const angle of angles) {
@@ -3102,6 +3187,20 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
         } catch (e) { console.warn('[first-msg critique] pulada:', e.message); }
       }
 
+      // (#3) Guardrail anti-placeholder: se a IA deixou "[seu nome]" & cia, regenera UMA vez
+      // com instrução estrita; se ainda persistir, limpa o texto antes de gravar.
+      if (findUnresolvedPlaceholders(content).length) {
+        const strictPrompt = prompt +
+          '\n\n## CORREÇÃO OBRIGATÓRIA\nA versão anterior continha placeholders (ex.: "[seu nome]"). ' +
+          'Reescreva SEM nenhum campo a preencher: se não souber um dado, omita-o. Retorne APENAS a mensagem.';
+        const retry = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', strictPrompt, 400);
+        if (retry && retry.trim() && !isAiError(retry)) content = retry;
+      }
+
+      // (#1/unificação) Saneamento final único (tira "—", aspas de IA e placeholders),
+      // igual aos demais caminhos de saída — antes gravava sem limpeza aqui.
+      content = sanitizeOutbound(content, styleProfile());
+
       // (#1) Detecta afirmações checáveis e decide se precisa de revisão factual.
       const factClaims = detectFactClaims(content);
       const needsFactCheck = factClaims.length > 0 ? 1 : 0;
@@ -3129,7 +3228,15 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
   db4.prepare("INSERT INTO call_events (company_id, contact_id, call_type, created_at) VALUES (?,?,?,datetime('now'))")
      .run(req.params.id, contact.id, callType);
   db4.close();
-  res.json({ sequence: results, messages: results, contact, call_type: callType, auto_researched: callCtx.autoResearched });
+  // (#1) Sinaliza (sem bloquear) quando a abordagem disparada é COLD numa empresa
+  // que já tinha relacionamento prévio.
+  const coldOnPrior = callType === 'cold' && priorInfo.has;
+  res.json({
+    sequence: results, messages: results, contact, call_type: callType, auto_researched: callCtx.autoResearched,
+    warning: coldOnPrior ? PRIOR_RELATIONSHIP_WARNING : null,
+    prior_relationship: priorInfo,
+    suggested_call_type: coldOnPrior ? 'warm' : null,
+  });
 });
 
 // (#7) Avalia uma mensagem já gravada pela rubrica "não parece bot" e persiste a nota.
@@ -3422,7 +3529,20 @@ function latestThreadForContact(db, contactId) {
 // Monta o userPrompt de uma mensagem da sequência (RLHF v2 — seções rotuladas).
 // Usado na geração real e no preview. `rules`/`posExamples`/`negExamples`/`threadHistory`
 // são opcionais; quando ausentes as seções são omitidas (funciona na 1ª e na 5ª mensagem).
-function buildSequenceUserPrompt({ companyName, sector, contactName, role, hook, productValue, day, channel, socialProof, learned, rules, posExamples, negExamples, threadHistory, sender }) {
+// (#9) Monta um bloco de contexto a partir do perfil de LinkedIn VALIDADO do contato.
+// Só usa dados de perfis confirmados por humano — nunca de pending/rejected.
+function linkedinProfileBlock(contact) {
+  if (!contact || contact.linkedin_status !== 'confirmed') return '';
+  const lines = [];
+  if (contact.linkedin_headline)        lines.push(`- Headline: ${contact.linkedin_headline}`);
+  if (contact.linkedin_current_role)    lines.push(`- Cargo atual: ${contact.linkedin_current_role}`);
+  if (contact.linkedin_current_company) lines.push(`- Empresa atual: ${contact.linkedin_current_company}`);
+  if (contact.linkedin_location)        lines.push(`- Localização: ${contact.linkedin_location}`);
+  if (contact.linkedin_summary)         lines.push(`- Resumo: ${String(contact.linkedin_summary).slice(0, 500)}`);
+  return lines.length ? lines.join('\n') : '';
+}
+
+function buildSequenceUserPrompt({ companyName, sector, contactName, role, hook, productValue, day, channel, socialProof, learned, rules, posExamples, negExamples, threadHistory, sender, linkedinProfile }) {
   const roleInfo = ROLE_PROFILES[role] || ROLE_PROFILES.other;
   const desc = CHANNEL_DESC[channel] || channel;
   const sections = [];
@@ -3456,6 +3576,8 @@ Tarefa: escrever a mensagem do Dia ${day} — canal ${channel} (${desc}).`);
 
   // Seções opcionais marcadas com prioridade de descarte (menor = descartada primeiro) para o teto de tokens (#5).
   const optional = [];
+  // Perfil validado do LinkedIn: prioridade alta (personaliza a mensagem; descartado por último).
+  if (linkedinProfile) optional.push({ prio: 4, text: '## PERFIL DO CONTATO (LinkedIn validado — use para personalizar; não copie literalmente)\n' + linkedinProfile });
   if (socialProof) optional.push({ prio: 1, text: '## CASOS DE SUCESSO\n' + socialProof });
   if (posExamples) optional.push({ prio: 2, text: '## EXEMPLOS POSITIVOS (aprovados — imite o estilo, não copie o conteúdo)\n' + posExamples });
   if (negExamples) optional.push({ prio: 3, text: '## EXEMPLOS NEGATIVOS (reprovados — NÃO repita estes erros)\n' + negExamples });
@@ -3500,6 +3622,7 @@ async function generateSequenceForCompany(companyId, productValue, painPoint = '
       companyName: company.name, sector: company.sector, contactName: contact.name, role: contact.role,
       hook, productValue, day: tpl.day, channel: tpl.channel, socialProof,
       rules, posExamples, negExamples, threadHistory,
+      linkedinProfile: linkedinProfileBlock(contact),
     });
 
     const profile = styleProfile(threadId);
@@ -3509,7 +3632,7 @@ async function generateSequenceForCompany(companyId, productValue, painPoint = '
       const retry = await callClaude(SEQ_SYSTEM, strict, 400);
       if (retry) content = retry;
     }
-    content = humanizeWhatsapp(content, profile);
+    content = sanitizeOutbound(content, profile);
     const promptUsed = `[SYSTEM]\n${SEQ_SYSTEM}\n\n[USER]\n${prompt}`;
     const dbW = getDb();
     const seqNo = dbW.prepare('SELECT COALESCE(MAX(seq_no),0)+1 AS n FROM messages WHERE thread_id=?').get(threadId).n;

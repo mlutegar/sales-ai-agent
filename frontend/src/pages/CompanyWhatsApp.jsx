@@ -177,6 +177,8 @@ export default function CompanyWhatsApp() {
   const [contacts,          setContacts]           = useState([])
   const [messages,          setMessages]           = useState([])
   const [selectedContactId, setSelectedContactId] = useState('')
+  const [product,           setProduct]            = useState('')
+  const [me,                setMe]                 = useState(null)
   const [simulateText,      setSimulateText]       = useState('')
   const [simulateTone,      setSimulateTone]       = useState('random')
   const [sentimentResult,   setSentimentResult]    = useState(null)
@@ -216,6 +218,11 @@ export default function CompanyWhatsApp() {
 
   useEffect(() => { loadData() }, [companyId]) // eslint-disable-line
 
+  // Carrega o perfil do usuário para avisar quando não há nome de remetente configurado.
+  useEffect(() => {
+    fetch(`${API}/api/me`).then(r => r.json()).then(setMe).catch(() => {})
+  }, [])
+
   async function changeAutoReply(mode) {
     setLoadingAR(true)
     try {
@@ -241,10 +248,12 @@ export default function CompanyWhatsApp() {
       const res = await fetch(`${API}/api/companies/${companyId}/sequence`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contact_id: Number(selectedContactId) }),
+        body: JSON.stringify({ contact_id: Number(selectedContactId), product_value: product.trim() || undefined }),
       })
       const data = await res.json()
       if (data.error) throw new Error(data.error)
+      // (#1) Alerta se a abordagem cold foi disparada para empresa já contatada.
+      if (data.warning) toast(data.warning, 'warning')
       // Reload to get full message list including all channels (we filter to whatsapp)
       await loadData()
     } catch (e) {
@@ -453,6 +462,22 @@ export default function CompanyWhatsApp() {
                       </option>
                     ))}
                   </select>
+
+                  <label className="form-label fw-semibold" style={{ fontSize: '.82rem' }}>Produto sendo vendido</label>
+                  <input
+                    className="form-control form-control-sm mb-3"
+                    placeholder="Ex.: Processadores Intel com IA"
+                    value={product}
+                    onChange={e => setProduct(e.target.value)}
+                  />
+
+                  {me && (me.user_type || 'vendas') === 'vendas' && !me.sales_name && (
+                    <div className="alert alert-warning py-2 mb-3" style={{ fontSize: '.8rem' }}>
+                      <i className="bi bi-exclamation-triangle me-1" />
+                      Você ainda não configurou seu <strong>nome de remetente</strong>. As mensagens serão geradas
+                      sem assinatura pessoal. Configure seu nome no perfil para uma abertura mais natural.
+                    </div>
+                  )}
 
                   <button
                     className="btn btn-success w-100"

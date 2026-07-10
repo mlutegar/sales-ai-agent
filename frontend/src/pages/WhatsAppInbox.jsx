@@ -253,6 +253,7 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
   const [autoReplyMode,   setAutoReplyMode]   = useState('off')
   const [selectedContact, setSelectedContact] = useState(initialContactId ? String(initialContactId) : '')
   const [product,     setProduct]     = useState('')
+  const [me,          setMe]          = useState(null)
   const [hook,        setHook]        = useState('')
   const [loadingHook, setLoadingHook] = useState(false)
   const [composeText, setComposeText] = useState('')
@@ -292,6 +293,11 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
     setHook('')
     load()
   }, [companyId]) // eslint-disable-line
+
+  // Perfil do usuário — usado para avisar quando não há nome de remetente configurado.
+  useEffect(() => {
+    fetch(`${API}/api/me`).then(r => r.json()).then(setMe).catch(() => {})
+  }, [])
 
   useEffect(() => {
     // Rola só o container das mensagens (nunca a página) — evita o "pulo" ao abrir a aba.
@@ -838,6 +844,12 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
             onChange={e => setProduct(e.target.value)}
             style={{ fontSize: '.78rem' }}
           />
+          {me && (me.user_type || 'vendas') === 'vendas' && !me.sales_name && (
+            <div className="alert alert-warning py-1 px-2 mb-2" style={{ fontSize: '.72rem' }}>
+              <i className="bi bi-exclamation-triangle me-1" />
+              Sem <strong>nome de remetente</strong> configurado: a mensagem sai sem assinatura pessoal. Configure no perfil.
+            </div>
+          )}
           <button className="btn btn-outline-success btn-sm w-100" onClick={generateHook} disabled={loadingHook || !selectedContact}>
             {loadingHook
               ? <><span className="spinner-border spinner-border-sm me-1" />Pesquisando…</>
