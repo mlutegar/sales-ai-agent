@@ -245,6 +245,8 @@ export default function CompanyWhatsApp() {
       })
       const data = await res.json()
       if (data.error) throw new Error(data.error)
+      // (#1) Alerta se a abordagem cold foi disparada para empresa já contatada.
+      if (data.warning) toast(data.warning, 'warning')
       // Reload to get full message list including all channels (we filter to whatsapp)
       await loadData()
     } catch (e) {

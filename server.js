@@ -757,6 +757,7 @@ function initDb() {
   addColumnIfNotExists(db, 'contacts', 'linkedin_location',        "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'contacts', 'linkedin_summary',         "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'contacts', 'linkedin_reviewed_at',     "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'contacts', 'linkedin_reviewed_by',     "TEXT DEFAULT ''");
 
   // Rastreamento de origem da importação
   addColumnIfNotExists(db, 'contacts',  'import_source', "TEXT DEFAULT ''");
@@ -1850,7 +1851,11 @@ app.get('/api/companies', (req, res) => {
   for (const row of rows) {
     row.contacts = db.prepare('SELECT * FROM contacts WHERE company_id=? ORDER BY is_primary DESC, created_at ASC').all(row.id);
     row.flags = row.flags ? row.flags.split(',') : [];
-    row.has_prior_relationship = row.flags.some((k) => RELATIONSHIP_FLAG_KEYS.has(k));
+    // Indicador derivado de múltiplos sinais (etiqueta + contatos warm/frozen +
+    // mensagens + abordagens anteriores), não só da etiqueta manual.
+    const prior = priorRelationshipInfo(db, row.id);
+    row.has_prior_relationship = prior.has;
+    row.prior_relationship_reasons = prior.reasons;
   }
 
   db.close();
@@ -1896,35 +1901,38 @@ app.post('/api/companies', (req, res) => {
   const contactCallType = normalizeCallType(req.body.contact_call_type);
   if (!name) return res.status(400).json({ error: 'Nome da empresa é obrigatório' });
   const db = getDb();
-  // Deduplicação por chave normalizada (ignora acento/caixa/espaços):
-  // "Itaú" e "Itau" são tratadas como a mesma empresa.
-  const nameKey = normalizeCompanyKey(name);
-  const dup = db.prepare('SELECT id, name FROM companies').all().find((c) => normalizeCompanyKey(c.name) === nameKey);
-  if (dup) { db.close(); return res.status(409).json({ error: 'Empresa já cadastrada', existing_id: dup.id }); }
-  // Valida e-mail do primeiro contato antes de criar a empresa (evita órfã).
-  if (contact_name && contact_name.trim() && contact_email && !isValidEmailServer(contact_email)) {
+  try {
+    // Deduplicação por chave normalizada (ignora acento/caixa/espaços):
+    // "Itaú" e "Itau" são tratadas como a mesma empresa.
+    const nameKey = normalizeCompanyKey(name);
+    const dup = db.prepare('SELECT id, name FROM companies').all().find((c) => normalizeCompanyKey(c.name) === nameKey);
+    if (dup) return res.status(409).json({ error: 'Empresa já cadastrada', existing_id: dup.id });
+    // Valida e-mail do primeiro contato antes de criar a empresa (evita órfã).
+    if (contact_name && contact_name.trim() && contact_email && !isValidEmailServer(contact_email)) {
+      return res.status(400).json({ error: 'E-mail do contato inválido' });
+    }
+    const r = db.prepare('INSERT INTO companies (name, sector, created_by) VALUES (?, ?, ?)').run(name, sector || '', req.session.userId || null);
+    const companyId = r.lastInsertRowid;
+    db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?, ?, ?)').run(companyId, 'company_added', `Empresa "${name}" adicionada ao sistema`);
+    // Cria o primeiro contato (enviado pelo formulário "Nova Empresa") se informado.
+    let contactId = null;
+    let notice = { warning: null, prior_relationship: null, duplicate_contacts: [], suggested_call_type: null };
+    if (contact_name && contact_name.trim()) {
+      const normalizedWa = normalizePhone(contact_whatsapp);
+      const cr = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, call_type) VALUES (?,?,?,?,?,?,1,?)')
+        .run(companyId, contact_name.trim(), contact_role || 'other', contact_email || '', contact_linkedin || '', normalizedWa, contactCallType);
+      contactId = cr.lastInsertRowid;
+      db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(companyId, contactId, 'contact_added', `Contato "${contact_name.trim()}" adicionado`);
+      // Sinaliza relacionamento prévio (cold) e/ou contato duplicado em outra empresa.
+      notice = contactCreationWarnings(db, companyId, contactCallType, { email: contact_email, whatsapp: normalizedWa, linkedin: contact_linkedin });
+      if (notice.warning) {
+        db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(companyId, contactId, 'contact_warning', notice.warning);
+      }
+    }
+    res.json({ id: companyId, contact_id: contactId, ...notice });
+  } finally {
     db.close();
-    return res.status(400).json({ error: 'E-mail do contato inválido' });
   }
-  const r = db.prepare('INSERT INTO companies (name, sector, created_by) VALUES (?, ?, ?)').run(name, sector || '', req.session.userId || null);
-  const companyId = r.lastInsertRowid;
-  db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?, ?, ?)').run(companyId, 'company_added', `Empresa "${name}" adicionada ao sistema`);
-  // Cria o primeiro contato (enviado pelo formulário "Nova Empresa") se informado.
-  let contactId = null;
-  if (contact_name && contact_name.trim()) {
-    const cr = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, call_type) VALUES (?,?,?,?,?,?,1,?)')
-      .run(companyId, contact_name.trim(), contact_role || 'other', contact_email || '', contact_linkedin || '', normalizePhone(contact_whatsapp), contactCallType);
-    contactId = cr.lastInsertRowid;
-    db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(companyId, contactId, 'contact_added', `Contato "${contact_name.trim()}" adicionado`);
-  }
-  // Empresa recém-criada: só sinaliza se ela já tiver, de cara, etiqueta de relacionamento
-  // prévio (ex.: importada/marcada) e o contato inicial for cold.
-  let warning = null;
-  if (contactId && contactCallType === 'cold' && companyHasPriorRelationship(db, companyId)) {
-    warning = PRIOR_RELATIONSHIP_WARNING;
-  }
-  db.close();
-  res.json({ id: companyId, contact_id: contactId, warning });
 });
 
 // Mapeia cargo em texto livre (ex.: "Diretor Comercial") para a categoria do sistema.
@@ -2546,20 +2554,40 @@ app.post('/api/contacts/:id/linkedin/parse', async (req, res) => {
   db0.close();
   if (!contact) return res.status(404).json({ ok: false, error: 'Contato não encontrado' });
 
-  let parsed;
-  try {
-    const raw = await callClaude(
-      LINKEDIN_EXTRACT_SYSTEM,
-      `Texto do perfil do LinkedIn (colado pelo operador):\n"""\n${raw_text.slice(0, 12000)}\n"""`,
-      1200
-    );
-    parsed = JSON.parse(extractJsonLoose(raw));
-  } catch (e) {
-    console.warn('[linkedin/parse] Falha ao interpretar resposta da IA:', e.message);
+  const userPrompt = `Texto do perfil do LinkedIn (colado pelo operador):\n"""\n${raw_text.slice(0, 12000)}\n"""`;
+
+  // (#7) Fallback de parsing: tenta 1x; se o JSON vier inválido, reenvia com
+  // instrução mais rígida antes de desistir.
+  let parsed = null;
+  for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+    try {
+      const sys = attempt === 0
+        ? LINKEDIN_EXTRACT_SYSTEM
+        : LINKEDIN_EXTRACT_SYSTEM + ' ATENÇÃO: sua última resposta não era JSON válido. Responda ESTA vez APENAS com o objeto JSON, começando com { e terminando com }, sem nenhum texto ao redor.';
+      const raw = await callClaude(sys, userPrompt, 1200);
+      parsed = JSON.parse(extractJsonLoose(raw));
+    } catch (e) {
+      console.warn(`[linkedin/parse] tentativa ${attempt + 1} falhou:`, e.message);
+    }
+  }
+  if (!parsed) {
     return res.status(502).json({ ok: false, error: 'Não foi possível interpretar o perfil. Tente colar o texto novamente.' });
   }
 
   if (profile_url && profile_url.trim() && !parsed.profile_url) parsed.profile_url = profile_url.trim();
+
+  // (#6) Deduplicação: avisa se esta URL de perfil já está confirmada em OUTRO contato.
+  let dupWarning = null;
+  const urlNorm = (parsed.profile_url || '').replace(/\/+$/, '').toLowerCase();
+  if (urlNorm) {
+    const dbD = getDb();
+    const dup = dbD.prepare(
+      "SELECT ct.id, ct.name, c.name AS company FROM contacts ct JOIN companies c ON c.id=ct.company_id " +
+      "WHERE ct.id!=? AND ct.linkedin_status='confirmed' AND lower(rtrim(ct.linkedin,'/'))=?"
+    ).get(contactId, urlNorm);
+    dbD.close();
+    if (dup) dupWarning = `Esta URL de perfil já está confirmada para "${dup.name}" (${dup.company}). Verifique se não é um homônimo.`;
+  }
 
   const db = getDb();
   db.prepare(`
@@ -2577,7 +2605,7 @@ app.post('/api/contacts/:id/linkedin/parse', async (req, res) => {
   );
   db.close();
 
-  res.json({ ok: true, status: 'pending_review', parsed });
+  res.json({ ok: true, status: 'pending_review', parsed, dup_warning: dupWarning });
 });
 
 // ── LinkedIn (pontual, 1 lead) — Passo 2: validação humana (confirmar/rejeitar) ─
@@ -2592,9 +2620,11 @@ app.post('/api/contacts/:id/linkedin/confirm', (req, res) => {
   db0.close();
   if (!contact) return res.status(404).json({ ok: false, error: 'Contato não encontrado' });
 
+  const reviewer = (req.session && (req.session.name || req.session.username)) || 'desconhecido';
+
   if (action === 'reject') {
     const db = getDb();
-    db.prepare("UPDATE contacts SET linkedin_status='rejected', linkedin_reviewed_at=datetime('now') WHERE id=?").run(contactId);
+    db.prepare("UPDATE contacts SET linkedin_status='rejected', linkedin_reviewed_at=datetime('now'), linkedin_reviewed_by=? WHERE id=?").run(reviewer, contactId);
     db.close();
     return res.json({ ok: true, status: 'rejected' });
   }
@@ -2615,6 +2645,7 @@ app.post('/api/contacts/:id/linkedin/confirm', (req, res) => {
     UPDATE contacts
     SET linkedin_status           = 'confirmed',
         linkedin_reviewed_at      = datetime('now'),
+        linkedin_reviewed_by      = ?,
         linkedin_headline         = ?,
         linkedin_current_role     = ?,
         linkedin_current_company  = ?,
@@ -2624,6 +2655,7 @@ app.post('/api/contacts/:id/linkedin/confirm', (req, res) => {
         role            = CASE WHEN (role IS NULL OR role='' OR role='other') AND ?!='' THEN ? ELSE role END
     WHERE id = ?
   `).run(
+    reviewer,
     str(data.headline),
     str(data.current_role),
     str(data.current_company),
@@ -2636,6 +2668,34 @@ app.post('/api/contacts/:id/linkedin/confirm', (req, res) => {
   db.close();
 
   res.json({ ok: true, status: 'confirmed' });
+});
+
+// (#11) OCR de screenshot do perfil do LinkedIn. Recebe a imagem em base64
+// (data URL ou base64 puro) e devolve o texto reconhecido, para o operador colar.
+// Reusa o worker tesseract.js (por+eng) já usado no OCR de PDFs.
+app.post('/api/linkedin/ocr', async (req, res) => {
+  const { image } = req.body || {};
+  if (!image || typeof image !== 'string') {
+    return res.status(400).json({ ok: false, error: 'Envie uma imagem (base64) do perfil.' });
+  }
+  const b64 = image.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '');
+  let buffer;
+  try {
+    buffer = Buffer.from(b64, 'base64');
+    if (!buffer.length) throw new Error('vazio');
+  } catch {
+    return res.status(400).json({ ok: false, error: 'Imagem inválida.' });
+  }
+  try {
+    const worker = await getOcrWorker();
+    const { data } = await worker.recognize(buffer);
+    const text = (data.text || '').replace(/\n{3,}/g, '\n\n').trim();
+    if (!text) return res.status(422).json({ ok: false, error: 'Não foi possível ler texto na imagem.' });
+    res.json({ ok: true, text });
+  } catch (e) {
+    console.warn('[linkedin/ocr] falha:', e.message);
+    res.status(500).json({ ok: false, error: 'Falha ao processar a imagem (OCR indisponível).' });
+  }
 });
 
 // Enriquecer em lote contatos sem e-mail (máx 50)
@@ -2956,6 +3016,10 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
   }
   if (!contact) { db.close(); return res.status(400).json({ error: 'Adicione ao menos um contato antes de gerar a sequência' }); }
 
+  // (#1) Detecta relacionamento prévio ANTES de disparar a abordagem — o momento
+  // de risco real. Computado com o banco aberto e antes de limpar as mensagens.
+  const priorInfo = priorRelationshipInfo(db, req.params.id);
+
   // Salvar histórico da sequência anterior
   const prevMsgs = db.prepare('SELECT * FROM messages WHERE company_id=? AND contact_id=?').all(req.params.id, contact.id);
   if (prevMsgs.length > 0) {
@@ -3129,7 +3193,15 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
   db4.prepare("INSERT INTO call_events (company_id, contact_id, call_type, created_at) VALUES (?,?,?,datetime('now'))")
      .run(req.params.id, contact.id, callType);
   db4.close();
-  res.json({ sequence: results, messages: results, contact, call_type: callType, auto_researched: callCtx.autoResearched });
+  // (#1) Sinaliza (sem bloquear) quando a abordagem disparada é COLD numa empresa
+  // que já tinha relacionamento prévio.
+  const coldOnPrior = callType === 'cold' && priorInfo.has;
+  res.json({
+    sequence: results, messages: results, contact, call_type: callType, auto_researched: callCtx.autoResearched,
+    warning: coldOnPrior ? PRIOR_RELATIONSHIP_WARNING : null,
+    prior_relationship: priorInfo,
+    suggested_call_type: coldOnPrior ? 'warm' : null,
+  });
 });
 
 // (#7) Avalia uma mensagem já gravada pela rubrica "não parece bot" e persiste a nota.
@@ -3422,7 +3494,20 @@ function latestThreadForContact(db, contactId) {
 // Monta o userPrompt de uma mensagem da sequência (RLHF v2 — seções rotuladas).
 // Usado na geração real e no preview. `rules`/`posExamples`/`negExamples`/`threadHistory`
 // são opcionais; quando ausentes as seções são omitidas (funciona na 1ª e na 5ª mensagem).
-function buildSequenceUserPrompt({ companyName, sector, contactName, role, hook, productValue, day, channel, socialProof, learned, rules, posExamples, negExamples, threadHistory, sender }) {
+// (#9) Monta um bloco de contexto a partir do perfil de LinkedIn VALIDADO do contato.
+// Só usa dados de perfis confirmados por humano — nunca de pending/rejected.
+function linkedinProfileBlock(contact) {
+  if (!contact || contact.linkedin_status !== 'confirmed') return '';
+  const lines = [];
+  if (contact.linkedin_headline)        lines.push(`- Headline: ${contact.linkedin_headline}`);
+  if (contact.linkedin_current_role)    lines.push(`- Cargo atual: ${contact.linkedin_current_role}`);
+  if (contact.linkedin_current_company) lines.push(`- Empresa atual: ${contact.linkedin_current_company}`);
+  if (contact.linkedin_location)        lines.push(`- Localização: ${contact.linkedin_location}`);
+  if (contact.linkedin_summary)         lines.push(`- Resumo: ${String(contact.linkedin_summary).slice(0, 500)}`);
+  return lines.length ? lines.join('\n') : '';
+}
+
+function buildSequenceUserPrompt({ companyName, sector, contactName, role, hook, productValue, day, channel, socialProof, learned, rules, posExamples, negExamples, threadHistory, sender, linkedinProfile }) {
   const roleInfo = ROLE_PROFILES[role] || ROLE_PROFILES.other;
   const desc = CHANNEL_DESC[channel] || channel;
   const sections = [];
@@ -3456,6 +3541,8 @@ Tarefa: escrever a mensagem do Dia ${day} — canal ${channel} (${desc}).`);
 
   // Seções opcionais marcadas com prioridade de descarte (menor = descartada primeiro) para o teto de tokens (#5).
   const optional = [];
+  // Perfil validado do LinkedIn: prioridade alta (personaliza a mensagem; descartado por último).
+  if (linkedinProfile) optional.push({ prio: 4, text: '## PERFIL DO CONTATO (LinkedIn validado — use para personalizar; não copie literalmente)\n' + linkedinProfile });
   if (socialProof) optional.push({ prio: 1, text: '## CASOS DE SUCESSO\n' + socialProof });
   if (posExamples) optional.push({ prio: 2, text: '## EXEMPLOS POSITIVOS (aprovados — imite o estilo, não copie o conteúdo)\n' + posExamples });
   if (negExamples) optional.push({ prio: 3, text: '## EXEMPLOS NEGATIVOS (reprovados — NÃO repita estes erros)\n' + negExamples });
@@ -3500,6 +3587,7 @@ async function generateSequenceForCompany(companyId, productValue, painPoint = '
       companyName: company.name, sector: company.sector, contactName: contact.name, role: contact.role,
       hook, productValue, day: tpl.day, channel: tpl.channel, socialProof,
       rules, posExamples, negExamples, threadHistory,
+      linkedinProfile: linkedinProfileBlock(contact),
     });
 
     const profile = styleProfile(threadId);
