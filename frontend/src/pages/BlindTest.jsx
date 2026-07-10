@@ -4,6 +4,8 @@ import { api } from '../api.js'
 // Teste cego anti-detecção de bot (blind Turing test).
 // Testadores que não conhecem o projeto veem mensagens reais x geradas pela
 // automação e adivinham qual é qual. Sucesso = acerto agregado < 50%.
+const REASON_TAGS = ['muito formal', 'rápido/robótico', 'genérico', 'jargão de marketing', 'sem erros humanos', 'estrutura de bot']
+
 export default function BlindTest({ toast }) {
   const [tab, setTab] = useState('run')            // 'run' | 'seed' | 'results'
   const [tester, setTester] = useState('')
@@ -12,18 +14,14 @@ export default function BlindTest({ toast }) {
   const [idx, setIdx] = useState(0)
   const [score, setScore] = useState({ hits: 0, total: 0 })
   const [busy, setBusy] = useState(false)
+  const [reason, setReason] = useState('')
 
   const [realText, setRealText] = useState('')
   const [autoText, setAutoText] = useState('')
+  const [scenario, setScenario] = useState('')
   const [reset, setReset] = useState(true)
 
   const [results, setResults] = useState(null)
-
-  const loadItems = useCallback(async () => {
-    const r = await api('/api/blindtest/items')
-    setItems(r.items || [])
-    setIdx(0); setScore({ hits: 0, total: 0 })
-  }, [])
 
   const loadResults = useCallback(async () => {
     try { setResults(await api('/api/blindtest/results')) } catch (e) { toast?.(e.message, 'error') }
@@ -34,9 +32,9 @@ export default function BlindTest({ toast }) {
   const start = async () => {
     if (!tester.trim()) return toast?.('Informe o nome do testador', 'error')
     try {
-      await loadItems()
-      if (!items.length) { const r = await api('/api/blindtest/items'); if (!r.items?.length) return toast?.('Nenhum item semeado ainda (aba "Semear")', 'error') }
-      setStarted(true)
+      const r = await api('/api/blindtest/items')
+      if (!r.items?.length) return toast?.('Nenhum item semeado ainda (aba "Semear")', 'error')
+      setItems(r.items); setIdx(0); setScore({ hits: 0, total: 0 }); setReason(''); setStarted(true)
     } catch (e) { toast?.(e.message, 'error') }
   }
 
@@ -45,8 +43,9 @@ export default function BlindTest({ toast }) {
     if (!item || busy) return
     setBusy(true)
     try {
-      const r = await api('/api/blindtest/guess', 'POST', { item_id: item.id, tester_name: tester.trim(), guess: g })
+      const r = await api('/api/blindtest/guess', 'POST', { item_id: item.id, tester_name: tester.trim(), guess: g, reason: g === 'auto' ? reason : '' })
       setScore(s => ({ hits: s.hits + (r.correct ? 1 : 0), total: s.total + 1 }))
+      setReason('')
       if (idx + 1 >= items.length) { setStarted(false); toast?.('Rodada concluída! Veja os resultados.', 'success'); setTab('results') }
       else setIdx(idx + 1)
     } catch (e) { toast?.(e.message, 'error') } finally { setBusy(false) }
@@ -57,13 +56,21 @@ export default function BlindTest({ toast }) {
     const auto = autoText.split('\n---\n').map(t => t.trim()).filter(Boolean)
     if (!real.length && !auto.length) return toast?.('Cole ao menos uma mensagem', 'error')
     try {
-      const r = await api('/api/blindtest/seed', 'POST', { real, auto, reset })
+      const r = await api('/api/blindtest/seed', 'POST', { real, auto, scenario: scenario.trim(), reset })
       toast?.(`${r.inserted} mensagens semeadas`, 'success')
       setRealText(''); setAutoText('')
     } catch (e) { toast?.(e.message, 'error') }
   }
 
+  const harvest = async () => {
+    try {
+      const r = await api('/api/blindtest/harvest', 'POST', {})
+      toast?.(`${r.harvested} regra(s) aprendida(s) a partir de ${r.candidates} mensagem(ns) mais detectada(s)`, 'success')
+    } catch (e) { toast?.(e.message, 'error') }
+  }
+
   const pct = (h, t) => t ? Math.round((h / t) * 100) : 0
+  const cur = items[idx]
 
   return (
     <div className="py-3" style={{ maxWidth: 860 }}>
@@ -86,14 +93,21 @@ export default function BlindTest({ toast }) {
         </div>
       )}
 
-      {tab === 'run' && started && items[idx] && (
+      {tab === 'run' && started && cur && (
         <div className="card card-body">
           <div className="d-flex justify-content-between text-muted small mb-2">
             <span>Mensagem {idx + 1} de {items.length}</span>
             <span>Acertos: {score.hits}/{score.total}</span>
           </div>
-          <div className="border rounded p-3 mb-3" style={{ background: '#e6ffda', whiteSpace: 'pre-wrap', minHeight: 90 }}>{items[idx].text}</div>
+          {cur.scenario ? <div className="small text-muted mb-1"><i className="bi bi-tag me-1" />Cenário: {cur.scenario}</div> : null}
+          <div className="border rounded p-3 mb-3" style={{ background: '#e6ffda', whiteSpace: 'pre-wrap', minHeight: 90 }}>{cur.text}</div>
           <p className="text-center text-muted small mb-2">Essa mensagem foi escrita por uma pessoa real ou gerada pela automação?</p>
+          <div className="d-flex flex-wrap gap-1 justify-content-center mb-2">
+            {REASON_TAGS.map(t => (
+              <button key={t} type="button" className={`btn btn-sm ${reason === t ? 'btn-secondary' : 'btn-outline-secondary'}`} onClick={() => setReason(reason === t ? '' : t)}>{t}</button>
+            ))}
+          </div>
+          <p className="text-center text-muted" style={{ fontSize: '.75rem' }}>Marque um motivo (opcional) se achar que é automação.</p>
           <div className="d-flex gap-2 justify-content-center">
             <button className="btn btn-outline-success" disabled={busy} onClick={() => guess('real')}><i className="bi bi-person me-1" />Pessoa real</button>
             <button className="btn btn-outline-danger" disabled={busy} onClick={() => guess('auto')}><i className="bi bi-robot me-1" />Automação</button>
@@ -103,7 +117,9 @@ export default function BlindTest({ toast }) {
 
       {tab === 'seed' && (
         <div className="card card-body">
-          <p className="small text-muted">Cole as mensagens separadas por uma linha com <code>---</code>. Elas serão embaralhadas e apresentadas sem revelar a origem.</p>
+          <p className="small text-muted">Cole as mensagens separadas por uma linha com <code>---</code>. Elas serão embaralhadas e apresentadas sem revelar a origem. Para um teste mais justo, semeie <strong>um cenário por vez</strong> (mensagens reais e da automação sobre o mesmo assunto).</p>
+          <label className="form-label">Cenário (opcional, mas recomendado)</label>
+          <input className="form-control mb-3" value={scenario} onChange={e => setScenario(e.target.value)} placeholder="ex.: primeira abordagem para gerente de RH" />
           <label className="form-label">Mensagens REAIS (escritas por humanos)</label>
           <textarea className="form-control mb-3" rows={6} value={realText} onChange={e => setRealText(e.target.value)} placeholder={'oi joão, tudo certo?\n---\nvi que vocês abriram vaga...'} />
           <label className="form-label">Mensagens da AUTOMAÇÃO (geradas)</label>
@@ -130,8 +146,9 @@ export default function BlindTest({ toast }) {
                   </>
                 )}
               </div>
+
               {results.testers?.length > 0 && (
-                <table className="table table-sm mb-0">
+                <table className="table table-sm">
                   <thead><tr><th>Testador</th><th className="text-end">Acertos</th><th className="text-end">Taxa</th></tr></thead>
                   <tbody>
                     {results.testers.map(t => (
@@ -144,7 +161,24 @@ export default function BlindTest({ toast }) {
                   </tbody>
                 </table>
               )}
-              <button className="btn btn-sm btn-outline-secondary mt-3 align-self-start" onClick={loadResults}>Atualizar</button>
+
+              {results.reasons?.length > 0 && (
+                <div className="mb-3">
+                  <div className="small text-muted mb-1">Por que acharam que era automação:</div>
+                  <div className="d-flex flex-wrap gap-2">
+                    {results.reasons.map(r => (
+                      <span key={r.reason} className="badge bg-light text-dark border">{r.reason} <strong>×{r.n}</strong></span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="d-flex gap-2">
+                <button className="btn btn-sm btn-outline-secondary" onClick={loadResults}>Atualizar</button>
+                <button className="btn btn-sm btn-outline-primary" onClick={harvest} title="Transforma as mensagens mais detectadas em regras aprendidas (RLHF)">
+                  <i className="bi bi-mortarboard me-1" />Aprender com as falhas
+                </button>
+              </div>
             </>
           )}
         </div>
