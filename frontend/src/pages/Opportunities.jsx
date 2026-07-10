@@ -33,6 +33,12 @@ function sortArrayBy(arr, key, asc) {
 export default function Opportunities({ toast, loadStats }) {
   const [opportunities, setOpportunities] = useState([])
   const [companies, setCompanies] = useState([])
+  const [contacts, setContacts] = useState([])
+  const [documents, setDocuments] = useState([])
+  const [contactId, setContactId] = useState('')
+  const [selectedDocIds, setSelectedDocIds] = useState([])
+  const [aiHint, setAiHint] = useState('')
+  const [suggesting, setSuggesting] = useState(false)
   const [sortKey, setSortKey] = useState('created_at')
   const [sortAsc, setSortAsc] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -69,10 +75,60 @@ export default function Opportunities({ toast, loadStats }) {
     }
   }, [])
 
+  const loadContacts = useCallback(async () => {
+    try {
+      const data = await api('/api/contacts')
+      setContacts(data || [])
+    } catch (e) { /* silently fail */ }
+  }, [])
+
+  const loadDocuments = useCallback(async () => {
+    try {
+      const data = await api('/api/documents')
+      setDocuments(data || [])
+    } catch (e) { /* silently fail */ }
+  }, [])
+
   useEffect(() => {
     loadOpportunities()
     loadCompanies()
-  }, [loadOpportunities, loadCompanies])
+    loadContacts()
+    loadDocuments()
+  }, [loadOpportunities, loadCompanies, loadContacts, loadDocuments])
+
+  const companyContacts = contacts.filter(
+    c => String(c.company_id) === String(form.company_id)
+  )
+
+  const toggleDoc = (id) => {
+    setSelectedDocIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    )
+  }
+
+  const suggestWithAI = async () => {
+    if (!form.company_id) { toast('Selecione uma empresa', 'warning'); return }
+    if (!selectedDocIds.length) { toast('Selecione ao menos um documento', 'warning'); return }
+    setSuggesting(true)
+    try {
+      const data = await api('/api/opportunities/suggest', 'POST', {
+        company_id: parseInt(form.company_id),
+        contact_id: contactId ? parseInt(contactId) : undefined,
+        doc_ids: selectedDocIds,
+        hint: aiHint.trim() || undefined,
+      })
+      setForm(f => ({
+        ...f,
+        name: data.name || f.name,
+        notes: data.notes || f.notes,
+      }))
+      toast('Sugestão gerada a partir do documento!')
+    } catch (e) {
+      toast(e.message || 'Erro ao gerar sugestão', 'danger')
+    } finally {
+      setSuggesting(false)
+    }
+  }
 
   const handleSort = (key) => {
     if (sortKey === key) {
@@ -102,9 +158,13 @@ export default function Opportunities({ toast, loadStats }) {
         stage: form.stage,
         value: parseFloat(form.value) || 0,
         notes: form.notes.trim(),
+        doc_ids: selectedDocIds, // (#1) vincula os documentos usados
       })
       toast('Oportunidade criada!')
       setForm({ company_id: '', name: '', stage: 'prospecting', value: '', notes: '' })
+      setSelectedDocIds([])
+      setContactId('')
+      setAiHint('')
       await loadOpportunities()
       if (loadStats) loadStats()
     } catch (e) {
@@ -191,6 +251,62 @@ export default function Opportunities({ toast, loadStats }) {
                 <option key={c.id} value={c.id}>{c.name}</option>
               ))}
             </select>
+          </div>
+
+          {/* ── Assistente IA: lê documento(s) e sugere a oportunidade ── */}
+          <div className="border rounded p-2 mb-2 bg-light">
+            <label className="form-label small fw-semibold mb-1">
+              <i className="bi bi-robot me-1"></i>Gerar com IA (lê documento)
+            </label>
+
+            <select
+              className="form-select form-select-sm mb-2"
+              value={contactId}
+              onChange={e => setContactId(e.target.value)}
+              disabled={!form.company_id}
+            >
+              <option value="">Contato (opcional)</option>
+              {companyContacts.map(c => (
+                <option key={c.id} value={c.id}>{c.name}{c.role ? ` — ${c.role}` : ''}</option>
+              ))}
+            </select>
+
+            <div className="mb-2" style={{ maxHeight: 120, overflowY: 'auto' }}>
+              {documents.length === 0 ? (
+                <div className="text-muted small">Nenhum documento. Suba um PDF na aba RAG.</div>
+              ) : documents.map(d => (
+                <div key={d.id} className="form-check">
+                  <input
+                    className="form-check-input"
+                    type="checkbox"
+                    id={`doc-${d.id}`}
+                    checked={selectedDocIds.includes(d.id)}
+                    onChange={() => toggleDoc(d.id)}
+                  />
+                  <label className="form-check-label small" htmlFor={`doc-${d.id}`}>
+                    {d.name}
+                  </label>
+                </div>
+              ))}
+            </div>
+
+            <input
+              className="form-control form-control-sm mb-2"
+              placeholder="Direcionamento (opcional)"
+              value={aiHint}
+              onChange={e => setAiHint(e.target.value)}
+            />
+
+            <button
+              className="btn btn-outline-primary btn-sm w-100"
+              onClick={suggestWithAI}
+              disabled={suggesting || !form.company_id || !selectedDocIds.length}
+            >
+              {suggesting
+                ? <><span className="spinner-border spinner-border-sm me-1"></span>Gerando...</>
+                : <><i className="bi bi-magic me-1"></i>Gerar sugestão</>
+              }
+            </button>
           </div>
 
           <div className="mb-2">

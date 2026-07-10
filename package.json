@@ -12,13 +12,18 @@
     "seed": "node --experimental-sqlite seed_demo.js"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.2",
     "bcryptjs": "^2.4.3",
     "dotenv": "^16.4.5",
     "express": "^4.18.3",
     "express-session": "^1.18.0",
+    "mammoth": "^1.12.0",
     "memorystore": "^1.6.7",
+    "multer": "^2.2.0",
     "node-fetch": "^2.7.0",
-    "session-file-store": "^1.5.0"
+    "pdfjs-dist": "^6.1.200",
+    "session-file-store": "^1.5.0",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"

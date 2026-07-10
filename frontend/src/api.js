@@ -1,7 +1,8 @@
 // API helper — proxy para Express em localhost:3000
 export async function api(path, method = 'GET', body = null) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } }
-  if (body) opts.body = JSON.stringify(body)
+  const isForm = typeof FormData !== 'undefined' && body instanceof FormData
+  const opts = { method, headers: isForm ? {} : { 'Content-Type': 'application/json' } }
+  if (body) opts.body = isForm ? body : JSON.stringify(body)
 
   let res
   try {
@@ -29,6 +30,34 @@ export async function api(path, method = 'GET', body = null) {
     throw err
   }
   return data
+}
+
+// (#7) Upload de arquivo com barra de progresso via XMLHttpRequest.
+// onProgress recebe um número 0–100. Rejeita com Error enriquecido (err.status, err.duplicate...).
+export function apiUpload(path, file, { fields = {}, onProgress } = {}) {
+  return new Promise((resolve, reject) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    for (const [k, v] of Object.entries(fields)) fd.append(k, v)
+
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', path)
+    xhr.upload.onprogress = (e) => {
+      if (onProgress && e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100))
+    }
+    xhr.onload = () => {
+      let data = {}
+      try { data = JSON.parse(xhr.responseText) } catch (_) {}
+      if (xhr.status === 401) { window.location.href = '/login'; return reject(new Error('Unauthorized')) }
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(data)
+      const err = new Error(data.error || `Erro ${xhr.status}`)
+      err.status = xhr.status
+      Object.assign(err, data)
+      reject(err)
+    }
+    xhr.onerror = () => reject(new Error('Sem conexão com o servidor'))
+    xhr.send(fd)
+  })
 }
 
 export function formatCurrency(v) {

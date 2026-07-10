@@ -7,6 +7,8 @@ const bcrypt = require('bcryptjs');
 const fetch = require('node-fetch');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,6 +17,204 @@ const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'prototype.db');
 // ── DB helper ─────────────────────────────────────────────────────────────────
 function getDb() {
   return new DatabaseSync(DB_PATH);
+}
+
+// ── Upload de PDF → Markdown ────────────────────────────────────────────────────
+// multer em memória (não grava arquivo em disco); limite de 25MB.
+const uploadPdf = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+
+// pdfjs-dist v6 é ESM-only; carregamos via import() dinâmico e cacheamos a promise.
+let _pdfjsPromise = null;
+function getPdfjs() {
+  if (!_pdfjsPromise) _pdfjsPromise = import('pdfjs-dist/legacy/build/pdf.mjs');
+  return _pdfjsPromise;
+}
+
+function sha256(str) {
+  return crypto.createHash('sha256').update(str, 'utf8').digest('hex');
+}
+
+// (#5) Reconstrói as linhas de UMA página do PDF, com detecção de colunas e de
+// títulos (por altura de fonte). Recebe os itens de text content da pdfjs.
+function pageItemsToLines(items) {
+  const norm = items
+    .filter(it => it.str && it.str.trim())
+    .map(it => ({ x: it.transform[4], y: it.transform[5], h: Math.abs(it.transform[3]) || 10, str: it.str }));
+  if (!norm.length) return [];
+
+  // Detecta 2 colunas: procura a maior faixa vertical vazia no terço central da página.
+  const xs = norm.map(i => i.x).sort((a, b) => a - b);
+  const minX = xs[0], maxX = xs[xs.length - 1], span = maxX - minX;
+  let split = null;
+  if (span > 200) {
+    const lo = minX + span * 0.33, hi = minX + span * 0.67;
+    let bestGap = 0, bestMid = null, prev = null;
+    for (const x of xs) {
+      if (prev !== null && prev >= lo && x <= hi && (x - prev) > bestGap) {
+        bestGap = x - prev; bestMid = (prev + x) / 2;
+      }
+      prev = x;
+    }
+    if (bestGap > span * 0.12) split = bestMid; // gap relevante => há colunas
+  }
+
+  const heights = norm.map(i => i.h).sort((a, b) => a - b);
+  const medianH = heights[Math.floor(heights.length / 2)] || 10;
+
+  const buildColumn = (colItems) => {
+    const rows = new Map(); // yBucket -> items
+    for (const it of colItems) {
+      const key = Math.round(it.y / 3) * 3; // tolerância de 3px na mesma linha
+      if (!rows.has(key)) rows.set(key, []);
+      rows.get(key).push(it);
+    }
+    return [...rows.keys()].sort((a, b) => b - a).map(k => {
+      const line = rows.get(k).sort((a, b) => a.x - b.x);
+      const text = line.map(i => i.str).join(' ').replace(/\s+/g, ' ').trim();
+      const maxH = Math.max(...line.map(i => i.h));
+      // Título: linha curta e com fonte bem maior que a mediana.
+      const isHeading = maxH > medianH * 1.4 && text.length <= 80;
+      return isHeading ? `### ${text}` : text;
+    }).filter(l => l.replace(/^#+\s*/, '').length);
+  };
+
+  if (split !== null) {
+    const left = buildColumn(norm.filter(i => i.x < split));
+    const right = buildColumn(norm.filter(i => i.x >= split));
+    return [...left, ...right];
+  }
+  return buildColumn(norm);
+}
+
+// Extrai o texto de um PDF (tolera restrição de permissão sem senha) e reconstrói
+// Markdown leve. Não lança em PDF só-imagem — retorna { markdown, hasText:false }.
+async function pdfBufferToMarkdown(buffer, filename) {
+  const pdfjs = await getPdfjs();
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer), isEvalSupported: false }).promise;
+  const title = String(filename || 'Documento').replace(/\.[a-z0-9]+$/i, '').trim() || 'Documento';
+  const out = [`# ${title}`, ''];
+  let textChars = 0;
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p);
+    const content = await page.getTextContent();
+    const lines = pageItemsToLines(content.items);
+    if (lines.length) {
+      textChars += lines.join('').length;
+      out.push(`## Página ${p}`, '', ...lines, '');
+    }
+  }
+  const markdown = out.join('\n').trim();
+  const hasText = markdown.replace(/^#+.*$/gm, '').trim().length > 0;
+  return { title, markdown, hasText, numPages: doc.numPages };
+}
+
+// (#4) OCR de PDF só-imagem: renderiza cada página com @napi-rs/canvas e passa
+// pela tesseract.js (por+eng). Deps carregadas sob demanda; se faltarem, lança.
+let _tesseractWorker = null;
+async function getOcrWorker() {
+  if (_tesseractWorker) return _tesseractWorker;
+  const { createWorker } = require('tesseract.js');
+  _tesseractWorker = await createWorker(['por', 'eng']);
+  return _tesseractWorker;
+}
+async function ocrPdfToMarkdown(buffer, filename, maxPages = 15) {
+  const pdfjs = await getPdfjs();
+  const { createCanvas } = require('@napi-rs/canvas');
+  const worker = await getOcrWorker();
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer), isEvalSupported: false }).promise;
+  const title = String(filename || 'Documento').replace(/\.[a-z0-9]+$/i, '').trim() || 'Documento';
+  const out = [`# ${title}`, ''];
+  const pages = Math.min(doc.numPages, maxPages);
+  for (let p = 1; p <= pages; p++) {
+    const page = await doc.getPage(p);
+    const viewport = page.getViewport({ scale: 2 });
+    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    const ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const png = canvas.toBuffer('image/png');
+    const { data } = await worker.recognize(png);
+    const txt = (data.text || '').replace(/\n{3,}/g, '\n\n').trim();
+    if (txt) out.push(`## Página ${p}`, '', txt, '');
+  }
+  const markdown = out.join('\n').trim();
+  if (!markdown.replace(/^#+.*$/gm, '').trim()) throw new Error('no_text');
+  return { title, markdown, numPages: doc.numPages };
+}
+
+// (#9) Dispatch por formato: PDF (com fallback OCR), DOCX (mammoth), TXT/MD.
+// Valida magic number quando aplicável (#11). Retorna { title, markdown, source_type }.
+async function extractFileToMarkdown(buffer, filename) {
+  const ext = (String(filename).match(/\.([a-z0-9]+)$/i)?.[1] || '').toLowerCase();
+  const head = buffer.slice(0, 4).toString('latin1');
+
+  if (ext === 'pdf' || head === '%PDF') {
+    if (head !== '%PDF') throw Object.assign(new Error('bad_magic'), { code: 'bad_magic' });
+    const r = await pdfBufferToMarkdown(buffer, filename);
+    if (r.hasText) return { title: r.title, markdown: r.markdown, source_type: 'pdf' };
+    // PDF sem texto => tenta OCR
+    try {
+      const o = await ocrPdfToMarkdown(buffer, filename);
+      return { title: o.title, markdown: o.markdown, source_type: 'pdf-ocr' };
+    } catch (e) {
+      throw Object.assign(new Error('no_text'), { code: 'no_text' });
+    }
+  }
+
+  if (ext === 'docx') {
+    // DOCX é um zip: magic "PK"
+    if (buffer.slice(0, 2).toString('latin1') !== 'PK') throw Object.assign(new Error('bad_magic'), { code: 'bad_magic' });
+    const mammoth = require('mammoth');
+    const { value } = await mammoth.convertToMarkdown({ buffer });
+    const title = String(filename).replace(/\.[a-z0-9]+$/i, '').trim() || 'Documento';
+    const markdown = `# ${title}\n\n${(value || '').trim()}`;
+    if (!markdown.replace(/^#+.*$/gm, '').trim()) throw Object.assign(new Error('no_text'), { code: 'no_text' });
+    return { title, markdown, source_type: 'docx' };
+  }
+
+  if (ext === 'txt' || ext === 'md' || ext === 'markdown') {
+    const title = String(filename).replace(/\.[a-z0-9]+$/i, '').trim() || 'Documento';
+    const body = buffer.toString('utf8').trim();
+    if (!body) throw Object.assign(new Error('no_text'), { code: 'no_text' });
+    const markdown = ext === 'txt' ? `# ${title}\n\n${body}` : body;
+    return { title, markdown, source_type: ext === 'txt' ? 'txt' : 'md' };
+  }
+
+  throw Object.assign(new Error('unsupported'), { code: 'unsupported' });
+}
+
+function extractErrorMessage(code) {
+  switch (code) {
+    case 'no_text':     return 'Não foi possível extrair texto (nem via OCR). O arquivo pode estar vazio ou ilegível.';
+    case 'bad_magic':   return 'Arquivo inválido: o conteúdo não corresponde à extensão informada.';
+    case 'unsupported': return 'Formato não suportado. Use PDF, DOCX, TXT ou MD.';
+    default:            return 'Falha ao ler o arquivo (corrompido ou protegido por senha de leitura).';
+  }
+}
+
+// (#2) Seleciona os trechos mais relevantes de um documento para um conjunto de
+// termos de busca, respeitando um orçamento de caracteres. Sem termos, pega o topo.
+function extractRelevantChunk(content, terms, maxChars) {
+  const text = String(content || '');
+  if (text.length <= maxChars) return text;
+  const cleanTerms = (terms || [])
+    .flatMap(t => String(t).toLowerCase().split(/\s+/))
+    .filter(t => t.length >= 4);
+  const paras = text.split(/\n{2,}/).filter(p => p.trim());
+  if (!cleanTerms.length) return text.slice(0, maxChars);
+  const scored = paras.map((p, i) => {
+    const low = p.toLowerCase();
+    let score = 0;
+    for (const t of cleanTerms) { let idx = low.indexOf(t); while (idx !== -1) { score++; idx = low.indexOf(t, idx + t.length); } }
+    return { p, i, score };
+  });
+  const ranked = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score);
+  if (!ranked.length) return text.slice(0, maxChars);
+  // Acumula os parágrafos mais relevantes na ordem original até o orçamento.
+  const picked = new Set();
+  let total = 0;
+  for (const s of ranked) { if (total + s.p.length > maxChars) continue; picked.add(s.i); total += s.p.length + 2; if (total >= maxChars) break; }
+  if (!picked.size) return ranked[0].p.slice(0, maxChars);
+  return scored.filter(s => picked.has(s.i)).map(s => s.p).join('\n\n');
 }
 
 // ── SSE: push de atualizações do inbox WhatsApp em tempo real ──────────────────
@@ -268,6 +468,18 @@ function initDb() {
       score      INTEGER DEFAULT 5,
       created_at TEXT DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS hook_library (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      situation    TEXT NOT NULL,
+      product_link TEXT DEFAULT '',
+      example_text TEXT NOT NULL,
+      category     TEXT DEFAULT 'geral',
+      call_type    TEXT DEFAULT 'cold',
+      tags         TEXT DEFAULT '',
+      score        INTEGER DEFAULT 5,
+      active       INTEGER DEFAULT 1,
+      created_at   TEXT DEFAULT (datetime('now'))
+    );
     CREATE TABLE IF NOT EXISTS sentiment_logs (
       id             INTEGER PRIMARY KEY AUTOINCREMENT,
       lead_id        INTEGER,
@@ -323,7 +535,21 @@ function initDb() {
     CREATE INDEX IF NOT EXISTS idx_contacts_email    ON contacts(email);
     CREATE INDEX IF NOT EXISTS idx_contacts_name     ON contacts(name);
     CREATE INDEX IF NOT EXISTS idx_company_flags_flag ON company_flags(flag);
+    CREATE TABLE IF NOT EXISTS opportunity_documents (
+      opportunity_id INTEGER NOT NULL,
+      document_id    INTEGER NOT NULL,
+      created_at     TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (opportunity_id, document_id),
+      FOREIGN KEY (opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE,
+      FOREIGN KEY (document_id)    REFERENCES documents(id)     ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_oppdocs_doc ON opportunity_documents(document_id);
   `);
+
+  // Colunas novas em documents: hash p/ dedup (#3) e metadados de origem (#4/#9)
+  addColumnIfNotExists(db, 'documents', 'content_hash', 'TEXT');
+  addColumnIfNotExists(db, 'documents', 'source_type',  "TEXT DEFAULT 'text'");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(content_hash)');
 
   // Migração: remover NOT NULL de messages.lead_id se necessário (schema antigo tinha NOT NULL)
   try {
@@ -487,6 +713,26 @@ function initDb() {
     const hash = bcrypt.hashSync('admin123', 10);
     db.prepare("INSERT INTO users (username, password, name) VALUES (?, ?, ?)").run('admin', hash, 'Administrador');
     console.log('Usuário admin criado — login: admin | senha: admin123');
+  }
+
+  // Seed da biblioteca de ganchos — arquétipos de 1ª mensagem que amarram uma
+  // SITUAÇÃO/CONTEXTO REAL ao produto, para soar humano (não robotizado).
+  // Servem como few-shot no prompt: o modelo imita o TOM, nunca copia literal.
+  const hookCount = db.prepare('SELECT COUNT(*) as c FROM hook_library').get().c;
+  if (hookCount === 0) {
+    const seedHooks = [
+      { situation: 'Encontro presencial em feira/evento de bairro', product_link: 'puxa a conversa pelo lugar real onde se cruzaram e conecta ao produto sem pitch', example_text: 'Oi {nome}, te encontrei rapidinho na Feira da Glória no fim de semana mas não deu pra trocar ideia direito. Lembrei de você porque a gente ajuda times como o da {empresa} a {beneficio}. Vale 15 min essa semana?', category: 'evento', call_type: 'cold', tags: 'feira,presencial,evento' },
+      { situation: 'Projeto/dor mencionado pelo lead num evento setorial', product_link: 'retoma exatamente o que a pessoa comentou e oferece o produto como caminho', example_text: 'Fala {nome}! Você comentou no CWO Gov sobre aquele projeto de consolidação — a gente tem servidor com GPU justamente pra esse tipo de carga. Faz sentido eu te mostrar em 15 min como outros órgãos resolveram isso?', category: 'evento', call_type: 'cold', tags: 'palestra,projeto,dor,govtech' },
+      { situation: 'Indicação de um conhecido em comum', product_link: 'usa a conexão em comum como ponte de confiança', example_text: 'Oi {nome}, o {referencia} comentou que vocês da {empresa} estão tocando {contexto} e disse que valia eu te chamar. A gente faz {beneficio}. Topa um papo rápido de 15 min?', category: 'indicacao', call_type: 'warm', tags: 'referral,indicacao' },
+      { situation: 'Post/conteúdo publicado pelo lead no LinkedIn', product_link: 'reage a uma ideia específica do post e emenda no produto', example_text: 'Curti demais seu post sobre {tema}, {nome} — bateu com um problema que a gente resolve pra {setor}. Queria te mostrar em 15 min como isso vira {beneficio} na prática.', category: 'conteudo', call_type: 'cold', tags: 'linkedin,post,conteudo' },
+      { situation: 'Notícia recente da empresa (expansão, rodada, contratação)', product_link: 'parabeniza pelo movimento e liga ao ganho que o produto traz nesse momento', example_text: 'Vi que a {empresa} anunciou {noticia}, {nome} — parabéns! Nessa fase costuma pesar {dor}, e é exatamente o que a gente destrava. Vale 15 min pra te mostrar?', category: 'noticia', call_type: 'cold', tags: 'noticia,expansao,funding' },
+      { situation: 'Reconexão com lead que já conhece a empresa', product_link: 'retoma o relacionamento sem se reapresentar, trazendo novidade relevante', example_text: 'Oi {nome}, faz um tempo que a gente não se fala! Lançamos {novidade} e lembrei na hora do que você tinha comentado sobre {contexto}. Bora retomar num café virtual de 15 min?', category: 'reconexao', call_type: 'frozen', tags: 'reconexao,follow' },
+      { situation: 'Uso conhecido de infraestrutura/tecnologia pelo lead', product_link: 'demonstra que entende o stack dele e mostra o encaixe técnico', example_text: 'Fala {nome}, sei que vocês da {empresa} rodam {stack} — a gente tem visto times parecidos ganharem {beneficio} com {produto}. Faz sentido um papo técnico rápido de 15 min?', category: 'tecnico', call_type: 'cold', tags: 'infra,tecnico,stack' },
+      { situation: 'Mesma comunidade/grupo profissional', product_link: 'usa o pertencimento ao grupo como abertura natural', example_text: 'Oi {nome}, também sou do grupo {comunidade}! Vi que você toca {area} na {empresa} — a gente ajuda gente daqui com {beneficio}. Te roubo 15 min pra trocar ideia?', category: 'comunidade', call_type: 'cold', tags: 'grupo,comunidade' },
+    ];
+    const insHook = db.prepare('INSERT INTO hook_library (situation,product_link,example_text,category,call_type,tags,score) VALUES (?,?,?,?,?,?,5)');
+    for (const h of seedHooks) insHook.run(h.situation, h.product_link, h.example_text, h.category, h.call_type, h.tags);
+    console.log(`Biblioteca de ganchos populada com ${seedHooks.length} arquétipos.`);
   }
 
   db.close();
@@ -1090,6 +1336,9 @@ async function prepareCallContext(company, contact, productValue) {
            `base de conhecimento (golden_cases + learned_patterns, role=${contact?.role || 'other'})`,
            (kbSummary || '(vazio)').slice(0, 500));
   } catch (e) { console.warn('[cold-search] base de conhecimento indisponível:', e.message); }
+  // Biblioteca de ganchos: orienta o formato "situação real → produto" já na geração do hook.
+  let hookExamples = '';
+  try { hookExamples = buildHookExamples(dbk, { callType: 'cold', limit: 3 }); } catch (_) {}
   dbk.close();
   console.log(`[cold-search] base de conhecimento consultada (${kbSummary.length} chars).`);
 
@@ -1101,10 +1350,11 @@ Pesquise na WEB informações REAIS e recentes sobre a empresa "${company.name}"
 Produto sendo vendido: ${productValue}
 Perfil do cargo: foco em ${roleInfo.focus}, tom ${roleInfo.tone}
 ${kbSummary ? 'Base de conhecimento interna (use como apoio):\n' + kbSummary.slice(0, 800) : ''}
+${hookExamples ? hookExamples.slice(0, 900) : ''}
 
 Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com exatamente estas chaves:
 - "research_context": array de 2-3 strings curtas (uma frase cada), cada uma com um fato REAL encontrado
-- "hook": uma única string (máx 2 linhas) conectando um gancho real ao produto
+- "hook": uma única string (máx 2 linhas) que abra por uma SITUAÇÃO/CONTEXTO real encontrado e conecte ao produto, no tom natural dos exemplos da biblioteca (sem soar robótico)
 - "pain_points": array de exatamente 3 strings (dores específicas do setor/porte)
 - "value_proposition": uma única string
 - "sources": array de URLs usados como fonte (strings)
@@ -1555,7 +1805,7 @@ app.post('/api/companies/:id/message', (req, res) => {
 // o aprendizado: regras duras (o que o revisor reprovou) + checagem final anti-violação.
 const WA_SYSTEM = 'Você é um SDR brasileiro especialista em prospecção por WhatsApp. Escreve mensagens curtas, humanas e específicas para conseguir UMA reunião com a pessoa. Nunca soa como robô, template ou marketing genérico. Segue à risca as regras dadas pelo revisor humano. REGRA ABSOLUTA: sua resposta é SEMPRE o texto de UMA mensagem de WhatsApp pronta para enviar ao lead — você NUNCA faz perguntas, NUNCA pede esclarecimento, NUNCA comenta sobre a tarefa nem fala com o operador. Se faltar alguma informação, use o melhor palpite pelo contexto e escreva a mensagem mesmo assim.';
 
-function buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product }) {
+function buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product, docsContext }) {
   const who = `${contact?.name || 'o contato'}${contact?.role ? ` (${contact.role})` : ''}${company ? ` — empresa ${company.name}${company.sector ? `, setor ${company.sector}` : ''}` : ''}`;
 
   // Bloco de REGRAS APRENDIDAS estruturado (v2), separando global x canal.
@@ -1574,6 +1824,10 @@ function buildWhatsappUserPrompt({ company, contact, observation, rules, negExam
   const negBlock = (negExamples && negExamples.trim())
     ? `\n# EXEMPLOS NEGATIVOS (reprovados — NÃO repita estes erros)\n${cap(negExamples, Math.floor(MAX_PROMPT_CHARS / 3))}\n`
     : '';
+  // (#8) Material do produto (documentos vinculados às oportunidades da empresa).
+  const docsBlock = (docsContext && docsContext.trim())
+    ? `\n# MATERIAL DO PRODUTO (referência — use dados concretos daqui, mas NÃO copie trechos literais)\n${cap(docsContext, Math.floor(MAX_PROMPT_CHARS / 3))}\n`
+    : '';
 
   return `# Tarefa
 Gere uma nova versão de uma mensagem de WhatsApp para ${who}. Objetivo: conseguir uma reunião curta.
@@ -1587,7 +1841,7 @@ A mensagem acima foi reprovada. Corrija EXATAMENTE isto: "${observation}".
 Mude só o necessário para atender a correção — mantenha o mesmo assunto/produto e objetivo (a não ser que a correção seja justamente sobre trocar o assunto).`
   : `# O que fazer
 NÃO houve reprovação. Gere uma VARIAÇÃO diferente da mensagem acima: mesmo assunto, mesmo produto/oferta e mesmo objetivo — mudando apenas a abordagem e a redação (abertura, ângulo, tom, estrutura). NÃO troque o tema nem remova o produto/assunto que a mensagem atual menciona.`}
-${contact?.context ? `\n# Sobre a pessoa (personalize)\n${contact.context}\n` : ''}${rulesBlock}${histBlock}${negBlock}
+${contact?.context ? `\n# Sobre a pessoa (personalize)\n${contact.context}\n` : ''}${rulesBlock}${histBlock}${negBlock}${docsBlock}
 # Regras
 - Mantenha o assunto/produto da mensagem atual.
 - Não pareça IA nem template; soe como um humano no WhatsApp.
@@ -1609,9 +1863,25 @@ function looksLikeMeta(t) {
   return false;
 }
 
+// (#8) Contexto de material do produto: documentos vinculados às oportunidades da
+// empresa (via opportunity_documents). Seleciona trechos relevantes (#2) por termo.
+function buildCompanyDocsContext(db, companyId, terms, budget = Math.floor(MAX_PROMPT_CHARS / 3)) {
+  if (!companyId) return '';
+  const docs = db.prepare(`
+    SELECT DISTINCT d.name, d.content
+    FROM opportunity_documents od
+    JOIN opportunities o ON o.id = od.opportunity_id
+    JOIN documents d ON d.id = od.document_id
+    WHERE o.company_id = ?
+  `).all(companyId);
+  if (!docs.length) return '';
+  const perDoc = Math.floor(budget / docs.length);
+  return docs.map(d => `[${d.name}]\n${extractRelevantChunk(d.content, terms, perDoc)}`).join('\n\n---\n\n');
+}
+
 async function generateWhatsapp(company, contact, observation, ctx, previous, product) {
-  const { rules, negExamples, threadHistory } = ctx || {};
-  const userPrompt = buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product });
+  const { rules, negExamples, threadHistory, docsContext } = ctx || {};
+  const userPrompt = buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product, docsContext });
   let out = (await callClaude(WA_SYSTEM, userPrompt, 400) || '').trim();
   if (!out || /^\[ERRO API/.test(out)) return { error: 'Falha ao gerar (IA indisponível)' };
   if (looksLikeMeta(out)) {
@@ -1640,6 +1910,8 @@ app.post('/api/messages/:id/regenerate', async (req, res) => {
     rules: buildRules(db, channel, role),
     negExamples: buildNegativeExamples(db, channel),
     threadHistory: buildThreadHistory(db, msg.thread_id, msg.seq_no),
+    // (#8) injeta material do produto vinculado às oportunidades desta empresa
+    docsContext: buildCompanyDocsContext(db, msg.company_id, [msg.product, contact?.role, company?.sector].filter(Boolean)),
   };
   db.close();
 
@@ -2109,6 +2381,24 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
   const painLine = painPoint ? ('Dor principal do lead: ' + painPoint) : '';
   const painCTA  = painPoint ? 'IMPORTANTE: a mensagem deve abordar diretamente a dor mencionada acima como ponto de entrada.' : '';
 
+  // Biblioteca de ganchos: few-shot que orienta a 1ª mensagem a soar humana e situacional.
+  // Operador pode fixar um gancho específico via hook_id ou filtrar por categoria (hook_category).
+  let hookExamples = '';
+  try {
+    const dbh = getDb();
+    if (req.body.hook_id) {
+      const picked = dbh.prepare('SELECT situation, product_link, example_text FROM hook_library WHERE id=? AND active=1').get(req.body.hook_id);
+      if (picked) {
+        hookExamples = `## GANCHO ESCOLHIDO (use como base da abertura)\n- Situação: ${picked.situation}${picked.product_link ? ` → ${picked.product_link}` : ''}\n  Exemplo: """${picked.example_text}"""\n` +
+          'Adapte ao contexto real deste lead — imite o tom, não copie literal.';
+      }
+    }
+    if (!hookExamples) {
+      hookExamples = buildHookExamples(dbh, { callType, category: req.body.hook_category || null, limit: 3 });
+    }
+    dbh.close();
+  } catch (_) {}
+
   const results = [];
   for (const tpl of SEQUENCE_CHANNELS) {
     const channelDesc = {
@@ -2128,6 +2418,7 @@ ${painLine}
 Tom: ${roleInfo.tone} | Foco: ${roleInfo.focus}
 Canal / Dia ${tpl.day}: ${channelDesc}
 ${socialProof ? 'Casos de sucesso:\n' + socialProof : ''}
+${(tpl.day === 1 || tpl.type === 'first_outreach') && hookExamples ? hookExamples : ''}
 
 Escreva APENAS o texto da mensagem, sem explicações.
 ${painCTA}
@@ -2156,6 +2447,42 @@ const CHANNEL_DESC = {
 
 // Monta o bloco de "observações / estilo aprendido" (RLHF) que é injetado no prompt.
 // Reúne: regras de estilo (learned_patterns), exemplos aprovados e correções/comentários humanos.
+// Monta o bloco de BIBLIOTECA DE GANCHOS injetado no prompt da 1ª mensagem.
+// Seleciona arquétipos ativos (prioriza o call_type do lead, com fallback geral)
+// e instrui o modelo a IMITAR O TOM situacional — nunca copiar o exemplo ao pé da letra.
+function buildHookExamples(db, { callType = 'cold', category = null, limit = 3 } = {}) {
+  try {
+    let rows = [];
+    if (category) {
+      rows = db.prepare(
+        `SELECT situation, product_link, example_text FROM hook_library
+         WHERE active=1 AND category=? AND (call_type=? OR call_type='' OR call_type IS NULL)
+         ORDER BY score DESC, id DESC LIMIT ?`
+      ).all(category, callType, limit);
+    }
+    if (rows.length < limit) {
+      const extra = db.prepare(
+        `SELECT situation, product_link, example_text FROM hook_library
+         WHERE active=1 AND (call_type=? OR call_type='' OR call_type IS NULL)
+         ORDER BY score DESC, id DESC LIMIT ?`
+      ).all(callType, limit);
+      const seen = new Set(rows.map(r => r.example_text));
+      for (const e of extra) { if (!seen.has(e.example_text) && rows.length < limit) rows.push(e); }
+    }
+    if (!rows.length) return '';
+    const body = rows.map(r =>
+      `- Situação: ${r.situation}${r.product_link ? ` → ${r.product_link}` : ''}\n  Exemplo: """${(r.example_text || '').slice(0, 320)}"""`
+    ).join('\n');
+    return `## BIBLIOTECA DE GANCHOS (referência de abordagem NATURAL)\n${body}\n` +
+      `IMPORTANTE: imite o TOM humano e situacional destes exemplos — abra pela situação/contexto real ligado ao produto. ` +
+      `NÃO copie o texto literalmente nem invente encontros que não aconteceram; adapte ao gancho e ao contexto reais deste lead. ` +
+      `Placeholders como {nome}/{empresa} são só ilustrativos.`;
+  } catch (e) {
+    console.warn('[hook-library] indisponível:', e.message);
+    return '';
+  }
+}
+
 function buildLearnedContext(db, channel, role) {
   const parts = [];
   try {
@@ -2779,15 +3106,78 @@ app.get('/api/opportunities', (req, res) => {
 });
 
 app.post('/api/opportunities', (req, res) => {
-  const { company_id, name, stage, value, notes } = req.body;
+  const { company_id, name, stage, value, notes, doc_ids } = req.body;
   if (!company_id || !name) return res.status(400).json({ error: 'company_id e name são obrigatórios' });
   const stageVal = VALID_STAGES.includes(stage) ? stage : 'prospecting';
   const db = getDb();
   const company = db.prepare('SELECT id FROM companies WHERE id=?').get(company_id);
   if (!company) { db.close(); return res.status(404).json({ error: 'Empresa não encontrada' }); }
   const r = db.prepare('INSERT INTO opportunities (company_id, name, stage, value, notes) VALUES (?,?,?,?,?)').run(company_id, name, stageVal, value || 0, notes || '');
+  const oppId = r.lastInsertRowid;
+  // (#1) vincula os documentos usados à oportunidade
+  if (Array.isArray(doc_ids) && doc_ids.length) {
+    const link = db.prepare('INSERT OR IGNORE INTO opportunity_documents (opportunity_id, document_id) VALUES (?,?)');
+    for (const d of doc_ids) { const did = parseInt(d); if (did) link.run(oppId, did); }
+  }
   db.close();
-  res.json({ id: r.lastInsertRowid });
+  res.json({ id: oppId });
+});
+
+// (#1) documentos vinculados a uma oportunidade
+app.get('/api/opportunities/:id/documents', (req, res) => {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT d.id, d.name, d.source_type, length(d.content) AS size
+    FROM opportunity_documents od JOIN documents d ON d.id = od.document_id
+    WHERE od.opportunity_id = ? ORDER BY d.name
+  `).all(req.params.id);
+  db.close();
+  res.json(rows);
+});
+
+// (#10) cache em memória das sugestões (TTL 10 min), evita reprocessar o mesmo pedido.
+const suggestCache = new Map();
+const SUGGEST_TTL = 10 * 60 * 1000;
+
+// Sugere nome + notas de uma oportunidade lendo documento(s) da base + contexto do contato.
+app.post('/api/opportunities/suggest', async (req, res) => {
+  const { company_id, contact_id, doc_ids, hint, refresh } = req.body;
+  if (!company_id) return res.status(400).json({ error: 'company_id é obrigatório' });
+  if (!Array.isArray(doc_ids) || !doc_ids.length) return res.status(400).json({ error: 'Selecione ao menos um documento' });
+
+  const cacheKey = sha256(JSON.stringify({ company_id, contact_id: contact_id || null, doc_ids: [...doc_ids].sort(), hint: hint || '' }));
+  if (!refresh) {
+    const hit = suggestCache.get(cacheKey);
+    if (hit && (Date.now() - hit.at) < SUGGEST_TTL) return res.json({ ...hit.data, cached: true });
+  }
+
+  const db = getDb();
+  const company = db.prepare('SELECT * FROM companies WHERE id=?').get(company_id);
+  if (!company) { db.close(); return res.status(404).json({ error: 'Empresa não encontrada' }); }
+  const contact = contact_id ? db.prepare('SELECT * FROM contacts WHERE id=?').get(contact_id) : null;
+  const placeholders = doc_ids.map(() => '?').join(',');
+  const docs = db.prepare(`SELECT name,content FROM documents WHERE id IN (${placeholders})`).all(...doc_ids);
+  db.close();
+  if (!docs.length) return res.status(404).json({ error: 'Documentos não encontrados' });
+
+  // (#2) trechos relevantes por documento, respeitando o orçamento MAX_PROMPT_CHARS.
+  const terms = [company.name, company.sector, contact?.role, contact?.context, hint].filter(Boolean);
+  const perDoc = Math.floor(MAX_PROMPT_CHARS / docs.length);
+  const docsText = docs.map(d => `[${d.name}]\n${extractRelevantChunk(d.content, terms, perDoc)}`).join('\n\n---\n\n');
+  const system = 'Você é um consultor de vendas B2B. Baseie-se APENAS nos documentos e no contexto fornecidos. Responda APENAS com JSON válido, sem markdown, no formato {"name": "...", "notes": "..."}.';
+  const prompt = `Empresa: ${company.name}${company.sector ? ' (' + company.sector + ')' : ''}\n` +
+    (contact ? `Contato: ${contact.name}${contact.role ? ' - ' + contact.role : ''}\n` : '') +
+    (contact && contact.context ? `Contexto do contato: ${contact.context}\n` : '') +
+    (hint ? `Direcionamento do vendedor: ${hint}\n` : '') +
+    `\nDocumentos de referência:\n${docsText}\n\n` +
+    `Sugira uma oportunidade de venda: "name" = título curto da oportunidade; "notes" = pitch/proposta de valor conectando o material ao contato/empresa.`;
+
+  const raw = await callClaude(system, prompt, 700);
+  let out;
+  try { out = JSON.parse(extractJsonLoose(raw)); } catch { out = { name: '', notes: raw }; }
+  const data = { name: out.name || '', notes: out.notes || '', docs_used: docs.map(d => d.name) };
+  suggestCache.set(cacheKey, { at: Date.now(), data });
+  res.json(data);
 });
 
 app.get('/api/opportunities/:id', (req, res) => {
@@ -2997,11 +3387,37 @@ app.get('/api/documents', (req, res) => {
   db.close();
 });
 
-app.post('/api/documents', (req, res) => {
+// Retorna um documento completo (com conteúdo) para visualização.
+app.get('/api/documents/:id', (req, res) => {
   const db = getDb();
-  const r = db.prepare('INSERT INTO documents (name,content) VALUES (?,?)').run(req.body.name, req.body.content);
+  const doc = db.prepare('SELECT id,name,content,created_at FROM documents WHERE id=?').get(req.params.id);
   db.close();
-  res.json({ id: r.lastInsertRowid });
+  if (!doc) return res.status(404).json({ error: 'Documento não encontrado' });
+  res.json(doc);
+});
+
+// Salva documento (texto manual OU conteúdo já extraído no preview #6).
+// Dedup por hash de conteúdo (#3): se já existir, retorna duplicate a menos que replace=true.
+app.post('/api/documents', (req, res) => {
+  const { name, content, source_type, replace } = req.body;
+  if (!name || !content) return res.status(400).json({ error: 'name e content são obrigatórios' });
+  const hash = sha256(content);
+  const db = getDb();
+  const existing = db.prepare('SELECT id,name FROM documents WHERE content_hash=?').get(hash);
+  if (existing && !replace) {
+    db.close();
+    return res.status(409).json({ duplicate: true, id: existing.id, name: existing.name, error: `Documento idêntico já existe: "${existing.name}"` });
+  }
+  let id;
+  if (existing && replace) {
+    db.prepare('UPDATE documents SET name=?, content=?, source_type=? WHERE id=?').run(name, content, source_type || 'text', existing.id);
+    id = existing.id;
+  } else {
+    const r = db.prepare('INSERT INTO documents (name,content,content_hash,source_type) VALUES (?,?,?,?)').run(name, content, hash, source_type || 'text');
+    id = r.lastInsertRowid;
+  }
+  db.close();
+  res.json({ id });
 });
 
 app.delete('/api/documents/:id', (req, res) => {
@@ -3009,6 +3425,55 @@ app.delete('/api/documents/:id', (req, res) => {
   db.prepare('DELETE FROM documents WHERE id=?').run(req.params.id);
   db.close();
   res.json({ ok: true });
+});
+
+// (#6) Preview: extrai o arquivo (PDF/DOCX/TXT/MD) e devolve o Markdown SEM salvar,
+// para o usuário revisar/editar antes de gravar. Informa se já existe duplicado (#3).
+app.post('/api/documents/extract', uploadPdf.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+  let parsed;
+  try {
+    parsed = await extractFileToMarkdown(req.file.buffer, req.file.originalname || 'arquivo');
+  } catch (e) {
+    return res.status(400).json({ error: extractErrorMessage(e.code) });
+  }
+  const hash = sha256(parsed.markdown);
+  const db = getDb();
+  const dup = db.prepare('SELECT id,name FROM documents WHERE content_hash=?').get(hash);
+  db.close();
+  res.json({
+    name: parsed.title, markdown: parsed.markdown, source_type: parsed.source_type,
+    size: parsed.markdown.length,
+    duplicate: dup ? { id: dup.id, name: dup.name } : null,
+  });
+});
+
+// Upload em um passo (extrai + salva). Mantido por conveniência; dedup aplicado.
+app.post('/api/documents/upload', uploadPdf.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+  let parsed;
+  try {
+    parsed = await extractFileToMarkdown(req.file.buffer, req.file.originalname || 'arquivo');
+  } catch (e) {
+    return res.status(400).json({ error: extractErrorMessage(e.code) });
+  }
+  const hash = sha256(parsed.markdown);
+  const db = getDb();
+  const existing = db.prepare('SELECT id,name FROM documents WHERE content_hash=?').get(hash);
+  if (existing && req.body.replace !== 'true') {
+    db.close();
+    return res.status(409).json({ duplicate: true, id: existing.id, name: existing.name, error: `Documento idêntico já existe: "${existing.name}"` });
+  }
+  let id;
+  if (existing) {
+    db.prepare('UPDATE documents SET name=?, content=?, source_type=? WHERE id=?').run(parsed.title, parsed.markdown, parsed.source_type, existing.id);
+    id = existing.id;
+  } else {
+    const r = db.prepare('INSERT INTO documents (name,content,content_hash,source_type) VALUES (?,?,?,?)').run(parsed.title, parsed.markdown, hash, parsed.source_type);
+    id = r.lastInsertRowid;
+  }
+  db.close();
+  res.json({ id, name: parsed.title, size: parsed.markdown.length, source_type: parsed.source_type });
 });
 
 // RAG
@@ -3019,7 +3484,10 @@ app.post('/api/rag/query', async (req, res) => {
   db.close();
   if (!docs.length) return res.json({ answer: 'Nenhum documento carregado.' });
 
-  const docsText = docs.map(d => `[${d.name}]\n${d.content.substring(0, 2000)}`).join('\n\n---\n\n');
+  // (#2) seleciona os trechos relevantes por documento (em vez de cortar em 2000).
+  const terms = String(query || '').split(/\s+/);
+  const perDoc = Math.floor(MAX_PROMPT_CHARS / Math.max(docs.length, 1));
+  const docsText = docs.map(d => `[${d.name}]\n${extractRelevantChunk(d.content, terms, perDoc)}`).join('\n\n---\n\n');
   const system = storytelling
     ? 'Você converte dados técnicos em benefícios de negócio (ROI, economia). Use números concretos.'
     : 'Você é especialista técnico. Responda baseando-se APENAS nos documentos fornecidos.';
@@ -3048,6 +3516,58 @@ app.post('/api/golden-cases', (req, res) => {
 app.delete('/api/golden-cases/:id', (req, res) => {
   const db = getDb();
   db.prepare('DELETE FROM golden_cases WHERE id=?').run(req.params.id);
+  db.close();
+  res.json({ ok: true });
+});
+
+// Biblioteca de Ganchos — arquétipos de 1ª mensagem (situação real → produto)
+app.get('/api/hook-library', (req, res) => {
+  const db = getDb();
+  const where = [];
+  const params = [];
+  if (req.query.call_type) { where.push('call_type=?'); params.push(req.query.call_type); }
+  if (req.query.category)  { where.push('category=?');  params.push(req.query.category); }
+  if (req.query.active !== undefined) { where.push('active=?'); params.push(req.query.active ? 1 : 0); }
+  const sql = 'SELECT * FROM hook_library' + (where.length ? ' WHERE ' + where.join(' AND ') : '') + ' ORDER BY score DESC, id DESC';
+  res.json(db.prepare(sql).all(...params));
+  db.close();
+});
+
+app.post('/api/hook-library', (req, res) => {
+  const b = req.body || {};
+  if (!b.situation || !b.example_text) return res.status(400).json({ error: 'situation e example_text são obrigatórios' });
+  const db = getDb();
+  const r = db.prepare(
+    'INSERT INTO hook_library (situation,product_link,example_text,category,call_type,tags,score,active) VALUES (?,?,?,?,?,?,?,?)'
+  ).run(b.situation, b.product_link || '', b.example_text, b.category || 'geral', b.call_type || 'cold', b.tags || '', b.score || 5, b.active === undefined ? 1 : (b.active ? 1 : 0));
+  db.close();
+  res.json({ id: r.lastInsertRowid });
+});
+
+app.put('/api/hook-library/:id', (req, res) => {
+  const db = getDb();
+  const cur = db.prepare('SELECT * FROM hook_library WHERE id=?').get(req.params.id);
+  if (!cur) { db.close(); return res.status(404).json({ error: 'Gancho não encontrado' }); }
+  const b = req.body || {};
+  const merged = {
+    situation:    b.situation    ?? cur.situation,
+    product_link: b.product_link ?? cur.product_link,
+    example_text: b.example_text ?? cur.example_text,
+    category:     b.category     ?? cur.category,
+    call_type:    b.call_type    ?? cur.call_type,
+    tags:         b.tags         ?? cur.tags,
+    score:        b.score        ?? cur.score,
+    active:       b.active === undefined ? cur.active : (b.active ? 1 : 0),
+  };
+  db.prepare('UPDATE hook_library SET situation=?,product_link=?,example_text=?,category=?,call_type=?,tags=?,score=?,active=? WHERE id=?')
+    .run(merged.situation, merged.product_link, merged.example_text, merged.category, merged.call_type, merged.tags, merged.score, merged.active, req.params.id);
+  db.close();
+  res.json({ ok: true });
+});
+
+app.delete('/api/hook-library/:id', (req, res) => {
+  const db = getDb();
+  db.prepare('DELETE FROM hook_library WHERE id=?').run(req.params.id);
   db.close();
   res.json({ ok: true });
 });

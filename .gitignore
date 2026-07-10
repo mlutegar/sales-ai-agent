@@ -13,3 +13,6 @@ node_modules/
 *.xlsx
 temp_*
 
+# Modelos de OCR do Tesseract (baixados em runtime, não versionar)
+*.traineddata
+
