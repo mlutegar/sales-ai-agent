@@ -418,7 +418,7 @@ const ROLE_LABEL = { c_level: 'C-Level / Diretor', manager: 'Gerente / Coordenad
 const cargoDe = (c) => (c && (c.title && c.title.trim())) ? c.title : (ROLE_LABEL[c?.role] || c?.role || '');
 
 // ── ContactCard (contato + contexto pessoal do lead) ────────────────────────────
-function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversation, toast }) {
+function ContactCard({ contact, companyId, companyName, onEnrich, onRemove, onStartConversation, onChanged, toast }) {
   const [savedCtx, setSavedCtx] = useState(contact.context || '');
   const [ctx, setCtx]           = useState(contact.context || '');
   const [open, setOpen]         = useState(false);
@@ -427,6 +427,16 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversati
   const [logs, setLogs]         = useState(null);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logsLoading, setLogsLoading] = useState(false);
+
+  // ── LinkedIn: busca pontual (1 lead) + validação humana ──────────────────────
+  const [liOpen, setLiOpen]     = useState(false);   // modal aberto
+  const [liStep, setLiStep]     = useState(1);        // 1 = colar, 2 = revisar
+  const [liRaw, setLiRaw]       = useState('');
+  const [liUrl, setLiUrl]       = useState(contact.linkedin || '');
+  const [liBusy, setLiBusy]     = useState(false);
+  const [liOcr, setLiOcr]       = useState('');
+  const [liFields, setLiFields] = useState(null);     // dados em revisão
+  const liLastSearch = useRef(0);
 
   const hasContext = !!(savedCtx && savedCtx.trim());
 
@@ -481,6 +491,128 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversati
     }
   }
 
+  // ── LinkedIn helpers ─────────────────────────────────────────────────────────
+  const LI_COOLDOWN_MS = 20000;
+  const ROLE_EXPECT = { c_level: 'C-Level / Diretoria', manager: 'Gerência', engineer: 'Engenharia/Técnico', other: 'Outro' };
+
+  function openLinkedIn() {
+    setLiRaw(''); setLiOcr(''); setLiUrl(contact.linkedin || '');
+    if (contact.linkedin_status === 'confirmed') {
+      // (#2) Reabrir já validado direto na revisão, com os dados salvos.
+      let saved = {};
+      try { saved = JSON.parse(contact.linkedin_parsed || '{}'); } catch { /* noop */ }
+      setLiFields({
+        name: saved.name || contact.name || '',
+        headline: contact.linkedin_headline || saved.headline || '',
+        current_role: contact.linkedin_current_role || saved.current_role || '',
+        current_company: contact.linkedin_current_company || saved.current_company || '',
+        location: contact.linkedin_location || saved.location || '',
+        summary: contact.linkedin_summary || saved.summary || '',
+        profile_url: contact.linkedin || saved.profile_url || '',
+        experience: saved.experience || [], education: saved.education || [], skills: saved.skills || [],
+      });
+      setLiStep(2);
+    } else {
+      setLiFields(null);
+      setLiStep(1);
+    }
+    setLiOpen(true);
+  }
+
+  function linkedInSearch() {
+    const since = Date.now() - liLastSearch.current;
+    if (liLastSearch.current && since < LI_COOLDOWN_MS) {   // (#10) cooldown
+      const wait = Math.ceil((LI_COOLDOWN_MS - since) / 1000);
+      if (!window.confirm(`Busca pontual: você pesquisou há ${Math.round(since / 1000)}s. Para proteger a conta contra bloqueio do LinkedIn, o ideal é aguardar ~${wait}s. Abrir mesmo assim?`)) return;
+    }
+    const q = `${contact.name} ${companyName || ''}`.trim();
+    window.open('https://www.linkedin.com/search/results/people/?keywords=' + encodeURIComponent(q), '_blank', 'noopener');
+    liLastSearch.current = Date.now();
+  }
+
+  function cleanLinkedInText(t) {   // (#8) remove "lixo" copiado do LinkedIn
+    const noise = /^(seguir|conectar|mensagem|mais|conexão de \d|° grau|ver perfil completo|pessoas também viram|adicionar seção|contato e informações|salvar no pdf|denunciar\/bloquear|\d+ seguidores|\d+ conexões|premium|status disponível)$/i;
+    return (t || '').split('\n').map((l) => l.trim())
+      .filter((l) => l && !noise.test(l))
+      .filter((l, i, arr) => l !== arr[i - 1])
+      .join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  async function linkedInOcr(file) {   // (#11) OCR de um print
+    if (!file) return;
+    setLiOcr('Lendo imagem (OCR)...');
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result); r.onerror = reject;
+        r.readAsDataURL(file);
+      });
+      const res = await fetch(`${API}/api/linkedin/ocr`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: dataUrl }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok) { toast(d.error || 'Falha no OCR.', 'danger'); setLiOcr(''); return; }
+      setLiRaw((prev) => (prev ? prev + '\n' : '') + d.text);
+      setLiOcr('✓ Texto extraído — confira e clique em Analisar.');
+    } catch {
+      toast('Falha ao processar a imagem.', 'danger'); setLiOcr('');
+    }
+  }
+
+  async function linkedInParse() {
+    const raw = cleanLinkedInText(liRaw);
+    if (!raw) { toast('Cole o conteúdo do perfil do LinkedIn primeiro.', 'warning'); return; }
+    if (contact.linkedin_status === 'confirmed' &&   // (#3) confirma sobrescrita
+        !window.confirm('Este contato já tem um perfil validado. Analisar um novo texto vai substituir os dados atuais. Continuar?')) return;
+    setLiBusy(true);
+    try {
+      // fetch direto para exibir o aviso exato do backend (ex.: IA indisponível).
+      const res = await fetch(`${API}/api/contacts/${contact.id}/linkedin/parse`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw_text: raw, profile_url: liUrl.trim() }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok) { toast(d.error || `Erro ${res.status} ao analisar o perfil.`, 'danger'); return; }
+      if (d.dup_warning) toast('⚠️ ' + d.dup_warning, 'warning');   // (#6)
+      setLiFields(d.parsed || {});
+      setLiStep(2);
+    } catch {
+      toast('Sem conexão com o servidor.', 'danger');
+    } finally {
+      setLiBusy(false);
+    }
+  }
+
+  async function linkedInConfirm(action) {
+    setLiBusy(true);
+    try {
+      const payload = { action };
+      if (action === 'confirm') payload.fields = liFields;
+      const res = await fetch(`${API}/api/contacts/${contact.id}/linkedin/confirm`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok) { toast(d.error || 'Erro ao salvar a validação.', 'danger'); return; }
+      toast(action === 'confirm' ? '✓ Perfil validado e salvo no contato.' : 'Perfil rejeitado.', action === 'confirm' ? 'success' : 'info');
+      setLiOpen(false);
+      if (onChanged) onChanged();
+    } catch {
+      toast('Erro ao salvar a validação.', 'danger');
+    } finally {
+      setLiBusy(false);
+    }
+  }
+
+  const setF = (k) => (e) => setLiFields((f) => ({ ...f, [k]: e.target.value }));
+  const setFList = (k) => (e) => setLiFields((f) => ({ ...f, [k]: e.target.value.split('\n').map((s) => s.trim()).filter(Boolean) }));
+  const liStatusBadge = {
+    confirmed:      { cls: 'text-white', style: { background: '#0a66c2' }, label: 'LinkedIn ✓', title: 'Perfil validado por humano' },
+    pending_review: { cls: 'bg-warning text-dark', style: {}, label: 'Revisar', title: 'Aguardando validação' },
+    rejected:       { cls: 'bg-secondary', style: {}, label: 'Rejeitado', title: 'Perfil rejeitado' },
+  }[contact.linkedin_status];
+
   return (
     <div className="mb-2 p-2 rounded" style={{ background: '#fff', border: '1px solid #dee2e6' }}>
       <div className="d-flex align-items-start justify-content-between">
@@ -498,11 +630,26 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversati
             <span className={`badge border ms-2 ${CALL_META[callType].cls}`} style={{ fontSize: '.65rem' }} title={CALL_META[callType].hint}>
               {CALL_META[callType].label}
             </span>
+            {liStatusBadge && (
+              <span className={`badge ms-2 ${liStatusBadge.cls}`} style={{ fontSize: '.65rem', ...liStatusBadge.style }} title={liStatusBadge.title}>
+                {liStatusBadge.label}
+              </span>
+            )}
           </div>
           {cargoDe(contact) && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-briefcase me-1"></i>{cargoDe(contact)}</div>}
           {contact.email && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-envelope me-1"></i>{contact.email}</div>}
           {contact.whatsapp && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-whatsapp me-1"></i>{contact.whatsapp}</div>}
           {contact.linkedin && <div className="text-muted" style={{ fontSize: '.78rem' }}><i className="bi bi-linkedin me-1"></i><a href={contact.linkedin} target="_blank" rel="noreferrer">LinkedIn</a></div>}
+          {contact.linkedin_status === 'confirmed' && (contact.linkedin_headline || contact.linkedin_current_role) && (
+            <div className="text-muted" style={{ fontSize: '.72rem' }}>
+              <i className="bi bi-linkedin text-primary me-1"></i>
+              {contact.linkedin_headline || contact.linkedin_current_role}
+              {contact.linkedin_current_company ? ` @ ${contact.linkedin_current_company}` : ''}
+              {contact.linkedin_reviewed_by && (
+                <i className="bi bi-patch-check-fill text-success ms-1" title={`Validado por ${contact.linkedin_reviewed_by}${contact.linkedin_reviewed_at ? ' em ' + contact.linkedin_reviewed_at : ''}`}></i>
+              )}
+            </div>
+          )}
           {contact.import_source && (
             <div className="text-muted" style={{ fontSize: '.72rem' }}>
               <i className="bi bi-file-earmark-spreadsheet me-1"></i>{contact.import_source}
@@ -512,6 +659,9 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversati
         <div className="d-flex gap-1 ms-2">
           <button className="btn btn-sm btn-outline-secondary btn-xs-touch" onClick={() => onEnrich(contact.id)} title="Enriquecer">
             <i className="bi bi-search"></i>
+          </button>
+          <button className="btn btn-sm btn-outline-primary btn-xs-touch" onClick={openLinkedIn} title="Buscar perfil no LinkedIn (pontual, com validação)">
+            <i className="bi bi-linkedin"></i>
           </button>
           <button className="btn btn-sm btn-outline-danger btn-xs-touch" onClick={() => onRemove(companyId, contact.id)} title="Remover">
             <i className="bi bi-trash"></i>
@@ -589,6 +739,92 @@ function ContactCard({ contact, companyId, onEnrich, onRemove, onStartConversati
             <button className="btn btn-outline-secondary btn-sm" onClick={() => { setCtx(savedCtx); setOpen(false); }} disabled={saving}>
               Cancelar
             </button>
+          </div>
+        </div>
+      )}
+
+      {liOpen && (
+        <div className="modal d-block" tabIndex={-1} style={{ background: 'rgba(0,0,0,.5)' }} onClick={() => !liBusy && setLiOpen(false)}>
+          <div className="modal-dialog modal-lg modal-dialog-scrollable" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-content">
+              <div className="modal-header">
+                <h5 className="modal-title"><i className="bi bi-linkedin text-primary me-2"></i>Perfil do LinkedIn — {contact.name}</h5>
+                <button type="button" className="btn-close" onClick={() => setLiOpen(false)} disabled={liBusy}></button>
+              </div>
+              <div className="modal-body">
+                {liStep === 1 && (
+                  <>
+                    <p className="text-muted small">
+                      Busca <strong>pontual</strong>, um lead por vez, para respeitar a política do LinkedIn.
+                      Abra a busca, copie o conteúdo do perfil correto e cole abaixo — a IA estrutura os dados para você <strong>validar</strong> antes de salvar.
+                    </p>
+                    <div className="alert alert-light border py-2 small">
+                      <strong>Confira ao escolher o perfil:</strong>
+                      <ul className="mb-0 ps-3">
+                        <li>Nome: <strong>{contact.name}</strong></li>
+                        <li>Empresa: <strong>{companyName || '—'}</strong></li>
+                        <li>Cargo esperado: <strong>{ROLE_EXPECT[contact.role] || contact.role || '—'}</strong></li>
+                      </ul>
+                    </div>
+                    <button className="btn btn-outline-primary btn-sm mb-3" onClick={linkedInSearch}>
+                      <i className="bi bi-box-arrow-up-right me-1"></i>Abrir busca no LinkedIn
+                    </button>
+                    <div className="mb-2">
+                      <label className="form-label small mb-0">URL do perfil (opcional)</label>
+                      <input className="form-control form-control-sm" value={liUrl} onChange={(e) => setLiUrl(e.target.value)} placeholder="https://www.linkedin.com/in/..." />
+                    </div>
+                    <div className="mb-2">
+                      <label className="form-label small mb-0">Conteúdo do perfil (cole aqui)</label>
+                      <textarea className="form-control form-control-sm" rows={8} value={liRaw} onChange={(e) => setLiRaw(e.target.value)} placeholder="Cole aqui o texto copiado da página do perfil (nome, cargo, experiência, etc.)"></textarea>
+                    </div>
+                    <div className="mb-2">
+                      <label className="btn btn-outline-secondary btn-sm mb-0">
+                        <i className="bi bi-image me-1"></i>Ler de um print (OCR)
+                        <input type="file" accept="image/*" className="d-none" onChange={(e) => { linkedInOcr(e.target.files[0]); e.target.value = ''; }} />
+                      </label>
+                      {liOcr && <span className="text-muted small ms-2">{liOcr}</span>}
+                    </div>
+                    <button className="btn btn-primary btn-sm" onClick={linkedInParse} disabled={liBusy}>
+                      {liBusy ? <><span className="spinner-border spinner-border-sm me-1"></span>Analisando...</> : <><i className="bi bi-robot me-1"></i>Analisar com IA</>}
+                    </button>
+                  </>
+                )}
+
+                {liStep === 2 && liFields && (
+                  <>
+                    <div className="alert alert-warning py-2 small">
+                      <i className="bi bi-exclamation-triangle me-1"></i>
+                      Confirme que este perfil é realmente de <strong>{contact.name}</strong>. Revise/edite os campos.
+                    </div>
+                    {[['name', 'Nome'], ['headline', 'Headline'], ['current_role', 'Cargo atual'], ['current_company', 'Empresa atual'], ['location', 'Localização'], ['profile_url', 'URL do perfil']].map(([k, label]) => (
+                      <div className="mb-2" key={k}>
+                        <label className="form-label small mb-0">{label}</label>
+                        <input className="form-control form-control-sm" value={liFields[k] || ''} onChange={setF(k)} />
+                      </div>
+                    ))}
+                    <div className="mb-2">
+                      <label className="form-label small mb-0">Resumo</label>
+                      <textarea className="form-control form-control-sm" rows={3} value={liFields.summary || ''} onChange={setF('summary')}></textarea>
+                    </div>
+                    {[['experience', 'Experiência (1 por linha)'], ['education', 'Formação (1 por linha)'], ['skills', 'Skills (1 por linha)']].map(([k, label]) => (
+                      <div className="mb-2" key={k}>
+                        <label className="form-label small mb-0">{label}</label>
+                        <textarea className="form-control form-control-sm" rows={2} value={(liFields[k] || []).join('\n')} onChange={setFList(k)}></textarea>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+              <div className="modal-footer d-flex justify-content-between">
+                <button className="btn btn-outline-secondary btn-sm" onClick={() => setLiOpen(false)} disabled={liBusy}>Fechar</button>
+                {liStep === 2 && (
+                  <div className="d-flex gap-2">
+                    <button className="btn btn-outline-danger btn-sm" onClick={() => linkedInConfirm('reject')} disabled={liBusy}><i className="bi bi-x-lg me-1"></i>Rejeitar</button>
+                    <button className="btn btn-success btn-sm" onClick={() => linkedInConfirm('confirm')} disabled={liBusy}><i className="bi bi-check-lg me-1"></i>Confirmar que é este contato</button>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -742,9 +978,11 @@ function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onCont
               key={ct.id}
               contact={ct}
               companyId={company.id}
+              companyName={company.name}
               onEnrich={onEnrich}
               onRemove={onRemoveContact}
               onStartConversation={onStartConversation}
+              onChanged={onContactAdded}
               toast={toast}
             />
           ))}

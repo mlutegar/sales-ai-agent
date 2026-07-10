@@ -1108,7 +1108,9 @@ const ANTI_TEMPLATE_RULES =
   '- PROIBIDO usar clichês de robô: "espero que esteja bem", "tudo bem?", "meu nome é ... e vim aqui porque", ' +
   '"passando para apresentar", "somos uma empresa que", "gostaria de agendar", "não perca essa oportunidade".\n' +
   '- Abra por uma situação/fato/dor REAL do lead — nunca por auto-apresentação genérica.\n' +
-  '- Soe como uma pessoa escrevendo no WhatsApp: direto, específico, sem jargão de marketing.';
+  '- Soe como uma pessoa escrevendo no WhatsApp: direto, específico, sem jargão de marketing.\n' +
+  '- PROIBIDO usar placeholders/campos a preencher como "[seu nome]", "[nome]", "{empresa}", "<link>". ' +
+  'Se você não souber um dado (ex.: seu próprio nome), NÃO o mencione e reescreva a frase sem ele — nunca deixe um espaço reservado.';
 
 // (#6) Ângulos distintos para as variantes A/B — cada uma abre por um caminho diferente.
 const VARIANT_ANGLES = [
@@ -1218,6 +1220,26 @@ function findUnresolvedPlaceholders(text) {
   let m;
   while ((m = re.exec(text)) !== null) found.add(m[0]);
   return [...found];
+}
+
+// (#3) Última linha de defesa: remove placeholders não resolvidos que escaparam do prompt,
+// junto de frases de auto-apresentação que só existiam por causa deles ("Aqui é [seu nome]...").
+// Retorna o texto limpo; se não houver placeholder, devolve o original.
+function stripPlaceholders(text) {
+  if (!text || !findUnresolvedPlaceholders(text).length) return text;
+  const PH = /\[[^\]\n]*[A-Za-zÀ-ÿ][^\]\n]*\]|\{[^}\n]*[A-Za-zÀ-ÿ][^}\n]*\}|<[^>\n]*[A-Za-zÀ-ÿ][^>\n]*>/g;
+  let t = text;
+  // Remove fragmentos de auto-apresentação que carregam o placeholder (com reticências/pontuação residual).
+  t = t.replace(/\b(aqui é|aqui quem fala é|meu nome é|sou o|sou a|sou)\s*(\[[^\]\n]*\]|\{[^}\n]*\}|<[^>\n]*>)\s*[.…]*/gi, '');
+  // Remove qualquer placeholder remanescente solto.
+  t = t.replace(PH, '');
+  // Normaliza espaços e pontuação duplicada deixada pela remoção.
+  t = t.replace(/\s{2,}/g, ' ')
+       .replace(/\s+([,.!?…])/g, '$1')
+       .replace(/([,.!?])\1+/g, '$1')
+       .replace(/\.\.\./g, '…')
+       .trim();
+  return t;
 }
 
 // (#5/#7) Parser leve de data/hora em PT-BR para negociação de agenda.
@@ -1732,10 +1754,9 @@ app.get('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
 });
 
-// ── Rota principal (protegida) ────────────────────────────────────────────────
-app.get('/', requireLogin, (req, res) => {
-  res.sendFile(path.join(__dirname, 'templates', 'index.html'));
-});
+// Nota: a rota principal `/` é servida pelo build React em `public/index.html`
+// via `express.static` (middleware no topo) e pelo catch-all no final do arquivo.
+// A antiga rota server-rendered (templates/index.html) foi removida por ser código morto.
 
 // ════════════════════════════════════════════════════════════════════════════
 // API — todas protegidas
@@ -2252,7 +2273,7 @@ Você escreve em nome da EMPRESA "${brand}" (equipe de marketing). Apresente-se 
   if (!full) {
     // Sem nome pessoal decente: proíbe assinatura genérica ("— Administrador") que soa a bot.
     return `\n# REMETENTE (quem assina — OBRIGATÓRIO)
-Escreva como uma pessoa real da equipe comercial. NÃO assine com nome de usuário/cargo genérico (ex.: "Administrador", "Suporte", "Sistema") e NÃO use assinatura corporativa. Encerre de forma natural e humana, sem bloco de assinatura.\n`;
+Escreva como uma pessoa real da equipe comercial. NÃO assine com nome de usuário/cargo genérico (ex.: "Administrador", "Suporte", "Sistema") e NÃO use assinatura corporativa. Encerre de forma natural e humana, sem bloco de assinatura. Como você NÃO tem um nome próprio definido, NÃO se apresente pelo nome e NUNCA escreva um placeholder como "[seu nome]" — simplesmente omita a auto-apresentação.\n`;
   }
   const first = full.split(/\s+/)[0];
   return `\n# REMETENTE (quem apresenta/assina — OBRIGATÓRIO)
@@ -2270,7 +2291,7 @@ function senderLine(user) {
     return `Remetente: empresa "${brand}" (perfil marketing — apresente-se como a EMPRESA, nunca como pessoa isolada; assine ${assina})`;
   }
   const full = resolveSalesName(user);
-  if (!full) return 'Remetente: pessoa real da equipe comercial — NÃO assine com nome genérico/de sistema ("Administrador", "Suporte") nem assinatura corporativa; encerre de forma natural, sem bloco de assinatura.';
+  if (!full) return 'Remetente: pessoa real da equipe comercial — NÃO assine com nome genérico/de sistema ("Administrador", "Suporte") nem assinatura corporativa; encerre de forma natural, sem bloco de assinatura. Sem nome próprio definido: NÃO se apresente pelo nome e NUNCA use placeholder como "[seu nome]" — omita a auto-apresentação.';
   return `Remetente: ${full} (perfil vendas — apresente-se pelo primeiro nome e assine como ${full})`;
 }
 
@@ -2968,12 +2989,14 @@ ${learned ? '\nREGRAS OBRIGATÓRIAS aprendidas com o revisor humano — o "hook"
 
 Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com exatamente estas chaves:
 - "research_context": array de 2-3 strings curtas (uma frase cada), cada uma com um fato REAL encontrado
-- "hook": uma única string (máx 2 linhas) conectando um gancho real ao produto
+- "hook": uma única string (máx 2 linhas) cujo FOCO é a proposta de valor concreta de "${productValue}". O produto DEVE aparecer explicitamente e ser o assunto principal da oferta; use um fato real da empresa apenas como ponte de abertura, nunca como tema central. Não termine falando só da empresa.
 - "pain_points": array de exatamente 3 strings (dores específicas do setor/porte)
 - "value_proposition": uma única string
 - "sources": array de URLs usados como fonte (strings)
 
-Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em tendências reais do setor e indique isso. Responda APENAS com JSON válido, sem markdown, sem comentários.`;
+Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em tendências reais do setor e indique isso.
+No campo "hook": não use travessão "—", nem jargão de marketing (solução, otimizar, potencializar, etc.); escreva em tom casual de WhatsApp. PROIBIDO usar placeholders/campos a preencher como "[seu nome]", "[nome]", "{empresa}" ou "<link>": se não souber um dado, omita-o e reescreva sem espaço reservado.
+Responda APENAS com JSON válido, sem markdown, sem comentários.`;
 
   const result = await callClaudeWithSearch('Você é assistente de pesquisa de vendas B2B que usa busca na web para encontrar informações reais e atuais sobre empresas e seus executivos.', prompt, 2600);
   let hook, ctx, painPoints = [];
@@ -2982,6 +3005,11 @@ Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em ten
   if (jsonMatch) raw = jsonMatch[0];
   try { const p = JSON.parse(raw); hook = p.hook || result; ctx = JSON.stringify(p); painPoints = Array.isArray(p.pain_points) ? p.pain_points : []; }
   catch { hook = result; ctx = result; }
+
+  // Humaniza o hook (remove travessão "—", aspas de IA, etc.) e remove placeholders
+  // não resolvidos ("[seu nome]" & cia) antes de persistir/exibir.
+  // Defesa em profundidade: garante a limpeza mesmo se o modelo desobedecer o prompt.
+  if (hook) hook = stripPlaceholders(humanizeWhatsapp(hook, styleProfile()));
 
   const db2 = getDb();
   const prevHistRaw = db2.prepare('SELECT research_history FROM companies WHERE id=?').get(req.params.id);
@@ -3164,6 +3192,17 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
             if (retry && retry.trim()) content = retry;
           }
         } catch (e) { console.warn('[first-msg critique] pulada:', e.message); }
+      }
+
+      // (#3) Guardrail anti-placeholder: se a IA deixou "[seu nome]" & cia, regenera UMA vez
+      // com instrução estrita; se ainda persistir, limpa o texto antes de gravar.
+      if (findUnresolvedPlaceholders(content).length) {
+        const strictPrompt = prompt +
+          '\n\n## CORREÇÃO OBRIGATÓRIA\nA versão anterior continha placeholders (ex.: "[seu nome]"). ' +
+          'Reescreva SEM nenhum campo a preencher: se não souber um dado, omita-o. Retorne APENAS a mensagem.';
+        const retry = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', strictPrompt, 400);
+        if (retry && retry.trim() && !isAiError(retry)) content = retry;
+        content = stripPlaceholders(content);
       }
 
       // (#1) Detecta afirmações checáveis e decide se precisa de revisão factual.
