@@ -551,6 +551,12 @@ function initDb() {
   addColumnIfNotExists(db, 'documents', 'source_type',  "TEXT DEFAULT 'text'");
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(content_hash)');
 
+  // Perfis de usuário (marketing x vendas) e identidade do remetente nas mensagens.
+  addColumnIfNotExists(db, 'users', 'user_type',    "TEXT DEFAULT 'vendas'");   // 'vendas' | 'marketing'
+  addColumnIfNotExists(db, 'users', 'company_name', "TEXT DEFAULT ''");          // marca usada pelo perfil marketing
+  // Atribuição do lead ao usuário que o gerou.
+  addColumnIfNotExists(db, 'companies', 'created_by', 'INTEGER');
+
   // Migração: remover NOT NULL de messages.lead_id se necessário (schema antigo tinha NOT NULL)
   try {
     const msgCols = db.prepare("PRAGMA table_info(messages)").all();
@@ -705,6 +711,30 @@ function initDb() {
       ON messages(wa_message_id) WHERE wa_message_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_messages_company_channel
       ON messages(company_id, channel, status, id);
+  `);
+
+  // ── Teste cego anti-detecção de bot (Turing-style) ─────────────────────────
+  // Guarda mensagens (reais x geradas pela automação) apresentadas às cegas e os
+  // palpites dos testadores, para medir se humanos distinguem bot de humano.
+  // Meta de sucesso: taxa de acerto agregada < 50%.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS blind_test_items (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      source     TEXT    NOT NULL,              -- 'real' | 'auto'
+      text       TEXT    NOT NULL,
+      batch      TEXT    DEFAULT '',
+      created_at TEXT    DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS blind_test_guesses (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_id     INTEGER REFERENCES blind_test_items(id) ON DELETE CASCADE,
+      tester_name TEXT    NOT NULL,
+      guess       TEXT    NOT NULL,             -- 'real' | 'auto'
+      correct     INTEGER DEFAULT 0,
+      created_at  TEXT    DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_blind_guess_item   ON blind_test_guesses(item_id);
+    CREATE INDEX IF NOT EXISTS idx_blind_guess_tester ON blind_test_guesses(tester_name);
   `);
 
   // Seed usuário admin padrão
@@ -946,7 +976,8 @@ Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou
           const draftPrompt = sentiment === 'technical_question'
             ? `O prospect enviou: "${text}"\nDúvida técnica. Responda de forma objetiva (máx 80 palavras) e convide para conversa de 15 minutos. Tom consultivo.`
             : `O prospect enviou: "${text}"\nDemonstrou interesse. Confirme o interesse e proponha reunião de 15 minutos (máx 60 palavras). Tom entusiasmado mas profissional.`;
-          const draft = await callClaude('Você é SDR especialista em respostas rápidas.', draftPrompt, 200);
+          let draft = await callClaude('Você é SDR especialista em respostas rápidas.', draftPrompt, 200);
+          draft = humanizeWhatsapp(draft, styleProfile());
 
           // Salva draft e envia automaticamente
           db2.prepare(
@@ -1230,12 +1261,31 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 800, priorTurns 
     const productMatch = userPrompt.match(/Produto:\s*([^\n]+)/);
     const product = productMatch ? productMatch[1].trim() : 'solução de automação de vendas';
 
-    if (channel === 'linkedin') {
-      return `Olá ${contactName}, vi que você atua na ${companyName} e achei interessante o seu perfil. Nós ajudamos empresas de tecnologia a otimizarem seus fluxos comerciais com IA. Gostaria de conectar por aqui para trocar ideias sobre o mercado comercial B2B.`;
-    } else if (channel === 'email') {
-      return `Assunto: Otimização de processos comerciais na ${companyName}\n\nOlá ${contactName},\n\nTudo bem?\n\nVi que você é responsável pela área comercial na ${companyName} e decidi entrar em contato. Muitas empresas do setor de tecnologia sofrem com a perda de leads qualificados devido a follow-ups lentos.\n\nDesenvolvemos uma ${product} que ajuda a automatizar a triagem e o primeiro contato via WhatsApp, aumentando as taxas de conversão de leads.\n\nVocê teria 15 minutos nesta semana para uma demonstração rápida de como isso pode ajudar o seu time?\n\nAbraços,\nSDR Sales AI`;
+    // Remetente conforme o perfil do usuário (vendas = nome próprio; marketing = marca).
+    const senderMatch = userPrompt.match(/Remetente:\s*([^\n]+)/);
+    const senderRaw = senderMatch ? senderMatch[1] : '';
+    const isMarketing = /perfil marketing/i.test(senderRaw);
+    let signature, intro;
+    if (isMarketing) {
+      const b = senderRaw.match(/empresa\s+"([^"]+)"/i);
+      const brand = (b ? b[1] : 'nossa empresa').trim();
+      signature = brand;
+      intro = `aqui é da ${brand}`;
+    } else if (senderRaw) {
+      const full = senderRaw.replace(/\s*\(perfil.*$/i, '').trim() || 'Equipe de Vendas';
+      signature = full;
+      intro = `aqui é o ${full.split(/\s+/)[0]}`;
     } else {
-      return `Olá ${contactName}! Tudo bem?\n\nVi que você é o contato principal da ${companyName}.\n\nEstamos ajudando empresas do setor de tecnologia a automatizarem a triagem de leads com o nosso ${product}, melhorando a produtividade do time comercial.\n\nVocê teria 15 minutos para batermos um papo rápido e eu te mostrar como funciona na prática?`;
+      signature = 'SDR Sales AI';
+      intro = 'tudo bem';
+    }
+
+    if (channel === 'linkedin') {
+      return `Olá ${contactName}, ${intro} — vi que você atua na ${companyName} e achei interessante o seu perfil. Ajudamos empresas de tecnologia a otimizarem seus fluxos comerciais com IA. Gostaria de conectar para trocar ideias sobre o mercado B2B.\n\n${signature}`;
+    } else if (channel === 'email') {
+      return `Assunto: Otimização de processos comerciais na ${companyName}\n\nOlá ${contactName},\n\nTudo bem? ${isMarketing ? `Aqui é da ${signature}.` : `Meu nome é ${signature}.`}\n\nVi que você é responsável pela área comercial na ${companyName} e decidi entrar em contato. Muitas empresas do setor de tecnologia sofrem com a perda de leads qualificados devido a follow-ups lentos.\n\nDesenvolvemos uma ${product} que ajuda a automatizar a triagem e o primeiro contato via WhatsApp, aumentando as taxas de conversão de leads.\n\nVocê teria 15 minutos nesta semana para uma demonstração rápida?\n\nAbraços,\n${signature}`;
+    } else {
+      return `Olá ${contactName}! Tudo bem? ${isMarketing ? `Aqui é da ${signature}` : `${intro}`}.\n\nVi que você é o contato principal da ${companyName}.\n\nEstamos ajudando empresas do setor de tecnologia a automatizarem a triagem de leads com o nosso ${product}, melhorando a produtividade do time comercial.\n\nVocê teria 15 minutos para batermos um papo rápido e eu te mostrar como funciona na prática?\n\n${signature}`;
     }
   }
 
@@ -1427,7 +1477,15 @@ app.use('/api', requireLogin);
 
 // Me
 app.get('/api/me', (req, res) => {
-  res.json({ username: req.session.username, name: req.session.name });
+  const db = getDb();
+  const u = db.prepare('SELECT username, name, user_type, company_name FROM users WHERE id=?').get(req.session.userId);
+  db.close();
+  res.json({
+    username: req.session.username,
+    name: req.session.name,
+    user_type: u?.user_type || 'vendas',
+    company_name: u?.company_name || '',
+  });
 });
 
 // Stats — inclui total_opportunities e pipeline_value (Melhoria 1)
@@ -1457,9 +1515,11 @@ app.get('/api/companies', (req, res) => {
     SELECT c.*,
       COUNT(ct.id) as contact_count,
       GROUP_CONCAT(ct.name || ' (' || ct.role || ')', '||') as contacts_summary,
+      u.name as created_by_name, u.username as created_by_username,
       (SELECT GROUP_CONCAT(cf.flag) FROM company_flags cf WHERE cf.company_id=c.id) as flags
     FROM companies c
     LEFT JOIN contacts ct ON ct.company_id = c.id
+    LEFT JOIN users u ON u.id = c.created_by
     GROUP BY c.id
     ORDER BY c.created_at DESC
   `).all();
@@ -1522,7 +1582,7 @@ app.post('/api/companies', (req, res) => {
     db.close();
     return res.status(400).json({ error: 'E-mail do contato inválido' });
   }
-  const r = db.prepare('INSERT INTO companies (name, sector) VALUES (?, ?)').run(name, sector || '');
+  const r = db.prepare('INSERT INTO companies (name, sector, created_by) VALUES (?, ?, ?)').run(name, sector || '', req.session.userId || null);
   const companyId = r.lastInsertRowid;
   db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?, ?, ?)').run(companyId, 'company_added', `Empresa "${name}" adicionada ao sistema`);
   // Cria o primeiro contato (enviado pelo formulário "Nova Empresa") se informado.
@@ -1558,7 +1618,7 @@ app.post('/api/companies/import-bulk', (req, res) => {
   const newCompanyIds = [];
   const errors = [];
 
-  const insCompany    = db.prepare('INSERT INTO companies (name, sector, import_source) VALUES (?, ?, ?)');
+  const insCompany    = db.prepare('INSERT INTO companies (name, sector, import_source, created_by) VALUES (?, ?, ?, ?)');
   const logCompany    = db.prepare('INSERT INTO consent_logs (company_id, action, details) VALUES (?,?,?)');
   const findContact   = db.prepare("SELECT id FROM contacts WHERE email != '' AND email=? AND company_id=?");
   const findContactByName = db.prepare('SELECT id FROM contacts WHERE LOWER(TRIM(name))=LOWER(TRIM(?)) AND company_id=?');
@@ -1583,7 +1643,7 @@ app.post('/api/companies/import-bulk', (req, res) => {
     let companyId = companyKeyMap.get(companyKey);
     const isNew = companyId === undefined;
     if (isNew) {
-      companyId = insCompany.run(companyName, (row.sector || '').toString().trim(), importSource).lastInsertRowid;
+      companyId = insCompany.run(companyName, (row.sector || '').toString().trim(), importSource, req.session.userId || null).lastInsertRowid;
       logCompany.run(companyId, 'company_added', `Empresa "${companyName}" importada (${importSource || 'planilha'})`);
       companiesCreated++;
       newCompanyIds.push(companyId);
@@ -1803,9 +1863,126 @@ app.post('/api/companies/:id/message', (req, res) => {
 
 // Prompt de geração de mensagem de WhatsApp de vendas, estruturado para APROVEITAR
 // o aprendizado: regras duras (o que o revisor reprovou) + checagem final anti-violação.
+// ── Identidade do remetente (perfil marketing x vendas) ───────────────────────
+// Retorna o usuário logado (ou null). Uso pontual na geração de mensagens.
+function getSessionUser(db, req) {
+  const uid = req?.session?.userId;
+  if (!uid) return null;
+  try { return db.prepare('SELECT id, username, name, user_type, company_name FROM users WHERE id=?').get(uid) || null; }
+  catch { return null; }
+}
+
+// Monta o bloco de prompt que define QUEM assina/apresenta a mensagem:
+// - vendas    → nome próprio do vendedor
+// - marketing → nome da empresa/marca (nunca nome de pessoa)
+function buildSenderBlock(user) {
+  if (!user) return '';
+  const type = (user.user_type || 'vendas').toLowerCase();
+  if (type === 'marketing') {
+    const brand = (user.company_name || '').trim() || user.name || 'nossa empresa';
+    return `\n# REMETENTE (quem apresenta/assina — OBRIGATÓRIO)
+Você escreve em nome da EMPRESA "${brand}" (equipe de marketing). Apresente-se SEMPRE como a empresa "${brand}" — NUNCA use um nome de pessoa como remetente. Assine como "${brand}" ou "Equipe ${brand}".\n`;
+  }
+  const full = (user.name || '').trim() || user.username || 'o vendedor';
+  const first = full.split(/\s+/)[0];
+  return `\n# REMETENTE (quem apresenta/assina — OBRIGATÓRIO)
+Você escreve em nome de ${full}, um vendedor. Ao se apresentar, use o primeiro nome "${first}". Assine/encerre como ${full}. NUNCA se apresente como uma empresa no lugar do seu nome.\n`;
+}
+
+// Linha compacta de remetente para prompts inline / modo demo offline.
+function senderLine(user) {
+  if (!user) return '';
+  const type = (user.user_type || 'vendas').toLowerCase();
+  if (type === 'marketing') {
+    const brand = (user.company_name || '').trim() || user.name || 'nossa empresa';
+    return `Remetente: empresa "${brand}" (perfil marketing — apresente-se como a EMPRESA, nunca como pessoa; assine "${brand}")`;
+  }
+  const full = (user.name || '').trim() || user.username || 'o vendedor';
+  return `Remetente: ${full} (perfil vendas — apresente-se pelo primeiro nome e assine como ${full})`;
+}
+
+// ── Camada de humanização anti-detecção de bot ────────────────────────────────
+// Critérios objetivos de escrita humana aplicados à automação de WhatsApp para que
+// as mensagens não sejam percebidas como geradas por bot. Ver docs/anti-bot-checklist.md.
+const BOT_WORDS = [
+  'solução', 'soluções', 'otimizar', 'potencializar', 'alavancar', 'sinergia',
+  'inovador', 'inovadora', 'revolucionar', 'revolucionário', 'transformar sua',
+  'agregar valor', 'ecossistema', 'end-to-end', 'personalizado para você',
+  'nossa equipe está', 'não hesite', 'fico à disposição', 'atenciosamente',
+  'espero que esta mensagem', 'gostaria de apresentar', 'de forma eficiente',
+];
+// Detecta marcas textuais de IA numa mensagem (auditoria/relatório).
+function botWordScan(text) {
+  const low = (text || '').toLowerCase();
+  const hits = BOT_WORDS.filter(w => low.includes(w));
+  if (/—/.test(text || '')) hits.push('travessão (—)');
+  if (/^\s*\d+[\.\)]\s/m.test(text || '')) hits.push('lista numerada');
+  return hits;
+}
+// Perfil de estilo aleatório por mensagem — força variação (comprimento, abertura,
+// emoji, informalidade) para evitar o padrão repetitivo típico de bot.
+function styleProfile() {
+  const r = Math.random();
+  return {
+    lengthTarget: [28, 45, 70][Math.floor(Math.random() * 3)],
+    opener: ['nome', 'sem_nome', 'direto', 'contexto'][Math.floor(Math.random() * 4)],
+    emoji: r < 0.3,
+    lowercaseStart: Math.random() < 0.25,
+    abbreviations: Math.random() < 0.45,
+    dropFinalPeriod: Math.random() < 0.5,
+    ellipsis: Math.random() < 0.15,
+  };
+}
+// Bloco de critérios injetado no prompt de geração.
+function humanizationBlock(profile) {
+  const openers = {
+    nome: 'comece chamando a pessoa pelo primeiro nome',
+    sem_nome: 'NÃO comece com o nome da pessoa; vá direto ao assunto',
+    direto: 'abra direto no ponto, sem saudação formal',
+    contexto: 'abra referenciando um contexto/situação real da pessoa ou empresa',
+  };
+  return `\n# CRITÉRIOS DE HUMANIZAÇÃO (siga para não parecer bot)
+- Abertura: ${openers[profile.opener]}.
+- Comprimento alvo: ~${profile.lengthTarget} palavras (varie o ritmo, nem toda frase completa).
+- Tom casual de WhatsApp, 1a pessoa. PROIBIDO jargão de marketing (ex.: solução, otimizar, potencializar, alavancar, sinergia, à disposição, atenciosamente).
+- Não use travessão "—", nem listas numeradas, nem emojis em excesso${profile.emoji ? ' (no máx. 1 emoji, se fizer sentido)' : ' (sem emoji desta vez)'}.
+- Escreva como alguém digitando rápido no celular: direto, natural, sem soar publicitário.\n`;
+}
+// Pós-processador: informalidades SUTIS e reversíveis + remoção de marcas de IA.
+function humanizeWhatsapp(text, profile) {
+  let t = (text || '').trim();
+  if (!t) return t;
+  t = t.replace(/^["“”']+|["“”']+$/g, '').trim();
+  t = t.replace(/\s*—\s*/g, ', ');
+  if (profile && profile.abbreviations) {
+    const abbr = [[/\bvocê\b/i,'vc'],[/\bpara\b/i,'pra'],[/\bestá\b/i,'tá'],[/\btambém\b/i,'tbm'],[/\bpor que\b/i,'pq']];
+    for (const [re, to] of abbr) t = t.replace(re, m => (/[A-ZÀ-Ú]/.test(m[0]) ? to[0].toUpperCase() + to.slice(1) : to));
+  }
+  if (profile && profile.lowercaseStart && /^[A-ZÀ-Ú]/.test(t)) t = t[0].toLowerCase() + t.slice(1);
+  if (profile && profile.ellipsis) t = t.replace(/\.(\s|$)/, '...$1');
+  if (profile && profile.dropFinalPeriod) t = t.replace(/\.\s*$/, '').trim();
+  return t;
+}
+// Divide mensagens longas em 2 "bolhas", como um humano no WhatsApp.
+function splitBubbles(text) {
+  const t = (text || '').trim();
+  if (t.length < 160) return [t];
+  const sentences = t.split(/(?<=[.!?])\s+/);
+  if (sentences.length < 2) return [t];
+  const mid = Math.ceil(sentences.length / 2);
+  return [sentences.slice(0, mid).join(' ').trim(), sentences.slice(mid).join(' ').trim()].filter(Boolean);
+}
+// Delay de envio realista e variável (ms): base + proporcional ao tamanho + jitter.
+function humanDelayMs(text) {
+  const words = (text || '').trim().split(/\s+/).filter(Boolean).length;
+  const base = 8000, typing = words * 380, jitter = Math.floor(Math.random() * 25000);
+  return Math.min(base + typing + jitter, 240000);
+}
+
 const WA_SYSTEM = 'Você é um SDR brasileiro especialista em prospecção por WhatsApp. Escreve mensagens curtas, humanas e específicas para conseguir UMA reunião com a pessoa. Nunca soa como robô, template ou marketing genérico. Segue à risca as regras dadas pelo revisor humano. REGRA ABSOLUTA: sua resposta é SEMPRE o texto de UMA mensagem de WhatsApp pronta para enviar ao lead — você NUNCA faz perguntas, NUNCA pede esclarecimento, NUNCA comenta sobre a tarefa nem fala com o operador. Se faltar alguma informação, use o melhor palpite pelo contexto e escreva a mensagem mesmo assim.';
 
-function buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product, docsContext }) {
+function buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product, docsContext, sender, humanBlock }) {
+  const senderBlock = buildSenderBlock(sender);
   const who = `${contact?.name || 'o contato'}${contact?.role ? ` (${contact.role})` : ''}${company ? ` — empresa ${company.name}${company.sector ? `, setor ${company.sector}` : ''}` : ''}`;
 
   // Bloco de REGRAS APRENDIDAS estruturado (v2), separando global x canal.
@@ -1841,7 +2018,7 @@ A mensagem acima foi reprovada. Corrija EXATAMENTE isto: "${observation}".
 Mude só o necessário para atender a correção — mantenha o mesmo assunto/produto e objetivo (a não ser que a correção seja justamente sobre trocar o assunto).`
   : `# O que fazer
 NÃO houve reprovação. Gere uma VARIAÇÃO diferente da mensagem acima: mesmo assunto, mesmo produto/oferta e mesmo objetivo — mudando apenas a abordagem e a redação (abertura, ângulo, tom, estrutura). NÃO troque o tema nem remova o produto/assunto que a mensagem atual menciona.`}
-${contact?.context ? `\n# Sobre a pessoa (personalize)\n${contact.context}\n` : ''}${rulesBlock}${histBlock}${negBlock}${docsBlock}
+${senderBlock}${contact?.context ? `\n# Sobre a pessoa (personalize)\n${contact.context}\n` : ''}${rulesBlock}${histBlock}${negBlock}${docsBlock}${humanBlock || ''}
 # Regras
 - Mantenha o assunto/produto da mensagem atual.
 - Não pareça IA nem template; soe como um humano no WhatsApp.
@@ -1880,8 +2057,10 @@ function buildCompanyDocsContext(db, companyId, terms, budget = Math.floor(MAX_P
 }
 
 async function generateWhatsapp(company, contact, observation, ctx, previous, product) {
-  const { rules, negExamples, threadHistory, docsContext } = ctx || {};
-  const userPrompt = buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product, docsContext });
+  const { rules, negExamples, threadHistory, docsContext, sender } = ctx || {};
+  const profile = (ctx && ctx.profile) || styleProfile();
+  const humanBlock = humanizationBlock(profile);
+  const userPrompt = buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product, docsContext, sender , humanBlock });
   let out = (await callClaude(WA_SYSTEM, userPrompt, 400) || '').trim();
   if (!out || /^\[ERRO API/.test(out)) return { error: 'Falha ao gerar (IA indisponível)' };
   if (looksLikeMeta(out)) {
@@ -1891,7 +2070,8 @@ async function generateWhatsapp(company, contact, observation, ctx, previous, pr
     if (retry && !/^\[ERRO API/.test(retry) && !looksLikeMeta(retry)) out = retry;
     else if (previous) out = previous; // último recurso: mantém a mensagem atual (nunca devolve pergunta)
   }
-  return { text: out, prompt: userPrompt };
+  out = humanizeWhatsapp(out, profile);
+  return { text: out, prompt: userPrompt, profile };
 }
 
 // "Gerar de novo": reescreve a mensagem usando a observação do avaliador + o que a IA
@@ -1912,6 +2092,8 @@ app.post('/api/messages/:id/regenerate', async (req, res) => {
     threadHistory: buildThreadHistory(db, msg.thread_id, msg.seq_no),
     // (#8) injeta material do produto vinculado às oportunidades desta empresa
     docsContext: buildCompanyDocsContext(db, msg.company_id, [msg.product, contact?.role, company?.sector].filter(Boolean)),
+    // identidade do remetente conforme o perfil (marketing x vendas) do usuário logado
+    sender: getSessionUser(db, req),
   };
   db.close();
 
@@ -2356,6 +2538,9 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
   const productValue = req.body.product_value || 'solução de automação de vendas com IA';
   const golden = db.prepare('SELECT title, content FROM golden_cases WHERE score>=4 LIMIT 3').all();
   const socialProof = golden.map(g => `- ${g.title}: ${g.content.substring(0, 80)}...`).join('\n');
+  // Identidade do remetente (marketing x vendas) conforme o usuário logado.
+  const sender = getSessionUser(db, req);
+  const senderInfo = senderLine(sender);
   db.close();
 
   // Prepara o contexto conforme o TIPO DE CALL (cold dispara busca; warm/frozen não).
@@ -2409,6 +2594,7 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
 
     const prompt = `
 ${callGuidance}
+${senderInfo}
 Empresa: ${company.name} (setor: ${company.sector || 'não definido'})
 Contato: ${contact.name}, cargo ${contact.role}
 Gancho: ${hook}
@@ -2675,14 +2861,15 @@ function latestThreadForContact(db, contactId) {
 // Monta o userPrompt de uma mensagem da sequência (RLHF v2 — seções rotuladas).
 // Usado na geração real e no preview. `rules`/`posExamples`/`negExamples`/`threadHistory`
 // são opcionais; quando ausentes as seções são omitidas (funciona na 1ª e na 5ª mensagem).
-function buildSequenceUserPrompt({ companyName, sector, contactName, role, hook, productValue, day, channel, socialProof, learned, rules, posExamples, negExamples, threadHistory }) {
+function buildSequenceUserPrompt({ companyName, sector, contactName, role, hook, productValue, day, channel, socialProof, learned, rules, posExamples, negExamples, threadHistory, sender }) {
   const roleInfo = ROLE_PROFILES[role] || ROLE_PROFILES.other;
   const desc = CHANNEL_DESC[channel] || channel;
   const sections = [];
+  const senderInfo = senderLine(sender);
 
   sections.push(
 `## BRIEFING
-Empresa: ${companyName} (setor: ${sector || 'não definido'})
+${senderInfo ? senderInfo + '\n' : ''}Empresa: ${companyName} (setor: ${sector || 'não definido'})
 Contato: ${contactName}, cargo ${role}
 Produto: ${productValue}
 Gancho de pesquisa: ${hook}
@@ -3366,6 +3553,72 @@ app.post('/api/messages/inbound', (req, res) => {
   } finally { db.close(); }
 });
 
+// ── Teste cego anti-detecção de bot (blind Turing test) ───────────────────────
+// Semeia mensagens reais x geradas pela automação, coleta palpites e mede a taxa
+// de acerto. Sucesso = acerto agregado < 50% (indistinguível de humano).
+app.post('/api/blindtest/seed', (req, res) => {
+  const db = getDb();
+  try {
+    const reals = Array.isArray(req.body.real) ? req.body.real : [];
+    const autos = Array.isArray(req.body.auto) ? req.body.auto : [];
+    const batch = (req.body.batch || new Date().toISOString().slice(0, 16)).toString();
+    if (req.body.reset) db.exec('DELETE FROM blind_test_guesses; DELETE FROM blind_test_items;');
+    const ins = db.prepare('INSERT INTO blind_test_items (source, text, batch) VALUES (?,?,?)');
+    let n = 0;
+    const add = (arr, source) => arr.map(t => String(t || '').trim()).filter(Boolean)
+      .forEach(t => { ins.run(source, t, batch); n++; });
+    db.exec('BEGIN');
+    try { add(reals, 'real'); add(autos, 'auto'); db.exec('COMMIT'); }
+    catch (e) { db.exec('ROLLBACK'); throw e; }
+    res.json({ ok: true, inserted: n, batch });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  finally { db.close(); }
+});
+
+// Devolve os itens embaralhados SEM revelar a origem (para o testador palpitar).
+app.get('/api/blindtest/items', (req, res) => {
+  const db = getDb();
+  try {
+    const rows = db.prepare('SELECT id, text FROM blind_test_items ORDER BY (id * 2654435761) % 1000003').all();
+    res.json({ items: rows, total: rows.length });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  finally { db.close(); }
+});
+
+// Registra um palpite e marca acerto comparando com a origem real (server-side).
+app.post('/api/blindtest/guess', (req, res) => {
+  const db = getDb();
+  try {
+    const { item_id, tester_name, guess } = req.body || {};
+    if (!item_id || !tester_name || !['real', 'auto'].includes(guess))
+      return res.status(400).json({ error: 'item_id, tester_name e guess (real|auto) obrigatórios' });
+    const item = db.prepare('SELECT source FROM blind_test_items WHERE id=?').get(item_id);
+    if (!item) return res.status(404).json({ error: 'Item não encontrado' });
+    const correct = item.source === guess ? 1 : 0;
+    db.prepare('INSERT INTO blind_test_guesses (item_id, tester_name, guess, correct) VALUES (?,?,?,?)')
+      .run(item_id, String(tester_name).trim(), guess, correct);
+    res.json({ ok: true, correct: !!correct });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  finally { db.close(); }
+});
+
+// Resultados agregados + por testador. success = taxa agregada < 0.5.
+app.get('/api/blindtest/results', (req, res) => {
+  const db = getDb();
+  try {
+    const agg = db.prepare('SELECT COUNT(*) total, COALESCE(SUM(correct),0) hits FROM blind_test_guesses').get();
+    const perTester = db.prepare(`SELECT tester_name, COUNT(*) total, COALESCE(SUM(correct),0) hits
+      FROM blind_test_guesses GROUP BY tester_name ORDER BY tester_name`).all();
+    const rate = agg.total ? agg.hits / agg.total : 0;
+    res.json({
+      total: agg.total, hits: agg.hits, accuracy: rate,
+      success: agg.total > 0 && rate < 0.5,
+      testers: perTester.map(t => ({ ...t, accuracy: t.total ? t.hits / t.total : 0 })),
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  finally { db.close(); }
+});
+
 app.post('/api/messages/:id/send', (req, res) => {
   const db = getDb();
   const msg = db.prepare('SELECT * FROM messages WHERE id=?').get(req.params.id);
@@ -3376,24 +3629,40 @@ app.post('/api/messages/:id/send', (req, res) => {
   }
   db.close();
   broadcastInboxUpdate();
-  const delays = { linkedin: '2–4 min', email: '0–30 seg', whatsapp: '1–3 min' };
-  res.json({ ok: true, simulated_delay: delays[msg.channel] || '1–2 min', note: 'Delay simulado' });
+  const delayMs = humanDelayMs(msg.content || '');
+  const bubbles = splitBubbles(msg.content || '');
+  res.json({ ok: true, delay_ms: delayMs, delay_label: `${Math.round(delayMs / 1000)}s`, bubbles: bubbles.length, note: 'Delay humano variável aplicado' });
 });
 
 // Documents
 app.get('/api/documents', (req, res) => {
   const db = getDb();
-  res.json(db.prepare('SELECT id,name,created_at,length(content) as size FROM documents ORDER BY created_at DESC').all());
+  res.json(db.prepare('SELECT id,name,source_type,created_at,length(content) as size FROM documents ORDER BY created_at DESC').all());
   db.close();
 });
 
 // Retorna um documento completo (com conteúdo) para visualização.
 app.get('/api/documents/:id', (req, res) => {
   const db = getDb();
-  const doc = db.prepare('SELECT id,name,content,created_at FROM documents WHERE id=?').get(req.params.id);
+  const doc = db.prepare('SELECT id,name,content,source_type,created_at FROM documents WHERE id=?').get(req.params.id);
   db.close();
   if (!doc) return res.status(404).json({ error: 'Documento não encontrado' });
   res.json(doc);
+});
+
+// Edita um documento existente (nome e/ou conteúdo). Recalcula o hash de dedup (#3).
+app.put('/api/documents/:id', (req, res) => {
+  const { name, content } = req.body || {};
+  if (!name || !content) return res.status(400).json({ error: 'name e content são obrigatórios' });
+  const db = getDb();
+  const doc = db.prepare('SELECT id FROM documents WHERE id=?').get(req.params.id);
+  if (!doc) { db.close(); return res.status(404).json({ error: 'Documento não encontrado' }); }
+  const hash = sha256(content);
+  const clash = db.prepare('SELECT id,name FROM documents WHERE content_hash=? AND id<>?').get(hash, req.params.id);
+  if (clash) { db.close(); return res.status(409).json({ duplicate: true, id: clash.id, name: clash.name, error: `Outro documento idêntico já existe: "${clash.name}"` }); }
+  db.prepare('UPDATE documents SET name=?, content=?, content_hash=? WHERE id=?').run(name, content, hash, req.params.id);
+  db.close();
+  res.json({ ok: true, id: Number(req.params.id) });
 });
 
 // Salva documento (texto manual OU conteúdo já extraído no preview #6).
@@ -3480,9 +3749,22 @@ app.post('/api/documents/upload', uploadPdf.single('file'), async (req, res) => 
 app.post('/api/rag/query', async (req, res) => {
   const { query, storytelling } = req.body;
   const db = getDb();
-  const docs = db.prepare('SELECT name,content FROM documents').all();
+  const allDocs = db.prepare('SELECT name,content FROM documents').all();
   db.close();
-  if (!docs.length) return res.json({ answer: 'Nenhum documento carregado.' });
+  if (!allDocs.length) return res.json({ answer: 'Nenhum documento carregado.' });
+
+  // (#10) Ranqueia os documentos por relevância à pergunta e usa só os melhores,
+  // dando mais orçamento de contexto a cada um (em vez de dividir entre todos).
+  const rankTerms = String(query || '').toLowerCase().split(/\s+/).filter(t => t.length >= 4);
+  const scoredDocs = allDocs.map(d => {
+    const low = String(d.content || '').toLowerCase();
+    let score = 0;
+    for (const t of rankTerms) { let idx = low.indexOf(t); while (idx !== -1) { score++; idx = low.indexOf(t, idx + t.length); } }
+    return { ...d, score };
+  });
+  const relevant = scoredDocs.filter(d => d.score > 0).sort((a, b) => b.score - a.score);
+  const TOP_K = 5;
+  const docs = (relevant.length ? relevant : scoredDocs).slice(0, TOP_K);
 
   // (#2) seleciona os trechos relevantes por documento (em vez de cortar em 2000).
   const terms = String(query || '').split(/\s+/);
@@ -3929,6 +4211,7 @@ app.get('/api/learn/prompt-preview', (req, res) => {
       day: (SEQUENCE_CHANNELS.find(c => c.channel === channel) || {}).day || 1,
       channel, socialProof, rules, posExamples, negExamples,
       threadHistory: '{histórico da thread — enviadas + respostas do lead}',
+      sender: getSessionUser(db, req),
     });
     const hasLearned = !!(rules.global.length || rules.channel.length || posExamples || negExamples);
     db.close();
@@ -3940,20 +4223,31 @@ app.get('/api/learn/prompt-preview', (req, res) => {
 });
 
 // Gerenciamento de usuários
+const VALID_USER_TYPES = ['vendas', 'marketing'];
+
 app.get('/api/users', (req, res) => {
   const db = getDb();
-  res.json(db.prepare('SELECT id, username, name, created_at FROM users ORDER BY created_at DESC').all());
+  res.json(db.prepare('SELECT id, username, name, user_type, company_name, created_at FROM users ORDER BY created_at DESC').all());
   db.close();
 });
 
 app.post('/api/users', (req, res) => {
   const { username, password, name } = req.body;
+  const userType = VALID_USER_TYPES.includes(req.body.user_type) ? req.body.user_type : 'vendas';
+  const companyName = (req.body.company_name || '').trim();
   if (!username || !password) return res.status(400).json({ error: 'Usuário e senha são obrigatórios' });
+  if (userType === 'marketing' && !companyName) {
+    return res.status(400).json({ error: 'Perfil marketing exige o nome da empresa/marca' });
+  }
+  if (userType === 'vendas' && !(name || '').trim()) {
+    return res.status(400).json({ error: 'Perfil vendas exige o nome do vendedor' });
+  }
   const db = getDb();
   const exists = db.prepare('SELECT id FROM users WHERE username=?').get(username);
   if (exists) { db.close(); return res.status(409).json({ error: 'Usuário já existe' }); }
   const hash = bcrypt.hashSync(password, 10);
-  const r = db.prepare('INSERT INTO users (username, password, name) VALUES (?,?,?)').run(username, hash, name || '');
+  const r = db.prepare('INSERT INTO users (username, password, name, user_type, company_name) VALUES (?,?,?,?,?)')
+    .run(username, hash, name || '', userType, companyName);
   db.close();
   res.json({ id: r.lastInsertRowid });
 });
