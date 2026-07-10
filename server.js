@@ -2953,6 +2953,8 @@ app.post('/api/companies/:id/research', async (req, res) => {
   }
 
   const roleInfo = ROLE_PROFILES[contact?.role] || ROLE_PROFILES.other;
+  const callType = normalizeCallType(contact?.call_type);
+  const manualContext = (contact?.context || '').trim();
   const productValue = req.body.product_value || 'solução de automação de vendas com IA';
   const golden = db.prepare('SELECT content FROM golden_cases ORDER BY score DESC LIMIT 2').all();
   const goldenCtx = golden.map(g => g.content).join('\n');
@@ -2963,13 +2965,68 @@ app.post('/api/companies/:id/research', async (req, res) => {
   const senderBlock = buildSenderBlock(sender);
   db.close();
 
-  const prompt = `
+  // (#gancho) Comportamento por TIPO DE LEAD — o "Gerar Gancho" respeita o call_type:
+  //  - cold  : pesquisa na WEB + base e monta o gancho a partir de fatos reais.
+  //  - warm  : SEM busca; usa EXCLUSIVAMENTE o contexto manual do operador (exige contexto).
+  //  - frozen: SEM busca; mensagem de RECONEXÃO a partir do contexto/histórico já existente.
+  let result;
+  if (callType === 'warm') {
+    if (!manualContext) {
+      return res.status(400).json({
+        error: 'Lead warm sem contexto: preencha o contexto do lead antes de gerar o gancho (warm não faz busca automática).',
+        code: 'WARM_CONTEXT_REQUIRED',
+      });
+    }
+    console.log(`[gancho-warm] contato ${contact?.id} (${contact?.name}) — usando contexto manual do operador, SEM busca.`);
+    const warmPrompt = `
+Escreva a PRIMEIRA mensagem (gancho) de WhatsApp para um lead JÁ QUALIFICADO (warm).
+${senderBlock}
+Use EXCLUSIVAMENTE o contexto abaixo, fornecido pelo operador. NÃO invente fatos externos, NÃO cite notícias e NÃO faça pesquisa — apenas o que está no contexto.
+Empresa: "${company.name}"${company.sector ? ' (setor: ' + company.sector + ')' : ''}
+Contato: ${contact.name} (${contact.role})
+Produto sendo vendido: ${productValue}
+Perfil do cargo: foco em ${roleInfo.focus}, tom ${roleInfo.tone}
+Contexto do lead (fornecido pelo operador):
+${manualContext}
+${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
+${learned ? '\nREGRAS OBRIGATÓRIAS aprendidas com o revisor humano (o hook DEVE cumprir todas):\n' + learned + '\n' : ''}
+
+Gere um JSON PLANO e CONCISO com estas chaves:
+- "hook": uma única string (máx 2 linhas) com FOCO no produto "${productValue}", tom casual de WhatsApp, sem travessão "—", sem jargão de marketing e sem placeholders como "[seu nome]".
+- "pain_points": array de exatamente 3 strings (dores específicas do setor/porte).
+- "value_proposition": uma única string.
+Não aninhe objetos. Responda APENAS com JSON válido, sem markdown, sem comentários.`;
+    result = await callClaude('Você é copywriter B2B especialista em sequências de WhatsApp.', warmPrompt, 800);
+  } else if (callType === 'frozen') {
+    console.log(`[gancho-frozen] contato ${contact?.id} (${contact?.name}) — reconexão, sem busca nova.`);
+    const priorCtx = (company.research_context || manualContext || '').toString().trim();
+    const frozenPrompt = `
+Escreva uma mensagem de RECONEXÃO (gancho) de WhatsApp para um lead que JÁ CONHECE a empresa (frozen).
+${senderBlock}
+NÃO se apresente como primeiro contato — retome o relacionamento existente de forma natural. NÃO faça pesquisa nova.
+Empresa: "${company.name}"${company.sector ? ' (setor: ' + company.sector + ')' : ''}
+Contato: ${contact.name} (${contact.role})
+Produto sendo vendido: ${productValue}
+Contexto/histórico já existente com este lead:
+${priorCtx || '(sem contexto prévio registrado — retome de forma leve, sem inventar fatos)'}
+${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
+${learned ? '\nREGRAS OBRIGATÓRIAS aprendidas com o revisor humano (o hook DEVE cumprir todas):\n' + learned + '\n' : ''}
+
+Gere um JSON PLANO e CONCISO com estas chaves:
+- "hook": uma única string (máx 2 linhas) de reconexão, com FOCO no produto "${productValue}", tom casual de WhatsApp, sem travessão "—", sem jargão e sem placeholders.
+- "pain_points": array de exatamente 3 strings.
+- "value_proposition": uma única string.
+Não aninhe objetos. Responda APENAS com JSON válido, sem markdown, sem comentários.`;
+    result = await callClaude('Você é copywriter B2B especialista em reconexão de leads no WhatsApp.', frozenPrompt, 800);
+  } else {
+    console.log(`[gancho-cold] contato ${contact?.id} (${contact?.name}) — lead novo; pesquisando na web + base.`);
+    const prompt = `
 Pesquise na WEB informações REAIS e recentes sobre a empresa "${company.name}"${company.sector ? ' (setor: ' + company.sector + ')' : ''}${contact ? ' e, se possível, sobre o contato ' + contact.name + ' (' + contact.role + ')' : ''}. Procure por: notícias recentes, expansões, contratações, rodadas de investimento, lançamentos de produto, parcerias e desafios do setor.
 
 Produto sendo vendido: ${productValue}
 Perfil do cargo: foco em ${roleInfo.focus}, tom ${roleInfo.tone}
 ${senderBlock}
-${contact?.context ? 'Contexto pessoal do lead (informado pelo operador — use para deixar o gancho mais pessoal e menos "de IA"):\n' + contact.context : ''}
+${manualContext ? 'Contexto pessoal do lead (informado pelo operador — use para deixar o gancho mais pessoal e menos "de IA"):\n' + manualContext : ''}
 ${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
 ${learned ? '\nREGRAS OBRIGATÓRIAS aprendidas com o revisor humano — o "hook" DEVE cumprir TODAS, sem exceção. Uma regra do tipo "não falar sobre X" significa que o tema X não pode aparecer no hook de forma nenhuma (nem indireta, nem sinônimo):\n' + learned + '\n' : ''}
 
@@ -2983,8 +3040,8 @@ Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com
 Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em tendências reais do setor e indique isso.
 No campo "hook": não use travessão "—", nem jargão de marketing (solução, otimizar, potencializar, etc.); escreva em tom casual de WhatsApp. PROIBIDO usar placeholders/campos a preencher como "[seu nome]", "[nome]", "{empresa}" ou "<link>": se não souber um dado, omita-o e reescreva sem espaço reservado.
 Responda APENAS com JSON válido, sem markdown, sem comentários.`;
-
-  const result = await callClaudeWithSearch('Você é assistente de pesquisa de vendas B2B que usa busca na web para encontrar informações reais e atuais sobre empresas e seus executivos.', prompt, 2600);
+    result = await callClaudeWithSearch('Você é assistente de pesquisa de vendas B2B que usa busca na web para encontrar informações reais e atuais sobre empresas e seus executivos.', prompt, 2600);
+  }
   let hook, ctx, painPoints = [];
   let raw = (result || '').replace(/```json\s*|\s*```/g, '').trim();
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
