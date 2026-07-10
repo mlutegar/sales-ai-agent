@@ -2957,6 +2957,10 @@ app.post('/api/companies/:id/research', async (req, res) => {
   const golden = db.prepare('SELECT content FROM golden_cases ORDER BY score DESC LIMIT 2').all();
   const goldenCtx = golden.map(g => g.content).join('\n');
   const learned = buildLearnedContext(db, 'whatsapp', contact?.role || 'other');
+  // Identidade do remetente (vendas x marketing) do usuário logado — para o gancho
+  // se apresentar/assinar com o nome do vendedor em vez de sair sem identidade.
+  const sender = getSessionUser(db, req);
+  const senderBlock = buildSenderBlock(sender);
   db.close();
 
   const prompt = `
@@ -2964,13 +2968,14 @@ Pesquise na WEB informações REAIS e recentes sobre a empresa "${company.name}"
 
 Produto sendo vendido: ${productValue}
 Perfil do cargo: foco em ${roleInfo.focus}, tom ${roleInfo.tone}
+${senderBlock}
 ${contact?.context ? 'Contexto pessoal do lead (informado pelo operador — use para deixar o gancho mais pessoal e menos "de IA"):\n' + contact.context : ''}
 ${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
 ${learned ? '\nREGRAS OBRIGATÓRIAS aprendidas com o revisor humano — o "hook" DEVE cumprir TODAS, sem exceção. Uma regra do tipo "não falar sobre X" significa que o tema X não pode aparecer no hook de forma nenhuma (nem indireta, nem sinônimo):\n' + learned + '\n' : ''}
 
 Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com exatamente estas chaves:
 - "research_context": array de 2-3 strings curtas (uma frase cada), cada uma com um fato REAL encontrado
-- "hook": uma única string (máx 2 linhas) cujo FOCO é a proposta de valor concreta de "${productValue}". O produto DEVE aparecer explicitamente e ser o assunto principal da oferta; use um fato real da empresa apenas como ponte de abertura, nunca como tema central. Não termine falando só da empresa.
+- "hook": uma única string (máx 2 linhas) cujo FOCO é a proposta de valor concreta de "${productValue}". O produto DEVE aparecer explicitamente e ser o assunto principal da oferta; use um fato real da empresa apenas como ponte de abertura, nunca como tema central. Não termine falando só da empresa. Siga o bloco REMETENTE acima: havendo um nome de vendedor definido, abra se apresentando pelo primeiro nome dele (ex.: "Oi, aqui é a Marina, ...") — nunca use placeholder como "[seu nome]".
 - "pain_points": array de exatamente 3 strings (dores específicas do setor/porte)
 - "value_proposition": uma única string
 - "sources": array de URLs usados como fonte (strings)
