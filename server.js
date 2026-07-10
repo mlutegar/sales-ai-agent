@@ -637,6 +637,10 @@ function initDb() {
   addColumnIfNotExists(db, 'messages', 'comment_scope',"TEXT DEFAULT 'global'");
   addColumnIfNotExists(db, 'messages', 'versions',     "TEXT DEFAULT '[]'");
   addColumnIfNotExists(db, 'messages', 'product',      "TEXT DEFAULT ''");
+  // Biblioteca de ganchos: rastreia qual arquétipo gerou a 1ª mensagem — base do
+  // loop de aprendizado (#1), anti-repetição (#2) e das métricas de naturalidade (#7).
+  addColumnIfNotExists(db, 'messages', 'hook_id',       "INTEGER");
+  addColumnIfNotExists(db, 'messages', 'hook_category', "TEXT DEFAULT ''");
   // RLHF v2: threading (histórico da conversa) + tipagem de sinal de feedback
   addColumnIfNotExists(db, 'messages', 'thread_id',    "INTEGER");
   addColumnIfNotExists(db, 'messages', 'seq_no',       "INTEGER");
@@ -2072,20 +2076,41 @@ function getSessionUser(db, req) {
   catch { return null; }
 }
 
+// Nomes genéricos/de sistema que NÃO devem virar assinatura (soam robóticos: "— Administrador").
+const GENERIC_SENDER_NAMES = /^(admin|administrador|administrator|usuario|usuário|user|teste|test|root|suporte|sistema|system|demo|operador)$/i;
+function isGenericSenderName(name) {
+  const n = String(name || '').trim();
+  if (!n) return true;
+  return GENERIC_SENDER_NAMES.test(n) || GENERIC_SENDER_NAMES.test(n.split(/\s+/)[0]);
+}
+// Resolve o melhor nome pessoal do vendedor: prioriza signature_name; ignora nome genérico.
+function resolveSalesName(user) {
+  const sig = (user?.signature_name || '').trim();
+  if (sig && !isGenericSenderName(sig)) return sig;
+  const nm = (user?.name || '').trim();
+  if (nm && !isGenericSenderName(nm)) return nm;
+  return null; // sem nome pessoal utilizável → não assinar com rótulo genérico
+}
+
 // Monta o bloco de prompt que define QUEM assina/apresenta a mensagem:
-// - vendas    → nome próprio do vendedor
+// - vendas    → nome próprio do vendedor (nunca um nome genérico/de sistema)
 // - marketing → nome da empresa/marca (nunca nome de pessoa)
 function buildSenderBlock(user) {
   if (!user) return '';
   const type = (user.user_type || 'vendas').toLowerCase();
   if (type === 'marketing') {
-    const brand = (user.company_name || '').trim() || user.name || 'nossa empresa';
+    const brand = (user.company_name || '').trim() || (isGenericSenderName(user.name) ? '' : user.name) || 'nossa empresa';
     const sig = (user.signature_name || '').trim();
     const assinatura = sig ? `"${brand} — ${sig}" (a marca em primeiro lugar; a pessoa apenas complementa)` : `"${brand}" ou "Equipe ${brand}"`;
     return `\n# REMETENTE (quem apresenta/assina — OBRIGATÓRIO)
 Você escreve em nome da EMPRESA "${brand}" (equipe de marketing). Apresente-se SEMPRE como a empresa "${brand}" — NUNCA use um nome de pessoa isolado como remetente. Assine como ${assinatura}.\n`;
   }
-  const full = (user.name || '').trim() || user.username || 'o vendedor';
+  const full = resolveSalesName(user);
+  if (!full) {
+    // Sem nome pessoal decente: proíbe assinatura genérica ("— Administrador") que soa a bot.
+    return `\n# REMETENTE (quem assina — OBRIGATÓRIO)
+Escreva como uma pessoa real da equipe comercial. NÃO assine com nome de usuário/cargo genérico (ex.: "Administrador", "Suporte", "Sistema") e NÃO use assinatura corporativa. Encerre de forma natural e humana, sem bloco de assinatura.\n`;
+  }
   const first = full.split(/\s+/)[0];
   return `\n# REMETENTE (quem apresenta/assina — OBRIGATÓRIO)
 Você escreve em nome de ${full}, um vendedor. Ao se apresentar, use o primeiro nome "${first}". Assine/encerre como ${full}. NUNCA se apresente como uma empresa no lugar do seu nome.\n`;
@@ -2096,12 +2121,13 @@ function senderLine(user) {
   if (!user) return '';
   const type = (user.user_type || 'vendas').toLowerCase();
   if (type === 'marketing') {
-    const brand = (user.company_name || '').trim() || user.name || 'nossa empresa';
+    const brand = (user.company_name || '').trim() || (isGenericSenderName(user.name) ? '' : user.name) || 'nossa empresa';
     const sig = (user.signature_name || '').trim();
     const assina = sig ? `"${brand} — ${sig}"` : `"${brand}"`;
     return `Remetente: empresa "${brand}" (perfil marketing — apresente-se como a EMPRESA, nunca como pessoa isolada; assine ${assina})`;
   }
-  const full = (user.name || '').trim() || user.username || 'o vendedor';
+  const full = resolveSalesName(user);
+  if (!full) return 'Remetente: pessoa real da equipe comercial — NÃO assine com nome genérico/de sistema ("Administrador", "Suporte") nem assinatura corporativa; encerre de forma natural, sem bloco de assinatura.';
   return `Remetente: ${full} (perfil vendas — apresente-se pelo primeiro nome e assine como ${full})`;
 }
 
@@ -2889,19 +2915,29 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
 
   // Biblioteca de ganchos: few-shot que orienta a 1ª mensagem a soar humana e situacional.
   // Operador pode fixar um gancho específico via hook_id ou filtrar por categoria (hook_category).
+  // #4 coerência: categorias de encontro pessoal (feira/indicação/comunidade) só entram quando
+  //    há contexto real que as sustente — manualContext do operador OU frozen (já se conhecem).
+  // #2 rotação: exclui ganchos já usados nas últimas mensagens desta empresa.
   let hookExamples = '';
+  let selectedHooks = [];
+  let primaryHook = null;
   try {
     const dbh = getDb();
+    const hasSupport = !!manualContext || callType === 'frozen';
     if (req.body.hook_id) {
-      const picked = dbh.prepare('SELECT situation, product_link, example_text FROM hook_library WHERE id=? AND active=1').get(req.body.hook_id);
+      const picked = dbh.prepare('SELECT id, situation, product_link, example_text, category FROM hook_library WHERE id=? AND active=1').get(req.body.hook_id);
       if (picked) {
+        selectedHooks = [picked];
         hookExamples = `## GANCHO ESCOLHIDO (use como base da abertura)\n- Situação: ${picked.situation}${picked.product_link ? ` → ${picked.product_link}` : ''}\n  Exemplo: """${picked.example_text}"""\n` +
           'Adapte ao contexto real deste lead — imite o tom, não copie literal.';
       }
     }
-    if (!hookExamples) {
-      hookExamples = buildHookExamples(dbh, { callType, category: req.body.hook_category || null, limit: 3 });
+    if (!selectedHooks.length) {
+      const excludeIds = recentHookIdsForCompany(dbh, req.params.id, 5);
+      selectedHooks = selectHooks(dbh, { callType, category: req.body.hook_category || null, limit: 3, hasSupport, excludeIds });
+      hookExamples = renderHookExamples(selectedHooks);
     }
+    primaryHook = selectedHooks[0] || null;
     dbh.close();
   } catch (_) {}
 
@@ -2955,17 +2991,38 @@ Escreva APENAS o texto da mensagem, sem explicações.
 ${painCTA}
 CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO tente vender diretamente.`;
 
-      const content = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', prompt, 400);
+      let content = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', prompt, 400);
+
+      // (#3) Auto-crítica: a 1ª mensagem é o ponto mais crítico. Antes de gravar, um juiz
+      // avalia se ela "não parece bot" (situacional, personalizada, sem clichê). Se reprovar,
+      // regenera UMA vez com o retorno do juiz anexado ao prompt. Falha aberta se a IA cair.
+      if (isFirst) {
+        try {
+          const crit = await scoreMessageStyle(content, {
+            company: company.name, sector: company.sector, role: contact.role, product: productValue,
+          });
+          if (crit && crit.verdict && !['passou', 'erro'].includes(crit.verdict)) {
+            const fixPrompt = prompt +
+              `\n\n## REVISÃO (a versão anterior foi REPROVADA por soar robótica/genérica)\nMotivo do revisor: ${crit.notes || 'faltou personalização/abertura situacional'}.\n` +
+              'Reescreva a mensagem corrigindo isso: abra por uma situação/contexto concreto e soe humana. Retorne APENAS a mensagem.';
+            const retry = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', fixPrompt, 400);
+            if (retry && retry.trim()) content = retry;
+          }
+        } catch (e) { console.warn('[first-msg critique] pulada:', e.message); }
+      }
 
       // (#1) Detecta afirmações checáveis e decide se precisa de revisão factual.
       const factClaims = detectFactClaims(content);
       const needsFactCheck = factClaims.length > 0 ? 1 : 0;
+      // Rastreia o arquétipo de gancho que gerou a 1ª mensagem (loop de aprendizado #1 / métricas #7).
+      const usedHookId = isFirst && primaryHook ? primaryHook.id : null;
+      const usedHookCat = isFirst && primaryHook ? (primaryHook.category || '') : '';
 
       const db3 = getDb();
       const r = db3.prepare(
-        "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, created_at, sources, fact_claims, needs_fact_check, variant_group, variant_no, variant_angle) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,?,?,?)"
+        "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, created_at, sources, fact_claims, needs_fact_check, variant_group, variant_no, variant_angle, hook_id, hook_category) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,?,?,?,?,?)"
       ).run(contact.id, req.params.id, tpl.channel, tpl.day, tpl.type, content, content, 'pending',
-        JSON.stringify(researchSources), JSON.stringify(factClaims), needsFactCheck, variantGroup, variantNo, angle.label);
+        JSON.stringify(researchSources), JSON.stringify(factClaims), needsFactCheck, variantGroup, variantNo, angle.label, usedHookId, usedHookCat);
       db3.close();
       results.push({
         id: r.lastInsertRowid, channel: tpl.channel, day: tpl.day, content, status: 'pending', approved: 0,
@@ -3020,40 +3077,66 @@ const CHANNEL_DESC = {
 
 // Monta o bloco de "observações / estilo aprendido" (RLHF) que é injetado no prompt.
 // Reúne: regras de estilo (learned_patterns), exemplos aprovados e correções/comentários humanos.
-// Monta o bloco de BIBLIOTECA DE GANCHOS injetado no prompt da 1ª mensagem.
-// Seleciona arquétipos ativos (prioriza o call_type do lead, com fallback geral)
-// e instrui o modelo a IMITAR O TOM situacional — nunca copiar o exemplo ao pé da letra.
-function buildHookExamples(db, { callType = 'cold', category = null, limit = 3 } = {}) {
+// Categorias que afirmam um encontro/relacionamento PESSOAL ("te vi na feira",
+// "fulano me indicou", "somos do mesmo grupo"). Só podem ser usadas quando há
+// contexto real que as sustente (evita a IA inventar encontros — coerência #4).
+const HOOK_EVIDENCE_LIGHT = ['evento', 'indicacao', 'comunidade'];
+
+// Seleciona arquétipos de gancho aplicando:
+//  #4 coerência  → sem suporte real (hasSupport=false), remove categorias de encontro pessoal
+//  #2 rotação    → exclui ganchos já usados recentemente por esta empresa (excludeIds)
+//  #1 ranking    → ORDER BY score (o score é ajustado pelo feedback humano, ver rota /score)
+function selectHooks(db, { callType = 'cold', category = null, limit = 3, hasSupport = true, excludeIds = [] } = {}) {
   try {
-    let rows = [];
-    if (category) {
-      rows = db.prepare(
-        `SELECT situation, product_link, example_text FROM hook_library
-         WHERE active=1 AND category=? AND (call_type=? OR call_type='' OR call_type IS NULL)
-         ORDER BY score DESC, id DESC LIMIT ?`
-      ).all(category, callType, limit);
-    }
+    const blocked = hasSupport ? [] : HOOK_EVIDENCE_LIGHT;
+    const runQuery = (cat) => {
+      const where = ['active=1', "(call_type=? OR call_type='' OR call_type IS NULL)"];
+      const params = [callType];
+      if (cat) { where.push('category=?'); params.push(cat); }
+      if (blocked.length) { where.push(`category NOT IN (${blocked.map(() => '?').join(',')})`); params.push(...blocked); }
+      if (excludeIds.length) { where.push(`id NOT IN (${excludeIds.map(() => '?').join(',')})`); params.push(...excludeIds); }
+      return db.prepare(
+        `SELECT id, situation, product_link, example_text, category FROM hook_library
+         WHERE ${where.join(' AND ')} ORDER BY score DESC, id DESC LIMIT ?`
+      ).all(...params, limit);
+    };
+    let rows = category ? runQuery(category) : [];
     if (rows.length < limit) {
-      const extra = db.prepare(
-        `SELECT situation, product_link, example_text FROM hook_library
-         WHERE active=1 AND (call_type=? OR call_type='' OR call_type IS NULL)
-         ORDER BY score DESC, id DESC LIMIT ?`
-      ).all(callType, limit);
-      const seen = new Set(rows.map(r => r.example_text));
-      for (const e of extra) { if (!seen.has(e.example_text) && rows.length < limit) rows.push(e); }
+      const seen = new Set(rows.map(r => r.id));
+      for (const e of runQuery(null)) { if (!seen.has(e.id) && rows.length < limit) rows.push(e); }
     }
-    if (!rows.length) return '';
-    const body = rows.map(r =>
-      `- Situação: ${r.situation}${r.product_link ? ` → ${r.product_link}` : ''}\n  Exemplo: """${(r.example_text || '').slice(0, 320)}"""`
-    ).join('\n');
-    return `## BIBLIOTECA DE GANCHOS (referência de abordagem NATURAL)\n${body}\n` +
-      `IMPORTANTE: imite o TOM humano e situacional destes exemplos — abra pela situação/contexto real ligado ao produto. ` +
-      `NÃO copie o texto literalmente nem invente encontros que não aconteceram; adapte ao gancho e ao contexto reais deste lead. ` +
-      `Placeholders como {nome}/{empresa} são só ilustrativos.`;
+    return rows;
   } catch (e) {
-    console.warn('[hook-library] indisponível:', e.message);
-    return '';
+    console.warn('[hook-library] seleção indisponível:', e.message);
+    return [];
   }
+}
+
+// Ids de ganchos usados nas últimas mensagens desta empresa — para não repetir (#2).
+function recentHookIdsForCompany(db, companyId, limit = 5) {
+  try {
+    return db.prepare(
+      `SELECT DISTINCT hook_id FROM messages
+       WHERE company_id=? AND hook_id IS NOT NULL ORDER BY id DESC LIMIT ?`
+    ).all(companyId, limit).map(r => r.hook_id);
+  } catch { return []; }
+}
+
+// Renderiza o bloco de texto (few-shot) a partir dos ganchos selecionados.
+function renderHookExamples(rows) {
+  if (!rows || !rows.length) return '';
+  const body = rows.map(r =>
+    `- Situação: ${r.situation}${r.product_link ? ` → ${r.product_link}` : ''}\n  Exemplo: """${(r.example_text || '').slice(0, 320)}"""`
+  ).join('\n');
+  return `## BIBLIOTECA DE GANCHOS (referência de abordagem NATURAL)\n${body}\n` +
+    `IMPORTANTE: imite o TOM humano e situacional destes exemplos — abra pela situação/contexto real ligado ao produto. ` +
+    `NÃO copie o texto literalmente nem invente encontros que não aconteceram; adapte ao gancho e ao contexto reais deste lead. ` +
+    `Placeholders como {nome}/{empresa} são só ilustrativos.`;
+}
+
+// Wrapper de compatibilidade (cold-search usa só o texto).
+function buildHookExamples(db, opts = {}) {
+  return renderHookExamples(selectHooks(db, opts));
 }
 
 function buildLearnedContext(db, channel, role) {
@@ -3901,6 +3984,19 @@ app.post('/api/messages/:id/score', (req, res) => {
   }
   vals.push(req.params.id);
   db.prepare(`UPDATE messages SET ${sets.join(',')} WHERE id=?`).run(...vals);
+  // (#1) Loop de aprendizado da biblioteca de ganchos: a nota humana da 1ª mensagem
+  // ajusta o score do arquétipo que a gerou. Nota alta promove (o gancho sobe no ranking
+  // de selectHooks); nota baixa rebaixa. Score fica no intervalo [0,10].
+  if (hasScore) {
+    try {
+      const m = db.prepare('SELECT hook_id FROM messages WHERE id=?').get(req.params.id);
+      if (m && m.hook_id) {
+        const s = parseInt(req.body.score);
+        const delta = s >= 4 ? 1 : (s <= 2 ? -1 : 0);
+        if (delta) db.prepare('UPDATE hook_library SET score=MAX(0, MIN(10, score+?)) WHERE id=?').run(delta, m.hook_id);
+      }
+    } catch (e) { console.warn('[hook-learning] ajuste de score falhou:', e.message); }
+  }
   db.close();
   if (hasComment) maybeAutoDistill(); // #7: comentário mal avaliado pode virar regra
   res.json({ ok: true });
@@ -4200,6 +4296,44 @@ app.get('/api/hook-library', (req, res) => {
   const sql = 'SELECT * FROM hook_library' + (where.length ? ' WHERE ' + where.join(' AND ') : '') + ' ORDER BY score DESC, id DESC';
   res.json(db.prepare(sql).all(...params));
   db.close();
+});
+
+// (#7) Métricas de naturalidade/eficácia: para cada arquétipo e por categoria,
+// quantas 1ªs mensagens gerou, taxa de aprovação e nota média — responde
+// objetivamente "o gancho está funcionando bem?".
+app.get('/api/hook-library/stats', (req, res) => {
+  const db = getDb();
+  const perHook = db.prepare(`
+    SELECT h.id, h.situation, h.category, h.call_type, h.score AS current_score,
+           COUNT(m.id)                                   AS uses,
+           SUM(CASE WHEN m.approved=1 THEN 1 ELSE 0 END) AS approved,
+           ROUND(AVG(m.score), 2)                        AS avg_score,
+           SUM(CASE WHEN m.style_score IS NOT NULL THEN 1 ELSE 0 END) AS style_rated,
+           ROUND(AVG(m.style_score), 2)                  AS avg_style_score
+    FROM hook_library h
+    LEFT JOIN messages m ON m.hook_id = h.id
+    GROUP BY h.id
+    ORDER BY uses DESC, current_score DESC
+  `).all().map(r => ({
+    ...r,
+    approval_rate: r.uses ? Math.round((r.approved / r.uses) * 100) : null,
+  }));
+  const perCategory = db.prepare(`
+    SELECT hook_category AS category,
+           COUNT(*)                                      AS uses,
+           SUM(CASE WHEN approved=1 THEN 1 ELSE 0 END)   AS approved,
+           ROUND(AVG(score), 2)                          AS avg_score,
+           ROUND(AVG(style_score), 2)                    AS avg_style_score
+    FROM messages
+    WHERE hook_category IS NOT NULL AND hook_category != ''
+    GROUP BY hook_category
+    ORDER BY uses DESC
+  `).all().map(r => ({
+    ...r,
+    approval_rate: r.uses ? Math.round((r.approved / r.uses) * 100) : null,
+  }));
+  db.close();
+  res.json({ per_hook: perHook, per_category: perCategory });
 });
 
 app.post('/api/hook-library', (req, res) => {
