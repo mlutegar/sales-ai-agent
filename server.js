@@ -1052,7 +1052,7 @@ Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou
             ? `O prospect enviou: "${text}"\nDúvida técnica. Responda de forma objetiva (máx 80 palavras) e convide para conversa de 15 minutos. Tom consultivo.`
             : `O prospect enviou: "${text}"\nDemonstrou interesse. Confirme o interesse e proponha reunião de 15 minutos (máx 60 palavras). Tom entusiasmado mas profissional.`;
           let draft = await callClaude('Você é SDR especialista em respostas rápidas.', draftPrompt, 200);
-          draft = humanizeWhatsapp(draft, styleProfile());
+          draft = sanitizeOutbound(draft, styleProfile());
 
           // Salva draft e envia automaticamente
           db2.prepare(
@@ -1211,36 +1211,8 @@ function companyIsBlocked(db, id) {
 // lib/relationships.js (testável isoladamente). Reexporta-se aqui para uso local.
 const { RELATIONSHIP_FLAG_KEYS, PRIOR_RELATIONSHIP_WARNING, companyHasPriorRelationship, priorRelationshipInfo, contactCreationWarnings } = rel;
 
-// (#3) Detecta placeholders não resolvidos que não devem ir para o cliente.
-// Cobre [Colchetes], {chaves} e <angulares> com conteúdo alfabético (ex.: [Nome], {empresa}, <link>).
-function findUnresolvedPlaceholders(text) {
-  if (!text) return [];
-  const found = new Set();
-  const re = /\[[^\]\n]*[A-Za-zÀ-ÿ][^\]\n]*\]|\{[^}\n]*[A-Za-zÀ-ÿ][^}\n]*\}|<[^>\n]*[A-Za-zÀ-ÿ][^>\n]*>/g;
-  let m;
-  while ((m = re.exec(text)) !== null) found.add(m[0]);
-  return [...found];
-}
-
-// (#3) Última linha de defesa: remove placeholders não resolvidos que escaparam do prompt,
-// junto de frases de auto-apresentação que só existiam por causa deles ("Aqui é [seu nome]...").
-// Retorna o texto limpo; se não houver placeholder, devolve o original.
-function stripPlaceholders(text) {
-  if (!text || !findUnresolvedPlaceholders(text).length) return text;
-  const PH = /\[[^\]\n]*[A-Za-zÀ-ÿ][^\]\n]*\]|\{[^}\n]*[A-Za-zÀ-ÿ][^}\n]*\}|<[^>\n]*[A-Za-zÀ-ÿ][^>\n]*>/g;
-  let t = text;
-  // Remove fragmentos de auto-apresentação que carregam o placeholder (com reticências/pontuação residual).
-  t = t.replace(/\b(aqui é|aqui quem fala é|meu nome é|sou o|sou a|sou)\s*(\[[^\]\n]*\]|\{[^}\n]*\}|<[^>\n]*>)\s*[.…]*/gi, '');
-  // Remove qualquer placeholder remanescente solto.
-  t = t.replace(PH, '');
-  // Normaliza espaços e pontuação duplicada deixada pela remoção.
-  t = t.replace(/\s{2,}/g, ' ')
-       .replace(/\s+([,.!?…])/g, '$1')
-       .replace(/([,.!?])\1+/g, '$1')
-       .replace(/\.\.\./g, '…')
-       .trim();
-  return t;
-}
+// (#3) Detecção/limpeza de placeholders foi movida para lib/humanize.js
+// (findUnresolvedPlaceholders / stripPlaceholders / sanitizeOutbound) — importadas abaixo.
 
 // (#5/#7) Parser leve de data/hora em PT-BR para negociação de agenda.
 // Reconhece dia da semana (segunda..sexta/sáb/dom), "amanhã/hoje", e hora ("15h", "15:30", "às 9").
@@ -1806,6 +1778,9 @@ app.get('/api/me', (req, res) => {
     user_type: u?.user_type || 'vendas',
     company_name: u?.company_name || '',
     signature_name: u?.signature_name || '',
+    // Nome pessoal utilizável para assinar/apresentar (null se só houver nome genérico).
+    // O front usa isto para avisar o vendedor a configurar o nome antes de gerar mensagens.
+    sales_name: resolveSalesName(u),
   });
 });
 
@@ -2300,7 +2275,13 @@ const {
   BOT_WORDS, botWordScan, similarity, maxSimilarity,
   styleProfile, humanizationBlock, humanizeWhatsapp,
   splitBubbles, humanDelayMs, offHours, qualityIssues,
+  findUnresolvedPlaceholders, stripPlaceholders, sanitizeOutbound,
+  productMentioned,
 } = require('./lib/humanize');
+
+// Contador monotônico para agrupar variantes A/B de uma mesma geração.
+// Evita Date.now() (não determinístico) e garante unicidade dentro do processo.
+let __variantGroupSeq = 0;
 
 const WA_SYSTEM = 'Você é um SDR brasileiro especialista em prospecção por WhatsApp. Escreve mensagens curtas, humanas e específicas para conseguir UMA reunião com a pessoa. Nunca soa como robô, template ou marketing genérico. Segue à risca as regras dadas pelo revisor humano. REGRA ABSOLUTA: sua resposta é SEMPRE o texto de UMA mensagem de WhatsApp pronta para enviar ao lead — você NUNCA faz perguntas, NUNCA pede esclarecimento, NUNCA comenta sobre a tarefa nem fala com o operador. Se faltar alguma informação, use o melhor palpite pelo contexto e escreva a mensagem mesmo assim.';
 
@@ -2408,7 +2389,7 @@ ATENÇÃO: NÃO faça perguntas nem comentários. Escreva AGORA apenas a mensage
       if (retry && !/^\[ERRO API/.test(retry) && !looksLikeMeta(retry)) out = retry;
       else if (previous) out = previous;
     }
-    out = humanizeWhatsapp(out, profile);
+    out = sanitizeOutbound(out, profile);
     const issues = qualityIssues(out, recentTexts || []);
     if (!best || issues.botMarks.length < best.issues.botMarks.length ||
         (issues.botMarks.length === best.issues.botMarks.length && issues.simScore < best.issues.simScore)) best = { text: out, issues };
@@ -3009,7 +2990,19 @@ Responda APENAS com JSON válido, sem markdown, sem comentários.`;
   // Humaniza o hook (remove travessão "—", aspas de IA, etc.) e remove placeholders
   // não resolvidos ("[seu nome]" & cia) antes de persistir/exibir.
   // Defesa em profundidade: garante a limpeza mesmo se o modelo desobedecer o prompt.
-  if (hook) hook = stripPlaceholders(humanizeWhatsapp(hook, styleProfile()));
+  if (hook) hook = sanitizeOutbound(hook, styleProfile());
+
+  // (#5) Garante que o produto seja central: se o gancho não menciona o produto,
+  // reescreve UMA vez usando o contexto real já pesquisado (barato, sem nova busca web).
+  if (hook && !productMentioned(hook, productValue)) {
+    const rewritePrompt =
+      `Reescreva este gancho de WhatsApp para que o FOCO seja o produto "${productValue}".\n` +
+      `Use um fato real do contexto abaixo apenas como abertura/ponte; o produto DEVE aparecer explicitamente e ser a oferta central.\n` +
+      `Não use travessão "—", nem jargão de marketing, nem placeholders. Máx 2 linhas, tom casual de WhatsApp.\n\n` +
+      `Contexto pesquisado: ${ctx}\nGancho atual: ${hook}\n\nDevolva APENAS o novo gancho.`;
+    const rew = await callClaude('Você é copywriter B2B especialista em WhatsApp.', rewritePrompt, 300);
+    if (rew && rew.trim() && !isAiError(rew)) hook = sanitizeOutbound(rew, styleProfile());
+  }
 
   const db2 = getDb();
   const prevHistRaw = db2.prepare('SELECT research_history FROM companies WHERE id=?').get(req.params.id);
@@ -3142,7 +3135,7 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
     // (#6) Primeira mensagem gera 2 variantes A/B (ângulos distintos); demais, 1.
     const isFirst = (tpl.day === 1 || tpl.type === 'first_outreach');
     const angles = isFirst ? VARIANT_ANGLES : [{ key: 'unico', label: '', guidance: '' }];
-    const variantGroup = `${contact.id}-${Date.now()}`;
+    const variantGroup = `${contact.id}-${++__variantGroupSeq}`;
 
     let variantNo = 0;
     for (const angle of angles) {
@@ -3202,8 +3195,11 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
           'Reescreva SEM nenhum campo a preencher: se não souber um dado, omita-o. Retorne APENAS a mensagem.';
         const retry = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', strictPrompt, 400);
         if (retry && retry.trim() && !isAiError(retry)) content = retry;
-        content = stripPlaceholders(content);
       }
+
+      // (#1/unificação) Saneamento final único (tira "—", aspas de IA e placeholders),
+      // igual aos demais caminhos de saída — antes gravava sem limpeza aqui.
+      content = sanitizeOutbound(content, styleProfile());
 
       // (#1) Detecta afirmações checáveis e decide se precisa de revisão factual.
       const factClaims = detectFactClaims(content);
@@ -3636,7 +3632,7 @@ async function generateSequenceForCompany(companyId, productValue, painPoint = '
       const retry = await callClaude(SEQ_SYSTEM, strict, 400);
       if (retry) content = retry;
     }
-    content = humanizeWhatsapp(content, profile);
+    content = sanitizeOutbound(content, profile);
     const promptUsed = `[SYSTEM]\n${SEQ_SYSTEM}\n\n[USER]\n${prompt}`;
     const dbW = getDb();
     const seqNo = dbW.prepare('SELECT COALESCE(MAX(seq_no),0)+1 AS n FROM messages WHERE thread_id=?').get(threadId).n;
