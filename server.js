@@ -645,6 +645,30 @@ function initDb() {
   // Snapshot do texto exato a que uma crítica se refere — impede que a âncora crítica↔mensagem
   // "deslize" quando a mensagem é regenerada (o ai_original é sobrescrito).
   addColumnIfNotExists(db, 'messages', 'criticized_text', "TEXT");
+  // (#1) Verificação factual dos ganchos: fontes da busca web + afirmações a checar.
+  addColumnIfNotExists(db, 'messages', 'sources',         "TEXT DEFAULT '[]'");   // URLs de fonte (JSON array)
+  addColumnIfNotExists(db, 'messages', 'fact_claims',     "TEXT DEFAULT '[]'");   // trechos com fatos/números detectados (JSON array)
+  addColumnIfNotExists(db, 'messages', 'needs_fact_check',"INTEGER DEFAULT 0");   // 1 = cita fato específico e precisa de revisão humana
+  // (#6) Painel A/B: agrupa variantes geradas para o mesmo lead/mensagem.
+  addColumnIfNotExists(db, 'messages', 'variant_group',   "TEXT");                // id do grupo de variantes (mesma geração)
+  addColumnIfNotExists(db, 'messages', 'variant_no',      "INTEGER DEFAULT 1");   // 1..N dentro do grupo
+  addColumnIfNotExists(db, 'messages', 'variant_angle',   "TEXT DEFAULT ''");     // rótulo do ângulo da variante
+  // (#7) Rubrica "não parece bot": nota objetiva + laudo do juiz.
+  addColumnIfNotExists(db, 'messages', 'style_score',     "REAL");                // nota 0-5 do LLM-judge
+  addColumnIfNotExists(db, 'messages', 'style_report',    "TEXT");                // JSON com breakdown da rubrica
+
+  // (#3) Seed de arquétipos de gancho — dá variedade de abertura e evita templates repetidos.
+  // Só insere se a biblioteca estiver vazia (não sobrescreve curadoria do operador).
+  try {
+    const hookCount = db.prepare('SELECT COUNT(*) AS c FROM hook_library').get().c;
+    if (hookCount === 0) {
+      const insHook = db.prepare(
+        "INSERT INTO hook_library (situation, product_link, example_text, category, call_type, tags, score) VALUES (?,?,?,?,?,?,?)"
+      );
+      for (const h of DEFAULT_HOOKS) insHook.run(h.situation, h.product_link, h.example_text, h.category, h.call_type, h.tags, h.score);
+      console.log(`✅ hook_library populada com ${DEFAULT_HOOKS.length} arquétipos de gancho`);
+    }
+  } catch (e) { console.warn('[hook-seed] não foi possível popular hook_library:', e.message); }
   // RLHF v2: regras destiladas com escopo, ciclo de vida e rastreabilidade
   addColumnIfNotExists(db, 'learned_patterns', 'scope',              "TEXT DEFAULT 'global'");
   addColumnIfNotExists(db, 'learned_patterns', 'status',             "TEXT DEFAULT 'active'");
@@ -1033,6 +1057,105 @@ const ROLE_PROFILES = {
 const SEQUENCE_CHANNELS = [
   { day: 1, channel: 'whatsapp', type: 'first_outreach' },
 ];
+
+// ════════════════════════════════════════════════════════════════════════════
+// GANCHO DA 1ª MENSAGEM — melhorias (#1 fact-check, #3 anti-template, #4 RAG,
+// #6 A/B, #7 rubrica "não parece bot"). Constantes e helpers reutilizáveis.
+// ════════════════════════════════════════════════════════════════════════════
+
+// (#3) Arquétipos de abertura para popular a hook_library vazia. Dão variedade de
+// estrutura e servem de few-shot para o modelo NÃO cair sempre no mesmo template.
+const DEFAULT_HOOKS = [
+  { situation: 'Notícia/movimento recente da empresa (expansão, rodada, contratação)', product_link: 'conecta o fato ao ganho que o produto traz', example_text: 'Vi que vocês acabaram de {fato_recente} — nesse momento, {dor_tipica} costuma virar gargalo. Foi exatamente isso que a gente resolveu com {produto}.', category: 'noticia', call_type: 'cold', tags: 'evento,noticia', score: 8 },
+  { situation: 'Dor específica do cargo/setor como ponto de entrada', product_link: 'produto como resposta direta à dor', example_text: '{nome}, na maioria dos times de {setor} que falo, {dor} é o que mais trava. A gente tem ajudado a destravar isso com {produto} — sem trocar o que já funciona.', category: 'dor', call_type: 'cold', tags: 'dor,pain', score: 7 },
+  { situation: 'Prova social / resultado concreto de par do mesmo setor', product_link: 'resultado numérico ligado ao produto', example_text: 'Um time de {setor} parecido com o de vocês cortou {metrica} usando {produto}. Achei que faria sentido te mostrar como.', category: 'prova_social', call_type: 'cold', tags: 'case,resultado', score: 7 },
+  { situation: 'Parceria/ecossistema em comum (warm) — retoma vínculo real', product_link: 'produto dentro do contexto da parceria', example_text: 'Oi {nome}! Como {contexto_parceria}, o {produto} encaixa direto no que vocês estão montando. Vale trocar uma ideia rápida?', category: 'parceria', call_type: 'warm', tags: 'parceria,ecossistema', score: 8 },
+  { situation: 'Pergunta genuína sobre prioridade atual do lead', product_link: 'produto some no fundo, foco na conversa', example_text: '{nome}, uma dúvida honesta: {pergunta_sobre_prioridade}? Pergunto porque é onde o {produto} costuma fazer mais diferença.', category: 'pergunta', call_type: 'cold', tags: 'pergunta,curiosidade', score: 6 },
+];
+
+// (#3) Clichês proibidos + instrução anti-template injetada no prompt da 1ª mensagem.
+const ANTI_TEMPLATE_RULES =
+  '## NATURALIDADE (obrigatório)\n' +
+  '- Varie a ESTRUTURA de abertura a cada mensagem; não comece sempre igual.\n' +
+  '- PROIBIDO usar clichês de robô: "espero que esteja bem", "tudo bem?", "meu nome é ... e vim aqui porque", ' +
+  '"passando para apresentar", "somos uma empresa que", "gostaria de agendar", "não perca essa oportunidade".\n' +
+  '- Abra por uma situação/fato/dor REAL do lead — nunca por auto-apresentação genérica.\n' +
+  '- Soe como uma pessoa escrevendo no WhatsApp: direto, específico, sem jargão de marketing.';
+
+// (#6) Ângulos distintos para as variantes A/B — cada uma abre por um caminho diferente.
+const VARIANT_ANGLES = [
+  { key: 'situacao', label: 'Abertura pela situação/fato do lead', guidance: 'Abra pela SITUAÇÃO ou FATO específico do lead (contexto/gancho) e conecte ao produto.' },
+  { key: 'prova',    label: 'Abertura por prova social/resultado', guidance: 'Abra por um RESULTADO/PROVA SOCIAL concreta de um par do mesmo setor e só então conecte à realidade do lead.' },
+];
+
+// (#7) Rubrica objetiva do teste "não parece bot" (5 critérios, 0-1 cada → total 0-5).
+const STYLE_RUBRIC_CRITERIA = [
+  { key: 'personalizacao',    desc: 'Personalização real: cita algo específico do lead (não serve para qualquer empresa)' },
+  { key: 'sem_cliche',        desc: 'Ausência de clichê de robô (sem "tudo bem?", "espero que esteja bem", auto-apresentação genérica)' },
+  { key: 'produto_especifico',desc: 'Especificidade do produto: menciona o produto/uso concreto e relevante ao lead' },
+  { key: 'cta_unico',         desc: 'CTA único e progressivo (uma pergunta/convite leve, sem tentar vender direto)' },
+  { key: 'tom_cargo',         desc: 'Tom coerente com o cargo do contato e som humano/natural' },
+];
+
+// (#1) Detecta afirmações factuais "checáveis" (números, %, moeda, anos, nomes de produto/modelo).
+// Retorna os trechos encontrados — se houver e não houver fontes, a mensagem é marcada p/ revisão.
+function detectFactClaims(text) {
+  const t = String(text || '');
+  const claims = new Set();
+  const patterns = [
+    /(?:US\$|R\$|€|\$)\s?\d[\d.,]*\s?(?:bi|bilh|mi|milh|k|mil)?/gi, // valores monetários
+    /\b\d+[\d.,]*\s?%/g,                                            // percentuais
+    /\b(?:19|20)\d{2}\b/g,                                          // anos
+    /\b\d+[\d.,]*\s?(?:TFLOPS|GB|TB|tokens\/s|GPU|GPUs|servidores|clientes|países|paises)\b/gi, // specs/quantidades
+    /\bQ[1-4]\b/g,                                                  // trimestres
+  ];
+  for (const re of patterns) { const m = t.match(re); if (m) m.forEach(x => claims.add(x.trim())); }
+  return [...claims];
+}
+
+// (#4) Monta um bloco de contexto de PRODUTO a partir do RAG (tabela documents),
+// para o modelo citar specs reais em vez de inventar. Reusa extractRelevantChunk.
+function buildProductContext(db, terms, maxChars = 1200) {
+  try {
+    const docs = db.prepare('SELECT name, content FROM documents').all();
+    if (!docs.length) return '';
+    const rankTerms = String(terms || '').toLowerCase().split(/\s+/).filter(t => t.length >= 4);
+    const scored = docs.map(d => {
+      const low = String(d.content || '').toLowerCase();
+      let score = 0;
+      for (const t of rankTerms) { let idx = low.indexOf(t); while (idx !== -1) { score++; idx = low.indexOf(t, idx + t.length); } }
+      return { ...d, score };
+    });
+    const relevant = scored.filter(d => d.score > 0).sort((a, b) => b.score - a.score);
+    const pick = (relevant.length ? relevant : scored).slice(0, 2);
+    if (!pick.length) return '';
+    const body = pick.map(d => `[${d.name}] ${extractRelevantChunk(d.content, rankTerms, Math.floor(maxChars / pick.length))}`).join('\n');
+    return '## BASE DE PRODUTO (use specs/fatos REAIS daqui; NÃO invente números)\n' + body;
+  } catch (e) { console.warn('[product-context] indisponível:', e.message); return ''; }
+}
+
+// (#7) LLM-judge: avalia uma mensagem pela rubrica e retorna {total, scores, verdict, notes}.
+async function scoreMessageStyle(message, ctx = {}) {
+  const rubricText = STYLE_RUBRIC_CRITERIA.map((c, i) => `${i + 1}. ${c.key}: ${c.desc}`).join('\n');
+  const system = 'Você é um revisor rígido de copy de prospecção B2B. Avalia se a mensagem "não parece bot" ' +
+    'e personaliza de verdade. Seja crítico: na dúvida, pontue 0. Responda SOMENTE com JSON válido.';
+  const user =
+    `Contexto do lead: empresa="${ctx.company || '?'}", setor="${ctx.sector || '?'}", cargo="${ctx.role || '?'}", produto="${ctx.product || '?'}".\n\n` +
+    `MENSAGEM:\n"""${message}"""\n\n` +
+    `Avalie cada critério com 0 (falha) ou 1 (cumpre):\n${rubricText}\n\n` +
+    'Retorne JSON plano: {"scores":{"personalizacao":0|1,"sem_cliche":0|1,"produto_especifico":0|1,"cta_unico":0|1,"tom_cargo":0|1},' +
+    '"total":0-5,"verdict":"passou"|"ajustar"|"reprovou","notes":"1 frase objetiva"}. ' +
+    'verdict="passou" só se total>=4 e sem_cliche=1 e personalizacao=1.';
+  const raw = await callClaude(system, user, 400);
+  let clean = String(raw || '').replace(/```json\s*|\s*```/g, '').trim();
+  const m = clean.match(/\{[\s\S]*\}/); if (m) clean = m[0];
+  try {
+    const p = JSON.parse(clean);
+    const scores = p.scores || {};
+    const total = typeof p.total === 'number' ? p.total : Object.values(scores).reduce((a, b) => a + (Number(b) || 0), 0);
+    return { total, scores, verdict: p.verdict || (total >= 4 ? 'passou' : 'ajustar'), notes: p.notes || '' };
+  } catch { return { total: null, scores: {}, verdict: 'erro', notes: 'Falha ao interpretar avaliação do juiz', raw }; }
+}
 
 // ── Flags/Etiquetas de empresa ────────────────────────────────────────────────
 // Catálogo de etiquetas aplicáveis a empresas. `blocks_outreach: true` faz a
@@ -1447,11 +1570,15 @@ Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com
 Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em tendências reais do setor e indique isso. Responda APENAS com JSON válido, sem markdown, sem comentários.`;
 
   const result = await callClaudeWithSearch('Você é assistente de pesquisa de vendas B2B que usa busca na web para encontrar informações reais e atuais sobre empresas e seus executivos.', prompt, 2600);
-  let hook, ctx;
+  let hook, ctx, sources = [];
   let raw = (result || '').replace(/```json\s*|\s*```/g, '').trim();
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (jsonMatch) raw = jsonMatch[0];
-  try { const p = JSON.parse(raw); hook = p.hook || result; ctx = JSON.stringify(p); }
+  try {
+    const p = JSON.parse(raw);
+    hook = p.hook || result; ctx = JSON.stringify(p);
+    if (Array.isArray(p.sources)) sources = p.sources.filter(Boolean);
+  }
   catch { hook = result; ctx = result; }
 
   const dbw = getDb();
@@ -1465,8 +1592,8 @@ Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em ten
     )`).run(contact.id, contact.id);
   }
   dbw.close();
-  console.log(`[cold-search] busca web concluída. hook="${(hook || '').slice(0, 80)}"`);
-  return { call_type: 'cold', hook, autoResearched: true, manualContext: contact?.context || '' };
+  console.log(`[cold-search] busca web concluída. hook="${(hook || '').slice(0, 80)}" (${sources.length} fontes)`);
+  return { call_type: 'cold', hook, autoResearched: true, manualContext: contact?.context || '', sources };
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2778,6 +2905,17 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
     dbh.close();
   } catch (_) {}
 
+  // (#4) Contexto de PRODUTO vindo do RAG (documents) — para citar specs reais, não inventar.
+  let productContext = '';
+  try {
+    const dbr = getDb();
+    productContext = buildProductContext(dbr, `${company.name} ${company.sector || ''} ${productValue} ${painPoint}`);
+    dbr.close();
+  } catch (_) {}
+
+  // (#1) Fontes da pesquisa web (cold) — usadas para marcar/checar afirmações factuais.
+  const researchSources = Array.isArray(callCtx.sources) ? callCtx.sources : [];
+
   const results = [];
   for (const tpl of SEQUENCE_CHANNELS) {
     const channelDesc = {
@@ -2786,7 +2924,15 @@ app.post('/api/companies/:id/sequence', async (req, res) => {
       whatsapp: 'mensagem WhatsApp (casual, máx 100 palavras)',
     }[tpl.channel];
 
-    const prompt = `
+    // (#6) Primeira mensagem gera 2 variantes A/B (ângulos distintos); demais, 1.
+    const isFirst = (tpl.day === 1 || tpl.type === 'first_outreach');
+    const angles = isFirst ? VARIANT_ANGLES : [{ key: 'unico', label: '', guidance: '' }];
+    const variantGroup = `${contact.id}-${Date.now()}`;
+
+    let variantNo = 0;
+    for (const angle of angles) {
+      variantNo++;
+      const prompt = `
 ${callGuidance}
 ${senderInfo}
 Empresa: ${company.name} (setor: ${company.sector || 'não definido'})
@@ -2797,18 +2943,36 @@ ${manualBlock}
 ${painLine}
 Tom: ${roleInfo.tone} | Foco: ${roleInfo.focus}
 Canal / Dia ${tpl.day}: ${channelDesc}
+${productContext}
 ${socialProof ? 'Casos de sucesso:\n' + socialProof : ''}
-${(tpl.day === 1 || tpl.type === 'first_outreach') && hookExamples ? hookExamples : ''}
+${isFirst && hookExamples ? hookExamples : ''}
+${isFirst ? ANTI_TEMPLATE_RULES : ''}
+${angle.guidance ? '## ÂNGULO DESTA VARIANTE\n' + angle.guidance : ''}
+
+REGRA FACTUAL: só cite números, datas ou nomes próprios se vierem do gancho pesquisado, do contexto do operador ou da BASE DE PRODUTO acima. NUNCA invente estatísticas.
 
 Escreva APENAS o texto da mensagem, sem explicações.
 ${painCTA}
 CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO tente vender diretamente.`;
 
-    const content = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', prompt, 400);
-    const db3 = getDb();
-    const r = db3.prepare("INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, created_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'))").run(contact.id, req.params.id, tpl.channel, tpl.day, tpl.type, content, content, 'pending');
-    db3.close();
-    results.push({ id: r.lastInsertRowid, channel: tpl.channel, day: tpl.day, content, status: 'pending', approved: 0, contact_name: contact.name });
+      const content = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', prompt, 400);
+
+      // (#1) Detecta afirmações checáveis e decide se precisa de revisão factual.
+      const factClaims = detectFactClaims(content);
+      const needsFactCheck = factClaims.length > 0 ? 1 : 0;
+
+      const db3 = getDb();
+      const r = db3.prepare(
+        "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, created_at, sources, fact_claims, needs_fact_check, variant_group, variant_no, variant_angle) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,?,?,?)"
+      ).run(contact.id, req.params.id, tpl.channel, tpl.day, tpl.type, content, content, 'pending',
+        JSON.stringify(researchSources), JSON.stringify(factClaims), needsFactCheck, variantGroup, variantNo, angle.label);
+      db3.close();
+      results.push({
+        id: r.lastInsertRowid, channel: tpl.channel, day: tpl.day, content, status: 'pending', approved: 0,
+        contact_name: contact.name, sources: researchSources, fact_claims: factClaims, needs_fact_check: needsFactCheck,
+        variant_group: variantGroup, variant_no: variantNo, variant_angle: angle.label,
+      });
+    }
   }
 
   const db4 = getDb();
@@ -2818,6 +2982,32 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
      .run(req.params.id, contact.id, callType);
   db4.close();
   res.json({ sequence: results, messages: results, contact, call_type: callType, auto_researched: callCtx.autoResearched });
+});
+
+// (#7) Avalia uma mensagem já gravada pela rubrica "não parece bot" e persiste a nota.
+app.post('/api/messages/:id/style-score', async (req, res) => {
+  const db = getDb();
+  const msg = db.prepare('SELECT * FROM messages WHERE id=?').get(req.params.id);
+  if (!msg) { db.close(); return res.status(404).json({ error: 'Mensagem não encontrada' }); }
+  const company = msg.company_id ? db.prepare('SELECT name, sector FROM companies WHERE id=?').get(msg.company_id) : null;
+  const contact = msg.contact_id ? db.prepare('SELECT role FROM contacts WHERE id=?').get(msg.contact_id) : null;
+  db.close();
+  const result = await scoreMessageStyle(msg.content, {
+    company: company?.name, sector: company?.sector, role: contact?.role, product: msg.product,
+  });
+  const db2 = getDb();
+  db2.prepare('UPDATE messages SET style_score=?, style_report=? WHERE id=?')
+     .run(result.total, JSON.stringify(result), req.params.id);
+  db2.close();
+  res.json(result);
+});
+
+// (#7/#8) Avalia um texto avulso (sem gravar) — usado pelo script de regressão e por testes ad-hoc.
+app.post('/api/style-score', async (req, res) => {
+  const { message, company, sector, role, product } = req.body || {};
+  if (!message) return res.status(400).json({ error: 'Campo "message" é obrigatório' });
+  const result = await scoreMessageStyle(message, { company, sector, role, product });
+  res.json(result);
 });
 
 // ── Geração de sequência em lote (multi-lead, multi-produto) ─────────────────

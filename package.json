@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node --experimental-sqlite server.js",
     "dev": "nodemon --exec \"node --experimental-sqlite\" server.js",
-    "seed": "node --experimental-sqlite seed_demo.js"
+    "seed": "node --experimental-sqlite seed_demo.js",
+    "test:hooks": "node test_hook_regression.js"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.2",
