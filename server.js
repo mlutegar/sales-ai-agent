@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const multer = require('multer');
+const rel = require('./lib/relationships');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,7 +17,15 @@ const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'prototype.db');
 
 // ── DB helper ─────────────────────────────────────────────────────────────────
 function getDb() {
-  return new DatabaseSync(DB_PATH);
+  const db = new DatabaseSync(DB_PATH);
+  // (#8) Concorrência: WAL permite leituras simultâneas a uma escrita; busy_timeout evita
+  // "database is locked" sob carga esperando o lock por até 5s. Pragmas são idempotentes.
+  try {
+    db.exec('PRAGMA journal_mode=WAL');
+    db.exec('PRAGMA busy_timeout=5000');
+    db.exec('PRAGMA foreign_keys=ON');
+  } catch (_) { /* pragmas indisponíveis: segue com defaults */ }
+  return db;
 }
 
 // ── Upload de PDF → Markdown ────────────────────────────────────────────────────
@@ -390,6 +399,17 @@ function initDb() {
       name       TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id    INTEGER,
+      username   TEXT,
+      action     TEXT NOT NULL,
+      details    TEXT DEFAULT '',
+      company_id INTEGER,
+      contact_id INTEGER,
+      message_id INTEGER,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
     CREATE TABLE IF NOT EXISTS leads (
       id               INTEGER PRIMARY KEY AUTOINCREMENT,
       name             TEXT    NOT NULL,
@@ -746,6 +766,7 @@ function initDb() {
   // A Meta reenvia webhooks em caso de timeout/erro. Guardamos o id único da
   // mensagem (msg.id) para ignorar reentregas e evitar mensagens duplicadas.
   addColumnIfNotExists(db, 'messages', 'wa_message_id', "TEXT");
+  addColumnIfNotExists(db, 'messages', 'style_profile', "TEXT DEFAULT ''");
 
   // Normaliza contatos primários duplicados ANTES de criar o índice único parcial
   // (o índice falharia se já existissem múltiplos is_primary=1 na mesma empresa).
@@ -787,6 +808,8 @@ function initDb() {
     CREATE INDEX IF NOT EXISTS idx_blind_guess_item   ON blind_test_guesses(item_id);
     CREATE INDEX IF NOT EXISTS idx_blind_guess_tester ON blind_test_guesses(tester_name);
   `);
+  addColumnIfNotExists(db, 'blind_test_items', 'scenario', "TEXT DEFAULT ''");
+  addColumnIfNotExists(db, 'blind_test_guesses', 'reason', "TEXT DEFAULT ''");
 
   // Seed usuário admin padrão
   const adminUser = db.prepare('SELECT id FROM users WHERE username = ?').get('admin');
@@ -1166,6 +1189,7 @@ async function scoreMessageStyle(message, ctx = {}) {
 // automação (geração de sequência) ser bloqueada para a empresa.
 const COMPANY_FLAGS = [
   { key: 'nao_contatar',        label: 'Não contatar',         badge: 'bg-danger',            blocks_outreach: true },
+  { key: 'ja_contato',          label: 'Já contatada',         badge: 'bg-warning text-dark', blocks_outreach: false },
   { key: 'empresa_ja_atendida', label: 'Empresa já atendida',  badge: 'bg-warning text-dark', blocks_outreach: false },
   { key: 'cliente_ativo',       label: 'Cliente ativo',        badge: 'bg-success',           blocks_outreach: false },
 ];
@@ -1180,17 +1204,70 @@ function companyIsBlocked(db, id) {
   return false;
 }
 
-// Etiquetas que indicam "relacionamento prévio" — a empresa já é um contato existente
-// na base (já atendida ou cliente ativo), não um lead totalmente novo. Usado para
-// sinalizar (sem bloquear) quando um lead COLD é criado para uma empresa já contatada.
-const RELATIONSHIP_FLAG_KEYS = new Set(['empresa_ja_atendida', 'cliente_ativo']);
-function companyHasPriorRelationship(db, id) {
-  for (const k of companyFlagKeys(db, id)) if (RELATIONSHIP_FLAG_KEYS.has(k)) return true;
-  return false;
+// Detecção de relacionamento prévio + duplicidade entre empresas mora em
+// lib/relationships.js (testável isoladamente). Reexporta-se aqui para uso local.
+const { RELATIONSHIP_FLAG_KEYS, PRIOR_RELATIONSHIP_WARNING, companyHasPriorRelationship, priorRelationshipInfo, contactCreationWarnings } = rel;
+
+// (#3) Detecta placeholders não resolvidos que não devem ir para o cliente.
+// Cobre [Colchetes], {chaves} e <angulares> com conteúdo alfabético (ex.: [Nome], {empresa}, <link>).
+function findUnresolvedPlaceholders(text) {
+  if (!text) return [];
+  const found = new Set();
+  const re = /\[[^\]\n]*[A-Za-zÀ-ÿ][^\]\n]*\]|\{[^}\n]*[A-Za-zÀ-ÿ][^}\n]*\}|<[^>\n]*[A-Za-zÀ-ÿ][^>\n]*>/g;
+  let m;
+  while ((m = re.exec(text)) !== null) found.add(m[0]);
+  return [...found];
 }
-const PRIOR_RELATIONSHIP_WARNING =
-  'Esta empresa já possui relacionamento prévio (contato existente na base). '
-  + 'Considere usar "warm" ou "frozen" em vez de "cold" para evitar abordagem duplicada ou desalinhada.';
+
+// (#5/#7) Parser leve de data/hora em PT-BR para negociação de agenda.
+// Reconhece dia da semana (segunda..sexta/sáb/dom), "amanhã/hoje", e hora ("15h", "15:30", "às 9").
+// Retorna { iso, label } do próximo horário compatível, ou null. Usa a data atual do servidor.
+const WEEKDAYS_PT = { domingo: 0, segunda: 1, terca: 2, 'terça': 2, quarta: 3, quinta: 4, sexta: 5, sabado: 6, 'sábado': 6 };
+function parseMeetingDateTime(text, now = new Date()) {
+  if (!text) return null;
+  const t = text.toLowerCase();
+  // hora
+  const hm = t.match(/\b(\d{1,2})\s*(?:h|:)\s*(\d{2})?\b/) || t.match(/\b[àa]s?\s+(\d{1,2})\b/);
+  if (!hm) return null;
+  let hour = parseInt(hm[1]); const min = hm[2] ? parseInt(hm[2]) : 0;
+  if (hour < 0 || hour > 23) return null;
+  const target = new Date(now);
+  let matchedDay = false;
+  if (/\bamanh[ãa]\b/.test(t)) { target.setDate(now.getDate() + 1); matchedDay = true; }
+  else if (/\bhoje\b/.test(t)) { matchedDay = true; }
+  else {
+    for (const [name, dow] of Object.entries(WEEKDAYS_PT)) {
+      if (t.includes(name)) {
+        const diff = (dow - now.getDay() + 7) % 7 || 7; // próxima ocorrência (nunca hoje)
+        target.setDate(now.getDate() + diff); matchedDay = true; break;
+      }
+    }
+  }
+  if (!matchedDay) return null;
+  target.setHours(hour, min, 0, 0);
+  const label = target.toLocaleString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  // ISO local (sem timezone shift): YYYY-MM-DDTHH:MM:00
+  const pad = (n) => String(n).padStart(2, '0');
+  const iso = `${target.getFullYear()}-${pad(target.getMonth() + 1)}-${pad(target.getDate())}T${pad(hour)}:${pad(min)}:00`;
+  return { iso, label };
+}
+
+// (#10) LGPD/consentimento: retorna motivo (string) se o envio deve ser bloqueado, ou null se liberado.
+// Bloqueia se: empresa opted_out, contato opted_out, ou flag de "não contatar" na empresa.
+function sendingBlockedByConsent(db, companyId, contactId) {
+  try {
+    if (companyId) {
+      const co = db.prepare('SELECT opted_out FROM companies WHERE id=?').get(companyId);
+      if (co && co.opted_out) return 'Empresa marcada como opt-out (blacklist)';
+      if (companyIsBlocked(db, companyId)) return "Empresa com flag 'não contatar'";
+    }
+    if (contactId) {
+      const ct = db.prepare('SELECT opted_out FROM contacts WHERE id=?').get(contactId);
+      if (ct && ct.opted_out) return 'Contato marcado como opt-out';
+    }
+  } catch (_) { /* colunas ausentes: não bloqueia */ }
+  return null;
+}
 
 // ── Enriquecimento de contatos ────────────────────────────────────────────────
 
@@ -1451,29 +1528,52 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 800, priorTurns 
     }
   }
 
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: maxTokens,
-        system: systemPrompt,
-        messages: normalizeTurns([...(Array.isArray(priorTurns) ? priorTurns : []), { role: 'user', content: userPrompt }]),
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error ? data.error.message : 'Erro na requisição');
+  // (#2) Retry com backoff exponencial para erros transitórios (429/5xx/rede).
+  // Erros não-transitórios (ex.: 400/401/créditos) falham de imediato — retry não ajuda.
+  const RETRYABLE = new Set([429, 500, 502, 503, 504, 529]);
+  const maxAttempts = 3;
+  let lastErr = 'desconhecido';
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: maxTokens,
+          system: systemPrompt,
+          messages: normalizeTurns([...(Array.isArray(priorTurns) ? priorTurns : []), { role: 'user', content: userPrompt }]),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        lastErr = data.error ? data.error.message : `HTTP ${res.status}`;
+        if (RETRYABLE.has(res.status) && attempt < maxAttempts) {
+          await new Promise(r => setTimeout(r, 400 * 2 ** (attempt - 1)));
+          continue;
+        }
+        return `${AI_ERROR_PREFIX} ${lastErr}]`;
+      }
+      return data.content[0].text;
+    } catch (e) {
+      // Falha de rede: transitória, vale retry
+      lastErr = e.message;
+      if (attempt < maxAttempts) { await new Promise(r => setTimeout(r, 400 * 2 ** (attempt - 1))); continue; }
+      return `${AI_ERROR_PREFIX} ${lastErr}]`;
     }
-    return data.content[0].text;
-  } catch (e) {
-    return `[ERRO API: ${e.message}]`;
   }
+  return `${AI_ERROR_PREFIX} ${lastErr}]`;
+}
+
+// (#2) Sentinela de falha da IA. Endpoints que PERSISTEM mensagens devem checar isAiError()
+// e abortar (502) em vez de gravar o texto de erro como se fosse uma mensagem real.
+const AI_ERROR_PREFIX = '[ERRO API:';
+function isAiError(text) {
+  return typeof text === 'string' && text.startsWith(AI_ERROR_PREFIX);
 }
 
 // Variante com BUSCA WEB REAL (ferramenta nativa do Claude). Usada na pesquisa de
@@ -1640,6 +1740,38 @@ app.get('/', requireLogin, (req, res) => {
 // API — todas protegidas
 // ════════════════════════════════════════════════════════════════════════════
 app.use('/api', requireLogin);
+
+// (#9) Rate limiting simples em memória por usuário/IP (janela deslizante).
+// Protege contra abuso/loop acidental. Ajustável por env; healthchecks isentos.
+const RL_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000');
+const RL_MAX = parseInt(process.env.RATE_LIMIT_MAX || '120');
+const _rlHits = new Map(); // key -> number[] (timestamps)
+app.use('/api', (req, res, next) => {
+  const key = (req.session && req.session.userId) ? `u:${req.session.userId}` : `ip:${req.ip}`;
+  const now = Date.now();
+  const arr = (_rlHits.get(key) || []).filter(ts => now - ts < RL_WINDOW_MS);
+  arr.push(now);
+  _rlHits.set(key, arr);
+  if (arr.length > RL_MAX) {
+    res.set('Retry-After', String(Math.ceil(RL_WINDOW_MS / 1000)));
+    return res.status(429).json({ error: 'Muitas requisições — tente novamente em instantes.' });
+  }
+  next();
+});
+
+// (#9) Audit log: registra ações sensíveis (aprovar/enviar/agendar) com autor e timestamp.
+function audit(req, action, details, refs = {}) {
+  try {
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO audit_logs (user_id, username, action, details, company_id, contact_id, message_id, created_at) VALUES (?,?,?,?,?,?,?,datetime('now'))"
+    ).run(
+      req.session?.userId || null, req.session?.username || null, action, details || '',
+      refs.company_id || null, refs.contact_id || null, refs.message_id || null
+    );
+    db.close();
+  } catch (e) { console.warn('[audit] falhou:', e.message); }
+}
 
 // Me
 app.get('/api/me', (req, res) => {
@@ -1928,31 +2060,34 @@ app.post('/api/companies/:id/contacts', (req, res) => {
   const { name, role, email, linkedin, whatsapp } = req.body;
   if (!name) return res.status(400).json({ error: 'Nome do contato é obrigatório' });
   const db = getDb();
-  const company = db.prepare('SELECT id FROM companies WHERE id=?').get(req.params.id);
-  if (!company) { db.close(); return res.status(404).json({ error: 'Empresa não encontrada' }); }
+  try {
+    const company = db.prepare('SELECT id FROM companies WHERE id=?').get(req.params.id);
+    if (!company) return res.status(404).json({ error: 'Empresa não encontrada' });
 
-  if (email && !isValidEmailServer(email)) {
+    if (email && !isValidEmailServer(email)) {
+      return res.status(400).json({ error: 'E-mail inválido' });
+    }
+    if (email) {
+      const dup = db.prepare("SELECT id FROM contacts WHERE email != '' AND email=? AND company_id=?").get(email, req.params.id);
+      if (dup) return res.status(409).json({ error: 'Contato com este e-mail já cadastrado nesta empresa' });
+    }
+
+    const isPrimary = db.prepare('SELECT COUNT(*) as c FROM contacts WHERE company_id=?').get(req.params.id).c === 0 ? 1 : 0;
+    const normalizedWa = normalizePhone(whatsapp);
+    const callType = normalizeCallType(req.body.call_type);
+    const r = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, call_type) VALUES (?,?,?,?,?,?,?,?)').run(req.params.id, name, role || 'other', email || '', linkedin || '', normalizedWa, isPrimary, callType);
+    db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(req.params.id, r.lastInsertRowid, 'contact_added', `Contato "${name}" adicionado`);
+
+    // Sinaliza (sem bloquear): relacionamento prévio (cold em empresa já contatada)
+    // e/ou contato duplicado em outra(s) empresa(s). Ver lib/relationships.js.
+    const notice = contactCreationWarnings(db, req.params.id, callType, { email, whatsapp: normalizedWa, linkedin });
+    if (notice.warning) {
+      db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(req.params.id, r.lastInsertRowid, 'contact_warning', notice.warning);
+    }
+    res.json({ id: r.lastInsertRowid, ...notice });
+  } finally {
     db.close();
-    return res.status(400).json({ error: 'E-mail inválido' });
   }
-  if (email) {
-    const dup = db.prepare("SELECT id FROM contacts WHERE email != '' AND email=? AND company_id=?").get(email, req.params.id);
-    if (dup) { db.close(); return res.status(409).json({ error: 'Contato com este e-mail já cadastrado nesta empresa' }); }
-  }
-
-  const isPrimary = db.prepare('SELECT COUNT(*) as c FROM contacts WHERE company_id=?').get(req.params.id).c === 0 ? 1 : 0;
-  const normalizedWa = normalizePhone(whatsapp);
-  const callType = normalizeCallType(req.body.call_type);
-  const r = db.prepare('INSERT INTO contacts (company_id, name, role, email, linkedin, whatsapp, is_primary, call_type) VALUES (?,?,?,?,?,?,?,?)').run(req.params.id, name, role || 'other', email || '', linkedin || '', normalizedWa, isPrimary, callType);
-  db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(req.params.id, r.lastInsertRowid, 'contact_added', `Contato "${name}" adicionado`);
-  // Sinaliza (sem bloquear) quando um lead COLD é criado para uma empresa já contatada.
-  let warning = null;
-  if (callType === 'cold' && companyHasPriorRelationship(db, req.params.id)) {
-    warning = PRIOR_RELATIONSHIP_WARNING;
-    db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)').run(req.params.id, r.lastInsertRowid, 'cold_on_prior_relationship', `Lead cold criado para empresa com relacionamento prévio`);
-  }
-  db.close();
-  res.json({ id: r.lastInsertRowid, warning });
 });
 
 app.patch('/api/companies/:companyId/contacts/:contactId', (req, res) => {
@@ -2131,83 +2266,12 @@ function senderLine(user) {
   return `Remetente: ${full} (perfil vendas — apresente-se pelo primeiro nome e assine como ${full})`;
 }
 
-// ── Camada de humanização anti-detecção de bot ────────────────────────────────
-// Critérios objetivos de escrita humana aplicados à automação de WhatsApp para que
-// as mensagens não sejam percebidas como geradas por bot. Ver docs/anti-bot-checklist.md.
-const BOT_WORDS = [
-  'solução', 'soluções', 'otimizar', 'potencializar', 'alavancar', 'sinergia',
-  'inovador', 'inovadora', 'revolucionar', 'revolucionário', 'transformar sua',
-  'agregar valor', 'ecossistema', 'end-to-end', 'personalizado para você',
-  'nossa equipe está', 'não hesite', 'fico à disposição', 'atenciosamente',
-  'espero que esta mensagem', 'gostaria de apresentar', 'de forma eficiente',
-];
-// Detecta marcas textuais de IA numa mensagem (auditoria/relatório).
-function botWordScan(text) {
-  const low = (text || '').toLowerCase();
-  const hits = BOT_WORDS.filter(w => low.includes(w));
-  if (/—/.test(text || '')) hits.push('travessão (—)');
-  if (/^\s*\d+[\.\)]\s/m.test(text || '')) hits.push('lista numerada');
-  return hits;
-}
-// Perfil de estilo aleatório por mensagem — força variação (comprimento, abertura,
-// emoji, informalidade) para evitar o padrão repetitivo típico de bot.
-function styleProfile() {
-  const r = Math.random();
-  return {
-    lengthTarget: [28, 45, 70][Math.floor(Math.random() * 3)],
-    opener: ['nome', 'sem_nome', 'direto', 'contexto'][Math.floor(Math.random() * 4)],
-    emoji: r < 0.3,
-    lowercaseStart: Math.random() < 0.25,
-    abbreviations: Math.random() < 0.45,
-    dropFinalPeriod: Math.random() < 0.5,
-    ellipsis: Math.random() < 0.15,
-  };
-}
-// Bloco de critérios injetado no prompt de geração.
-function humanizationBlock(profile) {
-  const openers = {
-    nome: 'comece chamando a pessoa pelo primeiro nome',
-    sem_nome: 'NÃO comece com o nome da pessoa; vá direto ao assunto',
-    direto: 'abra direto no ponto, sem saudação formal',
-    contexto: 'abra referenciando um contexto/situação real da pessoa ou empresa',
-  };
-  return `\n# CRITÉRIOS DE HUMANIZAÇÃO (siga para não parecer bot)
-- Abertura: ${openers[profile.opener]}.
-- Comprimento alvo: ~${profile.lengthTarget} palavras (varie o ritmo, nem toda frase completa).
-- Tom casual de WhatsApp, 1a pessoa. PROIBIDO jargão de marketing (ex.: solução, otimizar, potencializar, alavancar, sinergia, à disposição, atenciosamente).
-- Não use travessão "—", nem listas numeradas, nem emojis em excesso${profile.emoji ? ' (no máx. 1 emoji, se fizer sentido)' : ' (sem emoji desta vez)'}.
-- Escreva como alguém digitando rápido no celular: direto, natural, sem soar publicitário.\n`;
-}
-// Pós-processador: informalidades SUTIS e reversíveis + remoção de marcas de IA.
-function humanizeWhatsapp(text, profile) {
-  let t = (text || '').trim();
-  if (!t) return t;
-  t = t.replace(/^["“”']+|["“”']+$/g, '').trim();
-  t = t.replace(/\s*—\s*/g, ', ');
-  if (profile && profile.abbreviations) {
-    const abbr = [[/\bvocê\b/i,'vc'],[/\bpara\b/i,'pra'],[/\bestá\b/i,'tá'],[/\btambém\b/i,'tbm'],[/\bpor que\b/i,'pq']];
-    for (const [re, to] of abbr) t = t.replace(re, m => (/[A-ZÀ-Ú]/.test(m[0]) ? to[0].toUpperCase() + to.slice(1) : to));
-  }
-  if (profile && profile.lowercaseStart && /^[A-ZÀ-Ú]/.test(t)) t = t[0].toLowerCase() + t.slice(1);
-  if (profile && profile.ellipsis) t = t.replace(/\.(\s|$)/, '...$1');
-  if (profile && profile.dropFinalPeriod) t = t.replace(/\.\s*$/, '').trim();
-  return t;
-}
-// Divide mensagens longas em 2 "bolhas", como um humano no WhatsApp.
-function splitBubbles(text) {
-  const t = (text || '').trim();
-  if (t.length < 160) return [t];
-  const sentences = t.split(/(?<=[.!?])\s+/);
-  if (sentences.length < 2) return [t];
-  const mid = Math.ceil(sentences.length / 2);
-  return [sentences.slice(0, mid).join(' ').trim(), sentences.slice(mid).join(' ').trim()].filter(Boolean);
-}
-// Delay de envio realista e variável (ms): base + proporcional ao tamanho + jitter.
-function humanDelayMs(text) {
-  const words = (text || '').trim().split(/\s+/).filter(Boolean).length;
-  const base = 8000, typing = words * 380, jitter = Math.floor(Math.random() * 25000);
-  return Math.min(base + typing + jitter, 240000);
-}
+// Camada de humanização anti-detecção de bot (funções puras e testáveis).
+const {
+  BOT_WORDS, botWordScan, similarity, maxSimilarity,
+  styleProfile, humanizationBlock, humanizeWhatsapp,
+  splitBubbles, humanDelayMs, offHours, qualityIssues,
+} = require('./lib/humanize');
 
 const WA_SYSTEM = 'Você é um SDR brasileiro especialista em prospecção por WhatsApp. Escreve mensagens curtas, humanas e específicas para conseguir UMA reunião com a pessoa. Nunca soa como robô, template ou marketing genérico. Segue à risca as regras dadas pelo revisor humano. REGRA ABSOLUTA: sua resposta é SEMPRE o texto de UMA mensagem de WhatsApp pronta para enviar ao lead — você NUNCA faz perguntas, NUNCA pede esclarecimento, NUNCA comenta sobre a tarefa nem fala com o operador. Se faltar alguma informação, use o melhor palpite pelo contexto e escreva a mensagem mesmo assim.';
 
@@ -2287,21 +2351,41 @@ function buildCompanyDocsContext(db, companyId, terms, budget = Math.floor(MAX_P
 }
 
 async function generateWhatsapp(company, contact, observation, ctx, previous, product) {
-  const { rules, negExamples, threadHistory, docsContext, sender } = ctx || {};
-  const profile = (ctx && ctx.profile) || styleProfile();
+  const { rules, negExamples, threadHistory, docsContext, sender, recentTexts, threadSeed } = ctx || {};
+  const profile = (ctx && ctx.profile) || styleProfile(threadSeed);
   const humanBlock = humanizationBlock(profile);
-  const userPrompt = buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product, docsContext, sender , humanBlock });
-  let out = (await callClaude(WA_SYSTEM, userPrompt, 400) || '').trim();
-  if (!out || /^\[ERRO API/.test(out)) return { error: 'Falha ao gerar (IA indisponível)' };
-  if (looksLikeMeta(out)) {
-    // Modelo perguntou em vez de gerar — força uma reescrita direta.
-    const firm = userPrompt + '\n\nATENÇÃO: NÃO faça perguntas nem comentários. Escreva AGORA apenas a mensagem final de WhatsApp, começando direto pela saudação ao lead pelo primeiro nome.';
-    const retry = (await callClaude(WA_SYSTEM, firm, 400) || '').trim();
-    if (retry && !/^\[ERRO API/.test(retry) && !looksLikeMeta(retry)) out = retry;
-    else if (previous) out = previous; // último recurso: mantém a mensagem atual (nunca devolve pergunta)
+  const basePrompt = buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product, docsContext, sender, humanBlock });
+
+  // Até 3 tentativas: regenera se a IA sair do papel, usar jargão de robô, ou
+  // ficar parecida demais com mensagens recentes (itens 1 e 2 do anti-bot).
+  let best = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let extra = '';
+    if (attempt > 0 && best) {
+      const reasons = [];
+      if (best.issues.botMarks.length) reasons.push(`remova termos que soam de robô/marketing: ${best.issues.botMarks.join(', ')}`);
+      if (best.issues.tooSimilar) reasons.push('está parecida demais com mensagens que você já mandou — mude abertura, ângulo e palavras');
+      extra = `
+
+ATENÇÃO: reescreva do zero. ${reasons.join('. ')}. Não faça perguntas nem comentários; devolva só a mensagem.`;
+    }
+    let out = (await callClaude(WA_SYSTEM, basePrompt + extra, 400) || '').trim();
+    if (!out || /^\[ERRO API/.test(out)) { if (best) break; return { error: 'Falha ao gerar (IA indisponível)' }; }
+    if (looksLikeMeta(out)) {
+      const firm = basePrompt + `
+
+ATENÇÃO: NÃO faça perguntas nem comentários. Escreva AGORA apenas a mensagem final de WhatsApp, começando direto pela saudação ao lead pelo primeiro nome.`;
+      const retry = (await callClaude(WA_SYSTEM, firm, 400) || '').trim();
+      if (retry && !/^\[ERRO API/.test(retry) && !looksLikeMeta(retry)) out = retry;
+      else if (previous) out = previous;
+    }
+    out = humanizeWhatsapp(out, profile);
+    const issues = qualityIssues(out, recentTexts || []);
+    if (!best || issues.botMarks.length < best.issues.botMarks.length ||
+        (issues.botMarks.length === best.issues.botMarks.length && issues.simScore < best.issues.simScore)) best = { text: out, issues };
+    if (issues.ok) break;
   }
-  out = humanizeWhatsapp(out, profile);
-  return { text: out, prompt: userPrompt, profile };
+  return { text: best.text, prompt: basePrompt, profile, quality: best.issues };
 }
 
 // "Gerar de novo": reescreve a mensagem usando a observação do avaliador + o que a IA
@@ -2316,6 +2400,7 @@ app.post('/api/messages/:id/regenerate', async (req, res) => {
   const observation = (req.body.observation || msg.score_comment || '').toString().trim();
   const channel = msg.channel || 'whatsapp';
   // v2: blocos estruturados (regras + negativos ancorados + histórico da thread) — não mais o blob legado.
+  const recentTexts = db.prepare("SELECT content FROM messages WHERE direction='outbound' AND content IS NOT NULL AND id<>? AND (thread_id=? OR company_id=?) ORDER BY id DESC LIMIT 8").all(msg.id, msg.thread_id, msg.company_id).map(r => r.content);
   const ctx = {
     rules: buildRules(db, channel, role),
     negExamples: buildNegativeExamples(db, channel),
@@ -2324,6 +2409,8 @@ app.post('/api/messages/:id/regenerate', async (req, res) => {
     docsContext: buildCompanyDocsContext(db, msg.company_id, [msg.product, contact?.role, company?.sector].filter(Boolean)),
     // identidade do remetente conforme o perfil (marketing x vendas) do usuário logado
     sender: getSessionUser(db, req),
+    recentTexts,
+    threadSeed: msg.thread_id,
   };
   db.close();
 
@@ -2340,8 +2427,8 @@ app.post('/api/messages/:id/regenerate', async (req, res) => {
     score: msg.score ?? null, score_comment: msg.score_comment || null,
     created_at: msg.created_at || null,
   });
-  db2.prepare('UPDATE messages SET content=?, ai_original=?, score=NULL, prompt_used=?, versions=? WHERE id=?')
-    .run(newText, newText, userPrompt, JSON.stringify(versions), req.params.id);
+  db2.prepare('UPDATE messages SET content=?, ai_original=?, score=NULL, prompt_used=?, versions=?, style_profile=? WHERE id=?')
+    .run(newText, newText, userPrompt, JSON.stringify(versions), JSON.stringify(gen.profile || {}), req.params.id);
   db2.close();
   res.json({ ok: true, content: newText, version: versions.length + 1 });
 });
@@ -2992,6 +3079,10 @@ ${painCTA}
 CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO tente vender diretamente.`;
 
       let content = await callClaude('Você é copywriter B2B especialista em sequências multicanal.', prompt, 400);
+      // (#2) Se a IA falhou, aborta SEM gravar texto de erro como mensagem da sequência.
+      if (isAiError(content)) {
+        return res.status(502).json({ error: 'IA indisponível ao gerar a sequência', detail: content });
+      }
 
       // (#3) Auto-crítica: a 1ª mensagem é o ponto mais crítico. Antes de gravar, um juiz
       // avalia se ela "não parece bot" (situacional, personalizada, sem clichê). Se reprovar,
@@ -3411,11 +3502,18 @@ async function generateSequenceForCompany(companyId, productValue, painPoint = '
       rules, posExamples, negExamples, threadHistory,
     });
 
-    const content = await callClaude(SEQ_SYSTEM, prompt, 400);
+    const profile = styleProfile(threadId);
+    let content = await callClaude(SEQ_SYSTEM, prompt, 400);
+    if (content && botWordScan(humanizeWhatsapp(content, profile)).length) {
+      const strict = prompt + ' ATENÇÃO: sem jargão de marketing (solução, otimizar, potencializar, etc.), sem travessão, tom casual de WhatsApp. Devolva só a mensagem.';
+      const retry = await callClaude(SEQ_SYSTEM, strict, 400);
+      if (retry) content = retry;
+    }
+    content = humanizeWhatsapp(content, profile);
     const promptUsed = `[SYSTEM]\n${SEQ_SYSTEM}\n\n[USER]\n${prompt}`;
     const dbW = getDb();
     const seqNo = dbW.prepare('SELECT COALESCE(MAX(seq_no),0)+1 AS n FROM messages WHERE thread_id=?').get(threadId).n;
-    const r = dbW.prepare("INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, created_at, prompt_used, thread_id, seq_no, direction) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,'outbound')").run(contact.id, companyId, tpl.channel, tpl.day, tpl.type, content, content, 'pending', promptUsed, threadId, seqNo);
+    const r = dbW.prepare("INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, created_at, prompt_used, thread_id, seq_no, direction, style_profile) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,'outbound',?)").run(contact.id, companyId, tpl.channel, tpl.day, tpl.type, content, content, 'pending', promptUsed, threadId, seqNo, JSON.stringify(profile));
     dbW.close();
     results.push({ id: r.lastInsertRowid, channel: tpl.channel, day: tpl.day, content, status: 'pending', approved: 0, contact_name: contact.name });
   }
@@ -3580,13 +3678,21 @@ Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou
 
   const result = await callClaude('Você é classificador de intenção em vendas B2B.', prompt, 200);
   let sentiment, reasoning, iscore;
-  try { const p = JSON.parse(extractJsonLoose(result)); sentiment = p.sentiment; reasoning = p.reasoning; iscore = parseInt(p.interest_score) || 5; }
-  catch { sentiment = 'out_of_scope'; reasoning = result; iscore = 5; }
+  if (isAiError(result)) {
+    // (#2) IA fora do ar: NÃO inventa sentimento. Marca para revisão humana sem poluir o funil.
+    sentiment = 'needs_review'; reasoning = 'Classificação indisponível (IA offline) — revisar manualmente.'; iscore = 5;
+  } else {
+    try { const p = JSON.parse(extractJsonLoose(result)); sentiment = p.sentiment; reasoning = p.reasoning; iscore = parseInt(p.interest_score) || 5; }
+    catch { sentiment = 'out_of_scope'; reasoning = result; iscore = 5; }
+  }
 
   const db2 = getDb();
   db2.prepare('INSERT INTO sentiment_logs (lead_id, contact_id, company_id, response_text, sentiment, reasoning, interest_score) VALUES (?,?,?,?,?,?,?)').run(null, contact_id, companyId, response_text, sentiment, reasoning, iscore);
+  // (#2) Em needs_review, mantém o status atual (não rebaixa nem promove sem certeza).
   const statusMap = { interested: 'hot_lead', technical_question: 'needs_followup', negative: 'rejected', out_of_scope: 'contacted', wants_meeting: 'hot_lead' };
-  db2.prepare('UPDATE companies SET status=?,interest_score=? WHERE id=?').run(statusMap[sentiment] || 'contacted', iscore, companyId);
+  if (sentiment !== 'needs_review') {
+    db2.prepare('UPDATE companies SET status=?,interest_score=? WHERE id=?').run(statusMap[sentiment] || 'contacted', iscore, companyId);
+  }
 
   // Cria notificação — mesmo comportamento do webhook real
   const company = db2.prepare('SELECT name, auto_reply_mode FROM companies WHERE id=?').get(companyId);
@@ -3598,13 +3704,31 @@ Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou
     : `💬 Nova resposta de ${companyName} (${sentLabels[sentiment] || sentiment})`;
   db2.prepare('INSERT INTO notifications (company_id,contact_id,message_id,type,title,body) VALUES (?,?,?,?,?,?)')
     .run(companyId, contact_id, receivedMsgId, notifType, notifTitle, response_text);
+
+  // (#7) Intenção de reunião → sugere/cria slot automaticamente em vez de exigir passo manual.
+  let meeting_suggestion = null;
+  if (sentiment === 'wants_meeting') {
+    const already = db2.prepare("SELECT id FROM schedule_slots WHERE company_id=? AND booked=1").get(companyId);
+    const parsed = parseMeetingDateTime(response_text);
+    if (!already && parsed) {
+      // Horário explícito no texto → cria slot SUGERIDO (não reservado; operador confirma).
+      const s = db2.prepare(
+        'INSERT INTO schedule_slots (date_time,duration_min,meeting_link,booked,company_id,contact_id) VALUES (?,?,?,0,?,?)'
+      ).run(parsed.iso, 15, '', companyId, contact_id);
+      meeting_suggestion = { slot_id: s.lastInsertRowid, date_time: parsed.iso, label: parsed.label, booked: false };
+      db2.prepare('INSERT INTO notifications (company_id,contact_id,message_id,type,title,body) VALUES (?,?,?,?,?,?)')
+        .run(companyId, contact_id, receivedMsgId, 'meeting_suggested', `🗓️ Horário sugerido: ${parsed.label}`, `Confirme o slot para ${parsed.label}.`);
+    } else if (!already) {
+      meeting_suggestion = { slot_id: null, needs_time: true, hint: 'Prospect quer reunião mas sem horário claro — proponha 2 opções.' };
+    }
+  }
   db2.close();
   broadcastInboxUpdate();
 
   // Modo treino: NÃO gera a resposta do bot automaticamente. A resposta da IA é criada
   // só quando o operador clica em "Simular resposta do Bot" / "Responder com IA" — assim
   // cada mensagem gerada pela IA é um passo explícito e revisável (nada escapa da avaliação).
-  res.json({ ok: true, sentiment, interest_score: iscore, auto_reply_status: null });
+  res.json({ ok: true, sentiment, interest_score: iscore, auto_reply_status: null, meeting_suggestion });
 });
 
 // Simula a resposta do BOT (IA em treinamento) para a última mensagem recebida.
@@ -3630,14 +3754,27 @@ app.post('/api/companies/:id/simulator/bot-reply', async (req, res) => {
     return res.status(400).json({ error: 'Nenhuma mensagem recebida para responder. Simule uma resposta do prospect primeiro.' });
   }
 
+  // (#5) Coerência de agenda: extrai os horários já citados na conversa e o mais recente,
+  // para o bot não "reabrir" ou contradizer um horário já combinado.
+  const mentionedTimes = [];
+  for (const turn of priorTurns) {
+    const p = parseMeetingDateTime(turn.content);
+    if (p) mentionedTimes.push(p.label);
+  }
+  const lastAgreed = mentionedTimes.length ? mentionedTimes[mentionedTimes.length - 1] : null;
+  const scheduleNote = lastAgreed
+    ? `\n## AGENDA (coerência — IMPORTANTE)\nHorário mais recente na conversa: "${lastAgreed}". NÃO proponha horários novos nem reabra a negociação de data se já houver um combinado; apenas confirme esse horário de forma objetiva. Se o cliente citou dois horários diferentes, peça UMA confirmação explícita de qual vale.`
+    : '';
+
   const draftPrompt = `Escreva a PRÓXIMA mensagem do VENDEDOR (bot) via WhatsApp, dando continuidade natural à conversa acima.
 Regras:
 - Responda ao que o cliente disse por último; avance a conversa
 - NÃO repita pontos, argumentos ou perguntas que você (vendedor) já fez antes
 - Curta (máx 80 palavras), objetiva, tom consultivo e profissional
 - Se fizer sentido, convide para uma conversa de 15 minutos
-- Escreva APENAS o texto da mensagem`;
+- Escreva APENAS o texto da mensagem${scheduleNote}`;
   const draft_reply = await callClaude('Você é SDR especialista em respostas rápidas para prospects.', draftPrompt, 200, priorTurns);
+  if (isAiError(draft_reply)) return res.status(502).json({ error: 'IA indisponível ao gerar resposta do bot', detail: draft_reply });
 
   // Modo treino: resposta do bot sempre como rascunho pendente para revisão/avaliação.
   const status   = 'pending';
@@ -3698,6 +3835,7 @@ Regras:
 - NÃO invente informações da empresa`;
 
   const reply = await callClaude('Você é um prospect B2B respondendo uma mensagem de prospecção via WhatsApp.', prompt, 150, priorTurns);
+  if (isAiError(reply)) return res.status(502).json({ error: 'IA indisponível ao gerar resposta do prospect', detail: reply });
   res.json({ generated_reply: reply.trim() });
 });
 
@@ -3892,6 +4030,29 @@ app.post('/api/messages/:id/approve', async (req, res) => {
     return res.status(404).json({ error: 'Mensagem não encontrada' });
   }
 
+  // (#2) Nunca envia um texto de erro da IA como se fosse mensagem.
+  if (isAiError(msg.content)) {
+    db.close();
+    return res.status(422).json({ error: 'Mensagem contém erro de IA — regenere antes de aprovar.' });
+  }
+
+  // (#3) Guardrail de placeholders: bloqueia envio com campos não resolvidos ([Nome], {empresa}, etc.).
+  // O operador pode forçar conscientemente com override_placeholder=true.
+  const placeholders = findUnresolvedPlaceholders(msg.content);
+  if (placeholders.length && !req.body.override_placeholder) {
+    db.close();
+    return res.status(422).json({ error: 'Placeholders não resolvidos na mensagem', placeholders });
+  }
+
+  // (#10) LGPD: bloqueia envio a contatos/empresas com opt-out ou flag "não contatar".
+  const lgpd = sendingBlockedByConsent(db, msg.company_id, msg.contact_id);
+  if (lgpd) {
+    db.prepare('INSERT INTO consent_logs (company_id, contact_id, action, details) VALUES (?,?,?,?)')
+      .run(msg.company_id || null, msg.contact_id || null, 'send_blocked', lgpd);
+    db.close();
+    return res.status(403).json({ error: 'Envio bloqueado por consentimento/LGPD', reason: lgpd });
+  }
+
   if (msg.channel === 'whatsapp') {
     let whatsappNum = null;
     let contactId = null;
@@ -3946,6 +4107,8 @@ app.post('/api/messages/:id/approve', async (req, res) => {
 
   db.prepare("UPDATE messages SET approved=1,status='approved' WHERE id=?").run(req.params.id);
   db.close();
+  // (#9) Auditoria: quem aprovou/enviou qual mensagem e quando.
+  audit(req, 'message_approved', `Msg ${req.params.id} aprovada (${msg.channel})`, { company_id: msg.company_id, contact_id: msg.contact_id, message_id: Number(req.params.id) });
   res.json({ ok: true });
 });
 
@@ -4046,10 +4209,10 @@ app.post('/api/blindtest/seed', (req, res) => {
     const autos = Array.isArray(req.body.auto) ? req.body.auto : [];
     const batch = (req.body.batch || new Date().toISOString().slice(0, 16)).toString();
     if (req.body.reset) db.exec('DELETE FROM blind_test_guesses; DELETE FROM blind_test_items;');
-    const ins = db.prepare('INSERT INTO blind_test_items (source, text, batch) VALUES (?,?,?)');
+    const ins = db.prepare('INSERT INTO blind_test_items (source, text, scenario, batch) VALUES (?,?,?,?)');
     let n = 0;
     const add = (arr, source) => arr.map(t => String(t || '').trim()).filter(Boolean)
-      .forEach(t => { ins.run(source, t, batch); n++; });
+      .forEach(t => { ins.run(source, t, (req.body.scenario || '').toString(), batch); n++; });
     db.exec('BEGIN');
     try { add(reals, 'real'); add(autos, 'auto'); db.exec('COMMIT'); }
     catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -4062,7 +4225,7 @@ app.post('/api/blindtest/seed', (req, res) => {
 app.get('/api/blindtest/items', (req, res) => {
   const db = getDb();
   try {
-    const rows = db.prepare('SELECT id, text FROM blind_test_items ORDER BY (id * 2654435761) % 1000003').all();
+    const rows = db.prepare('SELECT id, text, scenario FROM blind_test_items ORDER BY (id * 2654435761) % 1000003').all();
     res.json({ items: rows, total: rows.length });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   finally { db.close(); }
@@ -4072,14 +4235,14 @@ app.get('/api/blindtest/items', (req, res) => {
 app.post('/api/blindtest/guess', (req, res) => {
   const db = getDb();
   try {
-    const { item_id, tester_name, guess } = req.body || {};
+    const { item_id, tester_name, guess, reason } = req.body || {};
     if (!item_id || !tester_name || !['real', 'auto'].includes(guess))
       return res.status(400).json({ error: 'item_id, tester_name e guess (real|auto) obrigatórios' });
     const item = db.prepare('SELECT source FROM blind_test_items WHERE id=?').get(item_id);
     if (!item) return res.status(404).json({ error: 'Item não encontrado' });
     const correct = item.source === guess ? 1 : 0;
-    db.prepare('INSERT INTO blind_test_guesses (item_id, tester_name, guess, correct) VALUES (?,?,?,?)')
-      .run(item_id, String(tester_name).trim(), guess, correct);
+    db.prepare('INSERT INTO blind_test_guesses (item_id, tester_name, guess, correct, reason) VALUES (?,?,?,?,?)')
+      .run(item_id, String(tester_name).trim(), guess, correct, (reason || '').toString().slice(0, 120));
     res.json({ ok: true, correct: !!correct });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   finally { db.close(); }
@@ -4092,12 +4255,41 @@ app.get('/api/blindtest/results', (req, res) => {
     const agg = db.prepare('SELECT COUNT(*) total, COALESCE(SUM(correct),0) hits FROM blind_test_guesses').get();
     const perTester = db.prepare(`SELECT tester_name, COUNT(*) total, COALESCE(SUM(correct),0) hits
       FROM blind_test_guesses GROUP BY tester_name ORDER BY tester_name`).all();
+    const reasons = db.prepare("SELECT reason, COUNT(*) n FROM blind_test_guesses WHERE reason IS NOT NULL AND reason<>'' GROUP BY reason ORDER BY n DESC LIMIT 8").all();
     const rate = agg.total ? agg.hits / agg.total : 0;
     res.json({
       total: agg.total, hits: agg.hits, accuracy: rate,
       success: agg.total > 0 && rate < 0.5,
       testers: perTester.map(t => ({ ...t, accuracy: t.total ? t.hits / t.total : 0 })),
+      reasons,
     });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  finally { db.close(); }
+});
+
+// Converte as mensagens da automação mais 'denunciadas' (alta taxa de detecção)
+// em regras aprendidas negativas, fechando o loop com o RLHF existente (item 8).
+app.post('/api/blindtest/harvest', (req, res) => {
+  const db = getDb();
+  try {
+    const minGuesses = parseInt(req.body.min_guesses) || 2;
+    const minRate = req.body.min_rate !== undefined ? Number(req.body.min_rate) : 0.6;
+    const rows = db.prepare(`
+      SELECT i.id, i.text, COUNT(g.id) total, COALESCE(SUM(g.correct),0) hits
+      FROM blind_test_items i JOIN blind_test_guesses g ON g.item_id=i.id
+      WHERE i.source='auto'
+      GROUP BY i.id HAVING total >= ? AND (CAST(hits AS REAL)/total) >= ?`).all(minGuesses, minRate);
+    const ins = db.prepare(`INSERT INTO learned_patterns (channel, role, pattern, confidence, sample_size, scope, status, source_message_ids, updated_at)
+      VALUES ('whatsapp', '', ?, 0.6, ?, 'channel', 'active', '[]', datetime('now'))`);
+    let created = 0;
+    for (const r of rows) {
+      const marks = botWordScan(r.text);
+      const detail = marks.length ? ` (evite: ${marks.join(', ')})` : '';
+      const pattern = `Evite mensagens como esta, facilmente identificada como automação${detail}: "${(r.text || '').slice(0, 140)}"`;
+      ins.run(pattern, r.total);
+      created++;
+    }
+    res.json({ ok: true, harvested: created, candidates: rows.length });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   finally { db.close(); }
 });
@@ -4112,9 +4304,10 @@ app.post('/api/messages/:id/send', (req, res) => {
   }
   db.close();
   broadcastInboxUpdate();
-  const delayMs = humanDelayMs(msg.content || '');
+  const hour = new Date().getHours();
+  const delayMs = humanDelayMs(msg.content || '', { hour });
   const bubbles = splitBubbles(msg.content || '');
-  res.json({ ok: true, delay_ms: delayMs, delay_label: `${Math.round(delayMs / 1000)}s`, bubbles: bubbles.length, note: 'Delay humano variável aplicado' });
+  res.json({ ok: true, delay_ms: delayMs, delay_label: `${Math.round(delayMs / 1000)}s`, off_hours: offHours(hour), bubbles: bubbles.length, note: 'Delay humano variável aplicado' });
 });
 
 // Documents
@@ -4438,6 +4631,7 @@ app.post('/api/schedule/slots', async (req, res) => {
     }
   }
 
+  if (booked) audit(req, 'meeting_booked', `Reunião ${date_time}`, { company_id: company_id || null, contact_id: contact_id || null });
   res.json({ id: r.lastInsertRowid, date_time });
 });
 
@@ -4807,11 +5001,36 @@ checkApis();
 // ── Métricas (Feature 7) ───────────────────────────────────────────────────────
 app.get('/api/metrics/overview', (req, res) => {
   const db = getDb();
-  const by_channel = db.prepare("SELECT channel, COUNT(*) as total, SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) as sent, ROUND(AVG(CASE WHEN score IS NOT NULL THEN score * 20 ELSE 0 END), 0) as response_rate FROM messages GROUP BY channel").all();
+  // NOTA: `quality_score` é a antiga "response_rate" (média de score×20) — renomeada para não
+  // confundir com taxa de resposta de verdade. Mantida para compatibilidade do painel.
+  const by_channel = db.prepare("SELECT channel, COUNT(*) as total, SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) as sent, ROUND(AVG(CASE WHEN score IS NOT NULL THEN score * 20 ELSE 0 END), 0) as quality_score, ROUND(AVG(CASE WHEN score IS NOT NULL THEN score * 20 ELSE 0 END), 0) as response_rate FROM messages GROUP BY channel").all();
   const by_role = db.prepare("SELECT role, COUNT(*) as total FROM contacts GROUP BY role").all();
   const funnel = db.prepare("SELECT status, COUNT(*) as total FROM companies GROUP BY status").all();
+
+  // (#4) TAXA DE RESPOSTA REAL (funil): dos contatos abordados, quantos responderam ao menos 1x.
+  // "abordado" = existe mensagem outbound/enviada para o contato; "respondeu" = existe inbound (status='received').
+  const contacted = db.prepare(
+    "SELECT COUNT(DISTINCT contact_id) AS n FROM messages WHERE contact_id IS NOT NULL AND (direction='outbound' OR status IN ('sent','approved'))"
+  ).get().n || 0;
+  const responded = db.prepare(
+    "SELECT COUNT(DISTINCT contact_id) AS n FROM messages WHERE contact_id IS NOT NULL AND status='received'"
+  ).get().n || 0;
+  // (#4) TAXA DE CONVERSÃO PARA REUNIÃO: empresas em meeting_set sobre empresas abordadas.
+  const companiesContacted = db.prepare(
+    "SELECT COUNT(*) AS n FROM companies WHERE status IN ('contacted','hot_lead','needs_followup','meeting_set','rejected')"
+  ).get().n || 0;
+  const meetingsSet = db.prepare("SELECT COUNT(*) AS n FROM companies WHERE status='meeting_set'").get().n || 0;
+
+  const engagement = {
+    contacts_contacted: contacted,
+    contacts_responded: responded,
+    response_rate_pct: contacted ? Math.round((responded / contacted) * 100) : 0,
+    companies_contacted: companiesContacted,
+    meetings_set: meetingsSet,
+    meeting_conversion_pct: companiesContacted ? Math.round((meetingsSet / companiesContacted) * 100) : 0,
+  };
   db.close();
-  res.json({ by_channel, by_role, funnel, ab_stats: { decided: 0, b_won: 0 } });
+  res.json({ by_channel, by_role, funnel, engagement, ab_stats: { decided: 0, b_won: 0 } });
 });
 
 app.get('/api/metrics/timing', (req, res) => {
@@ -4835,16 +5054,90 @@ app.get('/api/followup/pending', (req, res) => {
   res.json(rows);
 });
 
-app.post('/api/followup/:id/generate', (req, res) => {
-  const channel = req.body.channel || 'email';
+// (#6) Gera um follow-up REAL (IA + contexto da conversa) como rascunho pendente para aprovação.
+async function generateFollowupDraft(contactId, channel = 'whatsapp') {
   const db = getDb();
-  const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(req.params.id);
-  if(!contact) { db.close(); return res.status(404).json({error: 'Not found'}); }
-  const content = `Follow up automático via ${channel} para ${contact.name}...`;
-  db.prepare("INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at) VALUES (?,?,?,?,?,?,?,'pending',0,datetime('now'))")
-    .run(contact.id, contact.company_id, channel, 5, 'follow_up', content, content);
+  const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(contactId);
+  if (!contact) { db.close(); return { error: 'Contato não encontrado' }; }
+  const company = db.prepare('SELECT * FROM companies WHERE id=?').get(contact.company_id);
+  // Evita duplicar: se já existe um follow-up pendente recente para este contato, não gera outro.
+  const dupe = db.prepare(
+    "SELECT id FROM messages WHERE contact_id=? AND msg_type='follow_up' AND status='pending'"
+  ).get(contactId);
+  if (dupe) { db.close(); return { skipped: 'já existe follow-up pendente', id: dupe.id }; }
+  const priorTurns = buildSimTurns(db, contact.company_id, contactId, 'vendor');
   db.close();
-  res.json({ ok: true });
+
+  const roleInfo = ROLE_PROFILES[contact?.role] || ROLE_PROFILES.other;
+  const prompt = `Escreva uma mensagem de FOLLOW-UP curta e educada via ${channel} para reengajar o contato
+${contact.name} (${company?.name || 'empresa'}), que não respondeu à última abordagem.
+Tom: ${roleInfo.tone}. Foco: ${roleInfo.focus}.
+Regras:
+- NÃO soe insistente nem repita a mensagem anterior literalmente
+- Traga um novo ângulo de valor ou uma pergunta leve que facilite a resposta
+- Máx 60 palavras, CTA suave (ex.: "faz sentido um papo rápido?")
+- Escreva APENAS o texto da mensagem`;
+  const content = await callClaude('Você é SDR especialista em follow-ups B2B que reengajam sem pressionar.', prompt, 200, priorTurns);
+  if (isAiError(content)) return { error: 'IA indisponível', detail: content };
+
+  const db2 = getDb();
+  const threadId = latestThreadForContact(db2, contactId) || nextThreadId(db2);
+  const seqNo = (db2.prepare('SELECT COALESCE(MAX(seq_no),0)+1 AS n FROM messages WHERE thread_id=?').get(threadId).n) || 1;
+  const r = db2.prepare(
+    "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, direction, thread_id, seq_no, created_at) VALUES (?,?,?,?, 'follow_up', ?, ?, 'pending', 0, 'outbound', ?, ?, datetime('now'))"
+  ).run(contactId, contact.company_id, channel, 5, content.trim(), content.trim(), threadId, seqNo);
+  db2.close();
+  return { id: r.lastInsertRowid, content: content.trim() };
+}
+
+app.post('/api/followup/:id/generate', async (req, res) => {
+  const channel = req.body.channel || 'whatsapp';
+  const out = await generateFollowupDraft(parseInt(req.params.id), channel);
+  if (out.error) return res.status(out.error === 'Contato não encontrado' ? 404 : 502).json(out);
+  broadcastInboxUpdate();
+  res.json({ ok: true, ...out });
+});
+
+// (#6) Agendador: a cada intervalo, gera rascunhos de follow-up para leads parados há >= N dias.
+// Rascunhos ficam PENDENTES (aprovação humana). Desligado por padrão; habilite via env.
+const FOLLOWUP_ENABLED = process.env.FOLLOWUP_SCHEDULER === 'on';
+const FOLLOWUP_DAYS = parseInt(process.env.FOLLOWUP_DAYS || '3');
+const FOLLOWUP_INTERVAL_MS = parseInt(process.env.FOLLOWUP_INTERVAL_MS || String(6 * 60 * 60 * 1000)); // 6h
+async function runFollowupSweep() {
+  try {
+    const db = getDb();
+    const rows = db.prepare(`
+      SELECT ct.id FROM contacts ct JOIN companies c ON c.id = ct.company_id
+      WHERE c.status NOT IN ('hot_lead','meeting_set','opted_out','rejected')
+        AND (ct.opted_out IS NULL OR ct.opted_out=0)
+        AND CAST(julianday('now') - julianday(c.created_at) AS INTEGER) >= ?
+      LIMIT 25
+    `).all(FOLLOWUP_DAYS).map(r => r.id);
+    db.close();
+    let created = 0;
+    for (const id of rows) {
+      const out = await generateFollowupDraft(id, 'whatsapp');
+      if (out && out.id && !out.skipped) created++;
+    }
+    if (created) { console.log(`[followup] ${created} rascunho(s) de follow-up gerados`); broadcastInboxUpdate(); }
+  } catch (e) { console.warn('[followup] sweep falhou:', e.message); }
+}
+if (FOLLOWUP_ENABLED) {
+  console.log(`[followup] agendador ligado: a cada ${FOLLOWUP_INTERVAL_MS}ms, leads parados >= ${FOLLOWUP_DAYS}d`);
+  setInterval(runFollowupSweep, FOLLOWUP_INTERVAL_MS).unref?.();
+}
+// Gatilho manual da varredura (útil para testes e para operador acionar sob demanda).
+app.post('/api/followup/sweep', async (req, res) => { await runFollowupSweep(); res.json({ ok: true }); });
+
+// (#9) Leitura do audit log (mais recentes primeiro), com filtros opcionais.
+app.get('/api/audit', (req, res) => {
+  const db = getDb();
+  const limit = Math.min(parseInt(req.query.limit || '100'), 500);
+  const rows = req.query.company_id
+    ? db.prepare('SELECT * FROM audit_logs WHERE company_id=? ORDER BY id DESC LIMIT ?').all(parseInt(req.query.company_id), limit)
+    : db.prepare('SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?').all(limit);
+  db.close();
+  res.json(rows);
 });
 
 // ─── RLHF / Aprendizado ────────────────────────────────────────────────────
