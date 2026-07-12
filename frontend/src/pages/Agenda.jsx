@@ -1,6 +1,15 @@
 import React, { useState, useEffect } from 'react'
 import { api, esc } from '../api.js'
 
+// "2026-07-14T10:00" → "ter., 14/07/2026 às 10:00" (mesmo rótulo que o bot usa na conversa)
+function fmtDateTime(dateTimeStr) {
+  const d = new Date(dateTimeStr)
+  if (isNaN(d.getTime())) return dateTimeStr
+  const dia = d.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' })
+  const hora = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  return `${dia} às ${hora}`
+}
+
 export default function Agenda({ toast, loadStats }) {
   const [slots, setSlots] = useState([])
   const [date, setDate] = useState('')
@@ -61,16 +70,29 @@ export default function Agenda({ toast, loadStats }) {
             <div className="card p-3">
               <h6 className="fw-bold mb-3"><i className="bi bi-calendar-plus me-1"></i>Novo Horário Disponível</h6>
               <div className="mb-2">
-                <input 
-                  className="form-control form-control-sm" 
-                  type="datetime-local" 
+                <label htmlFor="agenda-date" className="form-label small fw-semibold mb-1">
+                  <i className="bi bi-calendar3 me-1"></i>Data e hora
+                </label>
+                <input
+                  id="agenda-date"
+                  className="form-control form-control-sm"
+                  type="datetime-local"
                   value={date}
                   onChange={(e) => setDate(e.target.value)}
                 />
+                {date && (
+                  <div className="form-text mt-1">
+                    <i className="bi bi-check-circle me-1"></i>{fmtDateTime(date)}
+                  </div>
+                )}
               </div>
               <div className="mb-2">
-                <select 
-                  className="form-select form-select-sm" 
+                <label htmlFor="agenda-duration" className="form-label small fw-semibold mb-1">
+                  <i className="bi bi-clock me-1"></i>Duração
+                </label>
+                <select
+                  id="agenda-duration"
+                  className="form-select form-select-sm"
                   value={duration}
                   onChange={(e) => setDuration(e.target.value)}
                 >
@@ -80,9 +102,13 @@ export default function Agenda({ toast, loadStats }) {
                 </select>
               </div>
               <div className="mb-3">
-                <input 
-                  className="form-control form-control-sm" 
-                  placeholder="Link da reunião (Meet, Zoom...)" 
+                <label htmlFor="agenda-link" className="form-label small fw-semibold mb-1">
+                  <i className="bi bi-link-45deg me-1"></i>Link da reunião <span className="text-muted fw-normal">(opcional)</span>
+                </label>
+                <input
+                  id="agenda-link"
+                  className="form-control form-control-sm"
+                  placeholder="https://meet.google.com/..."
                   value={link}
                   onChange={(e) => setLink(e.target.value)}
                 />
@@ -125,7 +151,7 @@ export default function Agenda({ toast, loadStats }) {
                       <tbody>
                         {slots.map(s => (
                           <tr key={s.id}>
-                            <td style={{fontSize: '.85rem'}}>{s.date_time}</td>
+                            <td style={{fontSize: '.85rem'}}>{fmtDateTime(s.date_time)}</td>
                             <td className="d-none d-md-table-cell">{s.duration_min} min</td>
                             <td>
                               {s.booked ? (

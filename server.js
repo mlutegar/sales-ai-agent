@@ -812,12 +812,20 @@ function initDb() {
   addColumnIfNotExists(db, 'blind_test_items', 'scenario', "TEXT DEFAULT ''");
   addColumnIfNotExists(db, 'blind_test_guesses', 'reason', "TEXT DEFAULT ''");
 
-  // Seed usuário admin padrão
-  const adminUser = db.prepare('SELECT id FROM users WHERE username = ?').get('admin');
-  if (!adminUser) {
-    const hash = bcrypt.hashSync('admin123', 10);
-    db.prepare("INSERT INTO users (username, password, name) VALUES (?, ?, ?)").run('admin', hash, 'Administrador');
-    console.log('Usuário admin criado — login: admin | senha: admin123');
+  // Seed das contas de demonstração (as mesmas anunciadas na tela de login)
+  const demoUsers = [
+    { username: 'admin',     password: 'admin123',     name: 'Administrador',  user_type: 'vendas',    company_name: '',            signature_name: '' },
+    { username: 'vendas',    password: 'vendas123',    name: 'Vendedor Demo',  user_type: 'vendas',    company_name: '',            signature_name: 'Vendedor Demo' },
+    { username: 'marketing', password: 'marketing123', name: 'Marketing Demo', user_type: 'marketing', company_name: 'Sua Empresa', signature_name: 'Sua Empresa' },
+  ];
+  for (const u of demoUsers) {
+    const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(u.username);
+    if (!exists) {
+      const hash = bcrypt.hashSync(u.password, 10);
+      db.prepare('INSERT INTO users (username, password, name, user_type, company_name, signature_name) VALUES (?,?,?,?,?,?)')
+        .run(u.username, hash, u.name, u.user_type, u.company_name, u.signature_name);
+      console.log(`Usuário ${u.username} criado — login: ${u.username} | senha: ${u.password}`);
+    }
   }
 
   // Seed da biblioteca de ganchos — arquétipos de 1ª mensagem que amarram uma
@@ -1048,9 +1056,12 @@ Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou
           (autoMode === 'except_meeting' && sentiment !== 'wants_meeting');
 
         if (shouldReply && (sentiment === 'interested' || sentiment === 'technical_question')) {
-          const draftPrompt = sentiment === 'technical_question'
+          // Disponibilidade REAL da agenda interna: o convite só oferece horários
+          // que existem como slot livre (ou nenhum, se a agenda estiver vazia).
+          const agendaNote = agendaAvailabilityBlock(getFreeAgendaSlots(db2));
+          const draftPrompt = (sentiment === 'technical_question'
             ? `O prospect enviou: "${text}"\nDúvida técnica. Responda de forma objetiva (máx 80 palavras) e convide para conversa de 15 minutos. Tom consultivo.`
-            : `O prospect enviou: "${text}"\nDemonstrou interesse. Confirme o interesse e proponha reunião de 15 minutos (máx 60 palavras). Tom entusiasmado mas profissional.`;
+            : `O prospect enviou: "${text}"\nDemonstrou interesse. Confirme o interesse e proponha reunião de 15 minutos (máx 60 palavras). Tom entusiasmado mas profissional.`) + agendaNote;
           let draft = await callClaude('Você é SDR especialista em respostas rápidas.', draftPrompt, 200);
           draft = sanitizeOutbound(draft, styleProfile());
 
@@ -2278,6 +2289,34 @@ const {
   findUnresolvedPlaceholders, stripPlaceholders, sanitizeOutbound,
   productMentioned,
 } = require('./lib/humanize');
+
+// Agenda interna: a IA só propõe horários que existem como slot livre (lib/agenda.js).
+const { slotLabel, conflictsWithBooked, agendaAvailabilityBlock, alternativeLabels } = require('./lib/agenda');
+
+// Slots LIVRES da agenda (disponibilidade real do vendedor): sem reserva, sem
+// empresa vinculada (slot com company_id e booked=0 é sugestão pendente, não
+// disponibilidade) e no futuro. Alimenta os prompts de proposta de horário.
+// "Agora" em ISO local ("YYYY-MM-DDTHH:MM:SS"), mesmo formato do date_time dos slots.
+function localNowIso() {
+  const pad = (n) => String(n).padStart(2, '0');
+  const now = new Date();
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`;
+}
+
+function getFreeAgendaSlots(db, limit = 6) {
+  const free = db.prepare(
+    'SELECT id, date_time, duration_min FROM schedule_slots WHERE booked=0 AND company_id IS NULL AND date_time > ? ORDER BY date_time LIMIT 50'
+  ).all(localNowIso());
+  // Um slot "livre" que colide com reunião já marcada não é disponibilidade real
+  // (ex.: slot avulso às 19h + reunião confirmada às 19h) — não pode ser oferecido.
+  const booked = getBookedAgendaSlots(db);
+  return free.filter((s) => !conflictsWithBooked(s.date_time, s.duration_min, booked)).slice(0, limit);
+}
+
+// Slots já RESERVADOS no futuro — base da checagem de conflito de horário.
+function getBookedAgendaSlots(db) {
+  return db.prepare('SELECT date_time, duration_min FROM schedule_slots WHERE booked=1 AND date_time > ?').all(localNowIso());
+}
 
 // Contador monotônico para agrupar variantes A/B de uma mesma geração.
 // Evita Date.now() (não determinístico) e garante unicidade dentro do processo.
@@ -3896,15 +3935,25 @@ Nota: use "wants_meeting" quando o prospect pede para marcar reunião, ligar, ou
     const already = db2.prepare("SELECT id FROM schedule_slots WHERE company_id=? AND booked=1").get(companyId);
     const parsed = parseMeetingDateTime(response_text);
     if (!already && parsed) {
-      // Horário explícito no texto → cria slot SUGERIDO (não reservado; operador confirma).
-      const s = db2.prepare(
-        'INSERT INTO schedule_slots (date_time,duration_min,meeting_link,booked,company_id,contact_id) VALUES (?,?,?,0,?,?)'
-      ).run(parsed.iso, 15, '', companyId, contact_id);
-      meeting_suggestion = { slot_id: s.lastInsertRowid, date_time: parsed.iso, label: parsed.label, booked: false };
-      db2.prepare('INSERT INTO notifications (company_id,contact_id,message_id,type,title,body) VALUES (?,?,?,?,?,?)')
-        .run(companyId, contact_id, receivedMsgId, 'meeting_suggested', `🗓️ Horário sugerido: ${parsed.label}`, `Confirme o slot para ${parsed.label}.`);
+      // Checagem de conflito: o horário pedido não pode colidir com reunião já reservada.
+      if (conflictsWithBooked(parsed.iso, 15, getBookedAgendaSlots(db2))) {
+        const alts = alternativeLabels(getFreeAgendaSlots(db2));
+        meeting_suggestion = { slot_id: null, conflict: true, requested: parsed.label, alternatives: alts, hint: `Horário pedido (${parsed.label}) conflita com reunião já marcada — proponha alternativa${alts.length ? `: ${alts.join(' ou ')}` : ' (agenda sem slots livres: pergunte a preferência do cliente)'}.` };
+        db2.prepare('INSERT INTO notifications (company_id,contact_id,message_id,type,title,body) VALUES (?,?,?,?,?,?)')
+          .run(companyId, contact_id, receivedMsgId, 'meeting_conflict', `⚠️ Conflito de agenda: ${parsed.label}`, `O horário pedido colide com reunião já marcada.${alts.length ? ` Livres: ${alts.join(', ')}.` : ' Nenhum slot livre na agenda.'}`);
+      } else {
+        // Horário explícito no texto → cria slot SUGERIDO (não reservado; operador confirma).
+        const s = db2.prepare(
+          'INSERT INTO schedule_slots (date_time,duration_min,meeting_link,booked,company_id,contact_id) VALUES (?,?,?,0,?,?)'
+        ).run(parsed.iso, 15, '', companyId, contact_id);
+        meeting_suggestion = { slot_id: s.lastInsertRowid, date_time: parsed.iso, label: parsed.label, booked: false };
+        db2.prepare('INSERT INTO notifications (company_id,contact_id,message_id,type,title,body) VALUES (?,?,?,?,?,?)')
+          .run(companyId, contact_id, receivedMsgId, 'meeting_suggested', `🗓️ Horário sugerido: ${parsed.label}`, `Confirme o slot para ${parsed.label}.`);
+      }
     } else if (!already) {
-      meeting_suggestion = { slot_id: null, needs_time: true, hint: 'Prospect quer reunião mas sem horário claro — proponha 2 opções.' };
+      // Sem horário claro → oferece os slots LIVRES reais da agenda como opções.
+      const alts = alternativeLabels(getFreeAgendaSlots(db2));
+      meeting_suggestion = { slot_id: null, needs_time: true, alternatives: alts, hint: alts.length ? `Prospect quer reunião mas sem horário claro — proponha opções da agenda: ${alts.join(' ou ')}.` : 'Prospect quer reunião mas sem horário claro e a agenda está sem slots livres — pergunte a preferência dele.' };
     }
   }
   db2.close();
@@ -3944,12 +3993,26 @@ app.post('/api/companies/:id/simulator/bot-reply', async (req, res) => {
   const mentionedTimes = [];
   for (const turn of priorTurns) {
     const p = parseMeetingDateTime(turn.content);
-    if (p) mentionedTimes.push(p.label);
+    if (p) mentionedTimes.push(p);
   }
   const lastAgreed = mentionedTimes.length ? mentionedTimes[mentionedTimes.length - 1] : null;
-  const scheduleNote = lastAgreed
-    ? `\n## AGENDA (coerência — IMPORTANTE)\nHorário mais recente na conversa: "${lastAgreed}". NÃO proponha horários novos nem reabra a negociação de data se já houver um combinado; apenas confirme esse horário de forma objetiva. Se o cliente citou dois horários diferentes, peça UMA confirmação explícita de qual vale.`
-    : '';
+  // Coerência + disponibilidade REAL (agenda interna):
+  //  - horário combinado livre  → só confirma, não reabre negociação;
+  //  - horário combinado em CONFLITO com reunião já marcada → avisa e oferece slots livres;
+  //  - sem combinado → propõe SOMENTE horários livres da agenda (nunca inventa).
+  let scheduleNote;
+  {
+    const db3 = getDb();
+    if (lastAgreed && conflictsWithBooked(lastAgreed.iso, 15, getBookedAgendaSlots(db3))) {
+      const alts = alternativeLabels(getFreeAgendaSlots(db3));
+      scheduleNote = `\n## AGENDA (conflito — IMPORTANTE)\nO horário citado na conversa ("${lastAgreed.label}") COLIDE com uma reunião já marcada do vendedor. NÃO confirme esse horário. Peça desculpa breve e ofereça ${alts.length ? `estas alternativas reais: ${alts.join(' ou ')}` : 'para o cliente indicar outro dia/período (a agenda está sem slots livres cadastrados)'}.`;
+    } else if (lastAgreed) {
+      scheduleNote = `\n## AGENDA (coerência — IMPORTANTE)\nHorário mais recente na conversa: "${lastAgreed.label}". NÃO proponha horários novos nem reabra a negociação de data se já houver um combinado; apenas confirme esse horário de forma objetiva. Se o cliente citou dois horários diferentes, peça UMA confirmação explícita de qual vale.`;
+    } else {
+      scheduleNote = agendaAvailabilityBlock(getFreeAgendaSlots(db3));
+    }
+    db3.close();
+  }
 
   const draftPrompt = `Escreva a PRÓXIMA mensagem do VENDEDOR (bot) via WhatsApp, dando continuidade natural à conversa acima.
 Regras:
@@ -4769,6 +4832,12 @@ app.get('/api/schedule/slots', (req, res) => {
 app.post('/api/schedule/slots', async (req, res) => {
   const { date_time, duration_min, meeting_link, company_id, contact_id, booked } = req.body;
   const db = getDb();
+  // Marcação direta (ex.: botão "Marcar Reunião na Agenda"): não pode colidir
+  // com reunião já confirmada — mesmo comportamento do fluxo por notificação.
+  if (booked && conflictsWithBooked(date_time, duration_min || 15, getBookedAgendaSlots(db))) {
+    db.close();
+    return res.status(409).json({ error: `Conflito de agenda: já existe reunião marcada nesse horário (${slotLabel(date_time)}). Escolha outro.` });
+  }
   const r = db.prepare(
     'INSERT INTO schedule_slots (date_time,duration_min,meeting_link,booked,company_id,contact_id) VALUES (?,?,?,?,?,?)'
   ).run(date_time, duration_min || 15, meeting_link || '', booked ? 1 : 0, company_id || null, contact_id || null);
@@ -4779,22 +4848,28 @@ app.post('/api/schedule/slots', async (req, res) => {
       .run(company_id, contact_id || null, 'meeting_booked', `Reunião agendada: ${date_time}`);
   }
 
-  // Busca telefone do contato para enviar confirmação via WhatsApp
+  // Busca o contato para a confirmação via WhatsApp
   let contactPhone = null;
   let contactName  = null;
+  let contactFound = false;
   if (booked && contact_id) {
     const ct = db.prepare('SELECT name, whatsapp FROM contacts WHERE id=?').get(contact_id);
+    contactFound = !!ct;
     contactPhone = ct?.whatsapp || null;
     contactName  = ct?.name    || 'prezado(a)';
   }
   db.close();
 
-  // Envia mensagem de confirmação ao cliente
-  if (booked && contactPhone) {
+  // Confirmação ao cliente: registra SEMPRE no histórico da conversa; o envio
+  // real pela API do WhatsApp é a parte que depende de ter número cadastrado.
+  if (booked && contactFound) {
     try {
       const dtFormatted = new Date(date_time).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+      // Sem "Olá": a confirmação chega no meio de uma conversa em andamento —
+      // cumprimentar de novo soa robótico. Continua o papo e fecha o combinado.
+      const firstName = contactName === 'prezado(a)' ? '' : (contactName || '').trim().split(/\s+/)[0];
       const confirmMsg  = [
-        `Olá, ${contactName}! 😊`,
+        `Fechado${firstName ? `, ${firstName}` : ''}! 😊`,
         ``,
         `Nossa reunião está confirmada para *${dtFormatted}* (${duration_min || 30} min).`,
         meeting_link ? `🔗 Link: ${meeting_link}` : null,
@@ -4802,7 +4877,7 @@ app.post('/api/schedule/slots', async (req, res) => {
         `Qualquer dúvida, é só me chamar aqui. Até lá! 👋`,
       ].filter(l => l !== null).join('\n');
 
-      await sendWhatsAppMessage(contactPhone, confirmMsg);
+      if (contactPhone) await sendWhatsAppMessage(contactPhone, confirmMsg);
 
       // Salva a mensagem enviada no histórico da conversa
       const db2 = getDb();
@@ -4825,6 +4900,10 @@ app.post('/api/schedule/slots/:id/book', (req, res) => {
   const slot = db.prepare('SELECT * FROM schedule_slots WHERE id=?').get(req.params.id);
   if (!slot) { db.close(); return res.status(404).json({ error: 'Slot não encontrado' }); }
   if (slot.booked) { db.close(); return res.status(409).json({ error: 'Slot já reservado' }); }
+  if (conflictsWithBooked(slot.date_time, slot.duration_min || 15, getBookedAgendaSlots(db))) {
+    db.close();
+    return res.status(409).json({ error: `Conflito de agenda: já existe reunião marcada nesse horário (${slotLabel(slot.date_time)}).` });
+  }
   const { company_id, contact_id } = req.body;
   db.prepare('UPDATE schedule_slots SET booked=1,company_id=?,contact_id=? WHERE id=?').run(company_id || null, contact_id || null, req.params.id);
   if (company_id) {
@@ -4972,6 +5051,10 @@ app.post('/api/notifications/:id/confirm-meeting', async (req, res) => {
   const slot = db.prepare('SELECT * FROM schedule_slots WHERE id=?').get(slot_id);
   if (!slot) { db.close(); return res.status(404).json({ error: 'Horário não encontrado' }); }
   if (slot.booked) { db.close(); return res.status(409).json({ error: 'Horário já reservado' }); }
+  if (conflictsWithBooked(slot.date_time, slot.duration_min || 15, getBookedAgendaSlots(db))) {
+    db.close();
+    return res.status(409).json({ error: `Conflito de agenda: já existe reunião marcada nesse horário (${slotLabel(slot.date_time)}).` });
+  }
 
   const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(notif.contact_id);
 
@@ -4986,11 +5069,15 @@ app.post('/api/notifications/:id/confirm-meeting', async (req, res) => {
   db.prepare('UPDATE notifications SET read=1 WHERE id=?').run(req.params.id);
   db.close();
 
-  // Envia confirmação via WhatsApp
-  if (contact?.whatsapp) {
+  // Confirmação ao cliente: SEMPRE registra a mensagem no histórico da conversa
+  // (é o que aparece no chat/simulação); o envio real pela API do WhatsApp é a
+  // parte que depende de ter número cadastrado.
+  if (contact) {
     const dtFormatted = new Date(slot.date_time).toLocaleString('pt-BR', { dateStyle:'short', timeStyle:'short' });
-    const confirmMsg = `Olá ${contact.name}! ✅ Reunião confirmada para ${dtFormatted}${slot.meeting_link ? `\nLink: ${slot.meeting_link}` : ''}. Até lá!`;
-    await sendWhatsAppMessage(contact.whatsapp, confirmMsg);
+    // Sem "Olá": a confirmação continua uma conversa em andamento, não abre outra.
+    const firstName = (contact.name || '').trim().split(/\s+/)[0];
+    const confirmMsg = `Fechado${firstName ? `, ${firstName}` : ''}! ✅ Reunião confirmada para ${dtFormatted}${slot.meeting_link ? `\nLink: ${slot.meeting_link}` : ''}. Até lá!`;
+    if (contact.whatsapp) await sendWhatsAppMessage(contact.whatsapp, confirmMsg);
 
     // Salva confirmação como mensagem enviada
     const db2 = getDb();
