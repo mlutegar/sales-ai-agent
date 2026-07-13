@@ -436,6 +436,9 @@ function ContactCard({ contact, companyId, companyName, onEnrich, onRemove, onSt
   const [liBusy, setLiBusy]     = useState(false);
   const [liOcr, setLiOcr]       = useState('');
   const [liFields, setLiFields] = useState(null);     // dados em revisão
+  const [liCandidates, setLiCandidates] = useState(null); // candidatos achados pela IA (null = ainda não buscou)
+  const [liFinding, setLiFinding]       = useState(false);
+  const [liEnriching, setLiEnriching]   = useState(''); // URL do candidato sendo enriquecido
   const liLastSearch = useRef(0);
 
   const hasContext = !!(savedCtx && savedCtx.trim());
@@ -497,8 +500,9 @@ function ContactCard({ contact, companyId, companyName, onEnrich, onRemove, onSt
 
   function openLinkedIn() {
     setLiRaw(''); setLiOcr(''); setLiUrl(contact.linkedin || '');
-    if (contact.linkedin_status === 'confirmed') {
-      // (#2) Reabrir já validado direto na revisão, com os dados salvos.
+    setLiCandidates(null); setLiEnriching('');
+    if (contact.linkedin_status === 'confirmed' || contact.linkedin_status === 'pending_review') {
+      // (#2) Reabrir já validado (ou com revisão pendente) direto na revisão, com os dados salvos.
       let saved = {};
       try { saved = JSON.parse(contact.linkedin_parsed || '{}'); } catch { /* noop */ }
       setLiFields({
@@ -517,6 +521,45 @@ function ContactCard({ contact, companyId, companyName, onEnrich, onRemove, onSt
       setLiStep(1);
     }
     setLiOpen(true);
+  }
+
+  // IA busca na WEB candidatos de perfil (não acessa o LinkedIn) — humano escolhe.
+  async function linkedInFind() {
+    setLiFinding(true);
+    setLiCandidates(null);
+    try {
+      const res = await fetch(`${API}/api/contacts/${contact.id}/linkedin/find`, { method: 'POST' });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok) { toast(d.error || 'Erro ao buscar candidatos.', 'danger'); return; }
+      setLiCandidates(d.candidates || []);
+      if (!(d.candidates || []).length) toast('Nenhum perfil encontrado na busca — tente o caminho manual.', 'warning');
+    } catch {
+      toast('Sem conexão com o servidor.', 'danger');
+    } finally {
+      setLiFinding(false);
+    }
+  }
+
+  // Humano apontou o perfil certo → IA coleta dados PÚBLICOS e cai na revisão (passo 2).
+  async function linkedInUseCandidate(url) {
+    if (contact.linkedin_status === 'confirmed' &&
+        !window.confirm('Este contato já tem um perfil validado. Enriquecer a partir deste candidato vai substituir os dados atuais. Continuar?')) return;
+    setLiEnriching(url);
+    try {
+      const res = await fetch(`${API}/api/contacts/${contact.id}/linkedin/enrich-from-url`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile_url: url }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok) { toast(d.error || 'Erro ao enriquecer o perfil.', 'danger'); return; }
+      if (d.dup_warning) toast('⚠️ ' + d.dup_warning, 'warning');
+      setLiFields(d.parsed || {});
+      setLiStep(2);
+    } catch {
+      toast('Sem conexão com o servidor.', 'danger');
+    } finally {
+      setLiEnriching('');
+    }
   }
 
   function linkedInSearch() {
@@ -754,10 +797,6 @@ function ContactCard({ contact, companyId, companyName, onEnrich, onRemove, onSt
               <div className="modal-body">
                 {liStep === 1 && (
                   <>
-                    <p className="text-muted small">
-                      Busca <strong>pontual</strong>, um lead por vez, para respeitar a política do LinkedIn.
-                      Abra a busca, copie o conteúdo do perfil correto e cole abaixo — a IA estrutura os dados para você <strong>validar</strong> antes de salvar.
-                    </p>
                     <div className="alert alert-light border py-2 small">
                       <strong>Confira ao escolher o perfil:</strong>
                       <ul className="mb-0 ps-3">
@@ -766,6 +805,53 @@ function ContactCard({ contact, companyId, companyName, onEnrich, onRemove, onSt
                         <li>Cargo esperado: <strong>{ROLE_EXPECT[contact.role] || contact.role || '—'}</strong></li>
                       </ul>
                     </div>
+
+                    {/* ── Caminho 1: IA busca candidatos na web; humano confirma ── */}
+                    <div className="p-2 rounded mb-3" style={{ background: '#eef4ff', border: '1px solid #c7d8f8' }}>
+                      <div className="fw-semibold small mb-1"><i className="bi bi-stars me-1 text-primary"></i>Buscar perfil com IA</div>
+                      <p className="text-muted small mb-2">
+                        A IA pesquisa na web possíveis perfis desta pessoa (sem acessar o LinkedIn). Você confirma qual é o certo
+                        e ela coleta as informações <strong>públicas</strong> para você revisar antes de salvar.
+                      </p>
+                      <button className="btn btn-primary btn-sm" onClick={linkedInFind} disabled={liFinding || !!liEnriching}>
+                        {liFinding ? <><span className="spinner-border spinner-border-sm me-1"></span>Buscando candidatos...</> : <><i className="bi bi-search me-1"></i>Buscar perfil (IA)</>}
+                      </button>
+                      {liCandidates && liCandidates.length > 0 && (
+                        <div className="mt-2">
+                          {liCandidates.map((c, i) => (
+                            <div key={i} className="d-flex align-items-start justify-content-between gap-2 p-2 mb-1 rounded" style={{ background: '#fff', border: '1px solid #dbe4f5' }}>
+                              <div style={{ minWidth: 0 }}>
+                                <div className="small fw-semibold">
+                                  {c.name || '—'}
+                                  <span className={`badge ms-2 ${c.confidence === 'alta' ? 'bg-success' : c.confidence === 'media' ? 'bg-warning text-dark' : 'bg-secondary'}`} style={{ fontSize: '.62rem' }}>
+                                    confiança {c.confidence || '?'}
+                                  </span>
+                                </div>
+                                {c.headline && <div className="text-muted small">{c.headline}</div>}
+                                {c.evidence && <div className="text-muted" style={{ fontSize: '.72rem' }}><i className="bi bi-info-circle me-1"></i>{c.evidence}</div>}
+                                <a href={c.profile_url} target="_blank" rel="noopener noreferrer" className="small" style={{ wordBreak: 'break-all' }}>{c.profile_url}</a>
+                              </div>
+                              <button className="btn btn-success btn-sm flex-shrink-0" onClick={() => linkedInUseCandidate(c.profile_url)} disabled={!!liEnriching}>
+                                {liEnriching === c.profile_url ? <><span className="spinner-border spinner-border-sm me-1"></span>Coletando...</> : <>É esse ✓</>}
+                              </button>
+                            </div>
+                          ))}
+                          <div className="text-muted" style={{ fontSize: '.72rem' }}>
+                            Abra o link pra conferir antes de escolher. Não achou o certo? Use o caminho manual abaixo.
+                          </div>
+                        </div>
+                      )}
+                      {liCandidates && liCandidates.length === 0 && (
+                        <div className="text-muted small mt-2"><i className="bi bi-emoji-neutral me-1"></i>Nenhum perfil encontrado na busca — use o caminho manual abaixo.</div>
+                      )}
+                    </div>
+
+                    {/* ── Caminho 2 (manual): copiar/colar ou OCR — perfil completo ── */}
+                    <div className="fw-semibold small mb-1"><i className="bi bi-clipboard me-1"></i>Ou manualmente (perfil completo)</div>
+                    <p className="text-muted small">
+                      Busca <strong>pontual</strong>, um lead por vez, para respeitar a política do LinkedIn.
+                      Abra a busca, copie o conteúdo do perfil correto e cole abaixo — a IA estrutura os dados para você <strong>validar</strong> antes de salvar.
+                    </p>
                     <button className="btn btn-outline-primary btn-sm mb-3" onClick={linkedInSearch}>
                       <i className="bi bi-box-arrow-up-right me-1"></i>Abrir busca no LinkedIn
                     </button>

@@ -32,6 +32,21 @@ function MessageRow({ msg, onApprove, onSend, toast }) {
   const [loadingApprove, setLoadingApprove] = useState(false)
   const [loadingSend, setLoadingSend]       = useState(false)
   const [localMsg, setLocalMsg]             = useState(msg)
+  const [discarded, setDiscarded]           = useState(false)
+
+  // Descarta o rascunho (só não-enviadas): remove da conversa pra gerar outro.
+  async function discard() {
+    if (!window.confirm('Descartar este rascunho? Ele será removido da conversa.')) return
+    try {
+      const res = await fetch(`${API}/api/messages/${localMsg.id}`, { method: 'DELETE' })
+      const d = await res.json()
+      if (d.error) throw new Error(d.error)
+      setDiscarded(true)
+      toast('Rascunho descartado.', 'warning')
+    } catch (e) {
+      toast(e.message || 'Erro ao descartar rascunho.', 'danger')
+    }
+  }
 
   async function approve() {
     setLoadingApprove(true)
@@ -77,6 +92,7 @@ function MessageRow({ msg, onApprove, onSend, toast }) {
   }
 
   const isInbound = localMsg.status === 'received'
+  if (discarded) return null
 
   return (
     <div
@@ -151,6 +167,16 @@ function MessageRow({ msg, onApprove, onSend, toast }) {
           <button className="btn btn-sm btn-outline-secondary" onClick={copy}>
             <i className="bi bi-clipboard me-1" />Copiar
           </button>
+          {/* Descartar: só rascunho NÃO aprovado — aprovada já é histórico da conversa */}
+          {!localMsg.approved && (localMsg.status === 'pending' || localMsg.status === 'paused') && (
+            <button
+              className="btn btn-sm btn-outline-danger"
+              onClick={discard}
+              title="Descartar rascunho — remove da conversa para gerar outro"
+            >
+              <i className="bi bi-trash me-1" />Descartar
+            </button>
+          )}
           <div className="d-flex align-items-center gap-1 ms-auto">
             <span className="text-muted me-1" style={{ fontSize: '.7rem' }}>Avaliar:</span>
             {[1, 2, 3, 4, 5].map(n => (

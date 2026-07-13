@@ -315,6 +315,17 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
     await fetch(`${API}/api/messages/${msgId}/send`, { method: 'POST' })
     load()
   }
+  // Descarta um rascunho (só não-enviadas): tira da tela pra gerar outro ou seguir o fluxo.
+  async function discardMessage(msgId) {
+    if (!window.confirm('Descartar este rascunho? Ele será removido da conversa.')) return
+    try {
+      const res = await fetch(`${API}/api/messages/${msgId}`, { method: 'DELETE' })
+      const d = await res.json()
+      if (d.error) throw new Error(d.error)
+      toast('Rascunho descartado.', 'warning')
+      load()
+    } catch (e) { toast(e.message || 'Erro ao descartar rascunho.', 'danger') }
+  }
   function copy(text) {
     navigator.clipboard.writeText(text || '')
     toast('Copiado!', 'success')
@@ -700,6 +711,17 @@ function ChatPanel({ companyId, initialContactId, onEditMessage, toast }) {
                     {!isInbound && (
                       <button className="btn btn-outline-secondary" style={{ fontSize: '.65rem', padding: '1px 7px', borderRadius: 20 }} onClick={() => copy(msg.content)}>
                         <i className="bi bi-clipboard" />
+                      </button>
+                    )}
+                    {/* Descartar: só rascunho NÃO aprovado — aprovada já é histórico da conversa */}
+                    {!isInbound && !msg.approved && (msg.status === 'pending' || msg.status === 'paused') && (
+                      <button
+                        className="btn btn-outline-danger"
+                        style={{ fontSize: '.65rem', padding: '1px 7px', borderRadius: 20 }}
+                        onClick={() => discardMessage(msg.id)}
+                        title="Descartar rascunho — remove da conversa para gerar outro"
+                      >
+                        <i className="bi bi-trash" />
                       </button>
                     )}
                     {!isInbound && (

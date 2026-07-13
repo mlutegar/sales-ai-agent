@@ -2664,8 +2664,25 @@ app.post('/api/contacts/:id/linkedin/confirm', (req, res) => {
   const reviewer = (req.session && (req.session.name || req.session.username)) || 'desconhecido';
 
   if (action === 'reject') {
+    // Rejeitar = "este perfil NÃO é desta pessoa": além do status, LIMPA a URL e
+    // todos os dados vindos do perfil — nada dele pode sobrar no contato nem nos
+    // prompts. Fica só a trilha de auditoria (quem rejeitou e quando).
     const db = getDb();
-    db.prepare("UPDATE contacts SET linkedin_status='rejected', linkedin_reviewed_at=datetime('now'), linkedin_reviewed_by=? WHERE id=?").run(reviewer, contactId);
+    db.prepare(`
+      UPDATE contacts
+      SET linkedin_status          = 'rejected',
+          linkedin_reviewed_at     = datetime('now'),
+          linkedin_reviewed_by     = ?,
+          linkedin                 = '',
+          linkedin_parsed          = '',
+          linkedin_raw             = '',
+          linkedin_headline        = '',
+          linkedin_current_role    = '',
+          linkedin_current_company = '',
+          linkedin_location        = '',
+          linkedin_summary         = ''
+      WHERE id=?
+    `).run(reviewer, contactId);
     db.close();
     return res.json({ ok: true, status: 'rejected' });
   }
@@ -2709,6 +2726,108 @@ app.post('/api/contacts/:id/linkedin/confirm', (req, res) => {
   db.close();
 
   res.json({ ok: true, status: 'confirmed' });
+});
+
+// ── LinkedIn — Busca de candidatos por IA (web) + enriquecimento público ───────
+// A IA NÃO acessa o LinkedIn (login wall / termos de uso): usa busca WEB para
+// achar candidatos de perfil e, após o humano confirmar a URL, coleta o que é
+// PÚBLICO e indexado sobre a pessoa. A validação humana continua obrigatória
+// nos dois passos (escolher o perfil certo e revisar os campos antes de salvar).
+
+const LINKEDIN_FIND_SYSTEM = 'Você ajuda um time de vendas B2B a LOCALIZAR o perfil do LinkedIn de uma pessoa usando busca na web. Responda SOMENTE com JSON válido (sem markdown): {"candidates":[{"name":string,"headline":string,"profile_url":string,"evidence":string,"confidence":"alta"|"media"|"baixa"}]}. No máximo 3 candidatos, o mais provável primeiro. profile_url PRECISA ser uma URL linkedin.com/in/... que apareceu nos resultados da busca — NUNCA invente/deduza URLs. evidence = 1 frase dizendo o que bateu (empresa, cargo, cidade). confidence "alta" só quando nome E empresa/cargo conferem. Se nada confiável for encontrado: {"candidates":[]}.';
+
+app.post('/api/contacts/:id/linkedin/find', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || apiKey === 'sk-ant-sua-chave-aqui') {
+    return res.status(503).json({ ok: false, error: 'IA indisponível: configure ANTHROPIC_API_KEY para buscar o perfil.' });
+  }
+  const db0 = getDb();
+  const contact = db0.prepare('SELECT ct.*, c.name AS company_name, c.sector AS company_sector FROM contacts ct JOIN companies c ON c.id=ct.company_id WHERE ct.id=?').get(req.params.id);
+  db0.close();
+  if (!contact) return res.status(404).json({ ok: false, error: 'Contato não encontrado' });
+
+  const who = `Nome: ${contact.name} | Empresa: ${contact.company_name}${contact.title ? ` | Cargo conhecido: ${contact.title}` : ''}${contact.company_sector ? ` | Setor: ${contact.company_sector}` : ''}`;
+  const prompt = `Encontre o perfil do LinkedIn desta pessoa (contexto: prospecção B2B no Brasil):\n${who}\n\nBusque na web (ex.: "${contact.name}" "${contact.company_name}" linkedin) e retorne até 3 candidatos REAIS, com as URLs linkedin.com/in/ exatamente como apareceram nos resultados.`;
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(extractJsonLoose(await callClaudeWithSearch(LINKEDIN_FIND_SYSTEM, prompt, 1000)));
+  } catch (e) {
+    console.warn('[linkedin/find] parse falhou:', e.message);
+  }
+  if (!parsed || !Array.isArray(parsed.candidates)) {
+    return res.status(502).json({ ok: false, error: 'Não foi possível buscar candidatos agora — tente novamente.' });
+  }
+  // Só aceita URLs de perfil de verdade (linkedin.com/in/...), nunca busca/empresa.
+  const candidates = parsed.candidates.filter((c) => /linkedin\.com\/in\//i.test(c.profile_url || '')).slice(0, 3);
+
+  const dbL = getDb();
+  dbL.prepare('INSERT INTO search_logs (company_id, contact_id, call_type, source, query, result_summary) VALUES (?,?,?,?,?,?)')
+    .run(contact.company_id, contact.id, contact.call_type || 'cold', 'linkedin_find', `${contact.name} ${contact.company_name}`, `${candidates.length} candidato(s) de perfil encontrados`);
+  dbL.close();
+
+  res.json({ ok: true, candidates });
+});
+
+// Enriquecimento após o humano apontar a URL certa: coleta só o que é PÚBLICO
+// (indexado por buscadores) e cai no MESMO fluxo de revisão do parse manual —
+// nada é gravado em definitivo sem o "Confirmar" do operador.
+const LINKEDIN_PUBLIC_ENRICH_SYSTEM = 'Você coleta informações PÚBLICAS sobre um profissional para contexto de vendas B2B, usando busca na web. Responda SOMENTE com um objeto JSON válido (sem markdown) com EXATAMENTE estas chaves: name (string), headline (string), current_role (string), current_company (string), location (string), summary (string), experience (array de strings), education (array de strings), skills (array de strings), profile_url (string). summary = 2-4 frases com o que há de público (posts, entrevistas, notícias, bio) útil para personalizar uma abordagem. Use "" / [] para ausentes. NUNCA invente: inclua apenas o que apareceu nos resultados da busca.';
+
+app.post('/api/contacts/:id/linkedin/enrich-from-url', async (req, res) => {
+  const { profile_url } = req.body || {};
+  if (!profile_url || !/linkedin\.com\/in\//i.test(profile_url)) {
+    return res.status(400).json({ ok: false, error: 'URL de perfil inválida (esperado linkedin.com/in/...).' });
+  }
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || apiKey === 'sk-ant-sua-chave-aqui') {
+    return res.status(503).json({ ok: false, error: 'IA indisponível: configure ANTHROPIC_API_KEY para enriquecer o perfil.' });
+  }
+  const db0 = getDb();
+  const contact = db0.prepare('SELECT ct.*, c.name AS company_name FROM contacts ct JOIN companies c ON c.id=ct.company_id WHERE ct.id=?').get(req.params.id);
+  db0.close();
+  if (!contact) return res.status(404).json({ ok: false, error: 'Contato não encontrado' });
+
+  const prompt = `Pessoa: ${contact.name} | Empresa: ${contact.company_name}\nPerfil do LinkedIn confirmado pelo operador: ${profile_url}\n\nBusque na web informações públicas sobre essa pessoa (headline/cargo atual, empresa, cidade, posts, entrevistas, notícias) e preencha o JSON. Lembre: apenas o que estiver nos resultados.`;
+
+  // Mesmo fallback de parsing do parse manual: 2 tentativas antes de desistir.
+  let parsed = null;
+  for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+    try {
+      const sys = attempt === 0
+        ? LINKEDIN_PUBLIC_ENRICH_SYSTEM
+        : LINKEDIN_PUBLIC_ENRICH_SYSTEM + ' ATENÇÃO: sua última resposta não era JSON válido. Responda APENAS com o objeto JSON, começando com { e terminando com }.';
+      parsed = JSON.parse(extractJsonLoose(await callClaudeWithSearch(sys, prompt, 1200)));
+    } catch (e) {
+      console.warn(`[linkedin/enrich-from-url] tentativa ${attempt + 1} falhou:`, e.message);
+    }
+  }
+  if (!parsed) return res.status(502).json({ ok: false, error: 'Não foi possível coletar dados públicos agora — tente novamente ou use o colar/OCR.' });
+  parsed.profile_url = profile_url.trim();
+
+  // Mesma deduplicação do parse manual: avisa se a URL já pertence a outro contato.
+  let dupWarning = null;
+  const urlNorm = parsed.profile_url.replace(/\/+$/, '').toLowerCase();
+  const dbD = getDb();
+  const dup = dbD.prepare(
+    "SELECT ct.id, ct.name, c.name AS company FROM contacts ct JOIN companies c ON c.id=ct.company_id " +
+    "WHERE ct.id!=? AND ct.linkedin_status='confirmed' AND lower(rtrim(ct.linkedin,'/'))=?"
+  ).get(req.params.id, urlNorm);
+  if (dup) dupWarning = `Esta URL de perfil já está confirmada para "${dup.name}" (${dup.company}). Verifique se não é um homônimo.`;
+
+  dbD.prepare(`
+    UPDATE contacts
+    SET linkedin_status = 'pending_review',
+        linkedin_parsed = ?,
+        linkedin_raw    = ?,
+        linkedin        = CASE WHEN (linkedin IS NULL OR linkedin='') THEN ? ELSE linkedin END
+    WHERE id = ?
+  `).run(JSON.stringify(parsed), `(coletado por busca pública de IA a partir de ${parsed.profile_url})`, parsed.profile_url, req.params.id);
+  dbD.prepare('INSERT INTO search_logs (company_id, contact_id, call_type, source, query, result_summary) VALUES (?,?,?,?,?,?)')
+    .run(contact.company_id, contact.id, contact.call_type || 'cold', 'linkedin_enrich', parsed.profile_url, 'Dados públicos coletados para revisão humana');
+  dbD.close();
+
+  res.json({ ok: true, status: 'pending_review', parsed, dup_warning: dupWarning });
 });
 
 // (#11) OCR de screenshot do perfil do LinkedIn. Recebe a imagem em base64
@@ -4357,6 +4476,25 @@ app.post('/api/messages/:id/approve', async (req, res) => {
   db.close();
   // (#9) Auditoria: quem aprovou/enviou qual mensagem e quando.
   audit(req, 'message_approved', `Msg ${req.params.id} aprovada (${msg.channel})`, { company_id: msg.company_id, contact_id: msg.contact_id, message_id: Number(req.params.id) });
+  res.json({ ok: true });
+});
+
+// Descarta um rascunho: remove da conversa uma mensagem AINDA NÃO aprovada.
+// Aprovou/enviou/recebeu = histórico imutável — a partir da aprovação a mensagem
+// faz parte da conversa (o lead pode inclusive já ter respondido a ela).
+app.delete('/api/messages/:id', (req, res) => {
+  const db = getDb();
+  const msg = db.prepare('SELECT * FROM messages WHERE id=?').get(req.params.id);
+  if (!msg) { db.close(); return res.status(404).json({ error: 'Mensagem não encontrada' }); }
+  const isDraft = !msg.approved && (msg.status === 'pending' || msg.status === 'paused');
+  if (!isDraft) {
+    db.close();
+    return res.status(409).json({ error: 'Só rascunhos pendentes podem ser descartados — mensagens aprovadas, enviadas ou recebidas fazem parte do histórico da conversa.' });
+  }
+  db.prepare('DELETE FROM messages WHERE id=?').run(req.params.id);
+  db.close();
+  audit(req, 'message_discarded', `Rascunho ${req.params.id} descartado (${msg.channel})`, { company_id: msg.company_id, contact_id: msg.contact_id });
+  broadcastInboxUpdate();
   res.json({ ok: true });
 });
 
