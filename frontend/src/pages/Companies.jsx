@@ -342,15 +342,27 @@ function FiltersBar({ filters, setFilters, sectors, importSources, count, flagCa
           {importSources.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       )}
-      <select
-        className="form-select form-select-sm"
-        style={{ maxWidth: 180 }}
-        value={filters.flag}
-        onChange={(e) => setFilters((f) => ({ ...f, flag: e.target.value }))}
-      >
-        <option value="">Todas as etiquetas</option>
-        {(flagCatalog || []).map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
-      </select>
+      <div className="d-flex align-items-center" style={{ position: 'relative' }}>
+        <select
+          className="form-select form-select-sm"
+          style={{ maxWidth: 180, ...(filters.flag ? { borderColor: '#f0ad4e', paddingRight: 28 } : {}) }}
+          value={filters.flag}
+          onChange={(e) => setFilters((f) => ({ ...f, flag: e.target.value }))}
+        >
+          <option value="">Todas as etiquetas (sem filtro)</option>
+          {(flagCatalog || []).map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+        </select>
+        {filters.flag && (
+          <button
+            type="button"
+            onClick={() => setFilters((f) => ({ ...f, flag: '' }))}
+            title="Remover filtro de etiqueta"
+            style={{ position: 'absolute', right: 22, border: 'none', background: 'transparent', color: '#c0392b', cursor: 'pointer', fontSize: '.9rem', lineHeight: 1, padding: 0 }}
+          >
+            ✕
+          </button>
+        )}
+      </div>
       <div className="form-check form-check-inline mb-0">
         <input
           className="form-check-input"
@@ -918,6 +930,69 @@ function ContactCard({ contact, companyId, companyName, onEnrich, onRemove, onSt
   );
 }
 
+// ── FlagsPanel ─────────────────────────────────────────────────────────────────
+// Etiquetas da empresa (catálogo do backend): clicar alterna aplicar/remover.
+// "Já contatada" é a marcação manual de relacionamento prévio (spec) — com ela,
+// criar um lead COLD nesta empresa dispara o aviso de abordagem duplicada.
+function FlagsPanel({ company, toast, onChanged }) {
+  const [catalog, setCatalog] = useState([]);
+  const [active, setActive] = useState(new Set(company.flags || []));
+  const [busy, setBusy] = useState('');
+
+  useEffect(() => {
+    fetch(`${API}/api/flags`).then((r) => r.json()).then((d) => setCatalog(Array.isArray(d) ? d : [])).catch(() => {});
+  }, []);
+  useEffect(() => { setActive(new Set(company.flags || [])); }, [company.flags]);
+
+  async function toggle(key) {
+    const isOn = active.has(key);
+    setBusy(key);
+    try {
+      const res = await fetch(
+        isOn ? `${API}/api/companies/${company.id}/flags/${key}` : `${API}/api/companies/${company.id}/flags`,
+        isOn
+          ? { method: 'DELETE' }
+          : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ flag: key }) }
+      );
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.error) throw new Error(d.error || 'Erro ao alterar etiqueta');
+      const next = new Set(active);
+      if (isOn) next.delete(key); else next.add(key);
+      setActive(next);
+      toast(isOn ? 'Etiqueta removida.' : 'Etiqueta aplicada.', 'success');
+      if (onChanged) onChanged();
+    } catch (e) {
+      toast(e.message || 'Erro ao alterar etiqueta', 'danger');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  if (!catalog.length) return null;
+  return (
+    <div className="mb-2 p-2 border rounded bg-white">
+      <div className="d-flex align-items-center gap-2 flex-wrap">
+        <span className="fw-bold small"><i className="bi bi-tags me-1"></i>Etiquetas</span>
+        {catalog.map((f) => {
+          const on = active.has(f.key);
+          return (
+            <button
+              key={f.key}
+              className={`badge border-0 ${on ? f.badge : 'bg-light text-secondary border'}`}
+              style={{ fontSize: '.68rem', cursor: 'pointer', opacity: busy === f.key ? 0.5 : 1 }}
+              disabled={!!busy}
+              onClick={() => toggle(f.key)}
+              title={on ? `Clique para remover "${f.label}"` : `Clique para aplicar "${f.label}"${f.key === 'ja_contato' ? ' — marca relacionamento prévio: lead cold nesta empresa passa a gerar aviso' : ''}${f.blocks_outreach ? ' (BLOQUEIA abordagens)' : ''}`}
+            >
+              {on ? '✓ ' : '+ '}{f.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── ExpandedRow ────────────────────────────────────────────────────────────────
 // Painel de histórico/contagem de abordagens (cold/warm/frozen) disparadas para a empresa.
 // Os totais já vêm na listagem (company.cold_calls/warm_calls/frozen_calls);
@@ -1033,6 +1108,7 @@ function ExpandedRow({ company, onEnrich, onFindContact, onRemoveContact, onCont
 
   return (
     <div style={{ background: '#f8f9fa', padding: '12px 16px', borderTop: '1px solid #dee2e6' }}>
+      <FlagsPanel company={company} toast={toast} onChanged={onContactAdded} />
       <CallHistoryPanel company={company} />
       <div className="d-flex gap-3 flex-wrap">
         <div style={{ flex: 1, minWidth: 300 }}>

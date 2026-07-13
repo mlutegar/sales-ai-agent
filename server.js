@@ -5599,12 +5599,24 @@ app.get('/api/learn/stats', (req, res) => {
        GROUP BY m.channel, ct.role`
     ).all();
 
-    const corrections_pending = db.prepare(
+    // Mesmos critérios do runDistillation (as DUAS fontes que a análise consome):
+    // reescritas do revisor + comentários de 👎 (score<=2) sem reescrita.
+    // Antes só contava reescritas — 10 👎 comentados mostravam "0 p/ analisar".
+    const rewrites_pending = db.prepare(
       `SELECT COUNT(*) AS cnt FROM messages
        WHERE human_correction IS NOT NULL AND human_correction != ''
          AND ai_original IS NOT NULL
+         AND (feedback_kind IS NULL OR feedback_kind != 'ephemeral')
          AND ABS(LENGTH(human_correction) - LENGTH(ai_original)) > 10`
     ).get().cnt;
+    const comments_pending = db.prepare(
+      `SELECT COUNT(*) AS cnt FROM messages
+       WHERE score_comment IS NOT NULL AND score_comment != ''
+         AND (human_correction IS NULL OR human_correction = '')
+         AND (feedback_kind IS NULL OR feedback_kind != 'ephemeral')
+         AND score IS NOT NULL AND score <= 2`
+    ).get().cnt;
+    const corrections_pending = rewrites_pending + comments_pending;
 
     const learned_patterns = db.prepare(
       'SELECT channel, role, pattern, confidence, sample_size FROM learned_patterns ORDER BY confidence DESC'

@@ -257,7 +257,7 @@ export default function RLHF({ toast, loadStats: parentLoadStats, initialMessage
             <div className="col-6 col-md-3">
               <div className="border rounded p-2 text-center">
                 <div className="fw-bold fs-5 text-info">{stats?.corrections_pending_analysis || 0}</div>
-                <div className="text-muted">Correções p/ Analisar</div>
+                <div className="text-muted" title="Reescritas do revisor + comentários de 👎 ainda não destilados em regras">Feedbacks p/ Analisar</div>
               </div>
             </div>
             <div className="col-6 col-md-3">
