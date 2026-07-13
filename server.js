@@ -816,7 +816,7 @@ function initDb() {
   const demoUsers = [
     { username: 'admin',     password: 'admin123',     name: 'Administrador',  user_type: 'vendas',    company_name: '',            signature_name: '' },
     { username: 'vendas',    password: 'vendas123',    name: 'Vendedor Demo',  user_type: 'vendas',    company_name: '',            signature_name: 'Vendedor Demo' },
-    { username: 'marketing', password: 'marketing123', name: 'Marketing Demo', user_type: 'marketing', company_name: 'Sua Empresa', signature_name: 'Sua Empresa' },
+    { username: 'marketing', password: 'marketing123', name: 'Marketing Demo', user_type: 'marketing', company_name: 'Sua Empresa', signature_name: '' },
   ];
   for (const u of demoUsers) {
     const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(u.username);
@@ -1118,21 +1118,21 @@ const ANTI_TEMPLATE_RULES =
   '- Varie a ESTRUTURA de abertura a cada mensagem; não comece sempre igual.\n' +
   '- PROIBIDO usar clichês de robô: "espero que esteja bem", "tudo bem?", "meu nome é ... e vim aqui porque", ' +
   '"passando para apresentar", "somos uma empresa que", "gostaria de agendar", "não perca essa oportunidade".\n' +
-  '- Abra por uma situação/fato/dor REAL do lead — nunca por auto-apresentação genérica.\n' +
+  '- Depois da identificação breve do remetente (quando exigida), abra por uma situação/fato/dor REAL do lead — nunca por auto-apresentação genérica/longa.\n' +
   '- Soe como uma pessoa escrevendo no WhatsApp: direto, específico, sem jargão de marketing.\n' +
   '- PROIBIDO usar placeholders/campos a preencher como "[seu nome]", "[nome]", "{empresa}", "<link>". ' +
   'Se você não souber um dado (ex.: seu próprio nome), NÃO o mencione e reescreva a frase sem ele — nunca deixe um espaço reservado.';
 
 // (#6) Ângulos distintos para as variantes A/B — cada uma abre por um caminho diferente.
 const VARIANT_ANGLES = [
-  { key: 'situacao', label: 'Abertura pela situação/fato do lead', guidance: 'Abra pela SITUAÇÃO ou FATO específico do lead (contexto/gancho) e conecte ao produto.' },
-  { key: 'prova',    label: 'Abertura por prova social/resultado', guidance: 'Abra por um RESULTADO/PROVA SOCIAL concreta de um par do mesmo setor e só então conecte à realidade do lead.' },
+  { key: 'situacao', label: 'Abertura pela situação/fato do lead', guidance: 'Logo após a identificação breve do remetente (quando exigida), abra pela SITUAÇÃO ou FATO específico do lead (contexto/gancho) e conecte ao produto.' },
+  { key: 'prova',    label: 'Abertura por prova social/resultado', guidance: 'Logo após a identificação breve do remetente (quando exigida), abra por um RESULTADO/PROVA SOCIAL concreta de um par do mesmo setor e só então conecte à realidade do lead.' },
 ];
 
 // (#7) Rubrica objetiva do teste "não parece bot" (5 critérios, 0-1 cada → total 0-5).
 const STYLE_RUBRIC_CRITERIA = [
   { key: 'personalizacao',    desc: 'Personalização real: cita algo específico do lead (não serve para qualquer empresa)' },
-  { key: 'sem_cliche',        desc: 'Ausência de clichê de robô (sem "tudo bem?", "espero que esteja bem", auto-apresentação genérica)' },
+  { key: 'sem_cliche',        desc: 'Ausência de clichê de robô (sem "tudo bem?", "espero que esteja bem", apresentação longa "meu nome é X e trabalho na..."); identificação breve do remetente no início ("aqui é o Rafael" / "aqui é da Acme") NÃO é clichê' },
   { key: 'produto_especifico',desc: 'Especificidade do produto: menciona o produto/uso concreto e relevante ao lead' },
   { key: 'cta_unico',         desc: 'CTA único e progressivo (uma pergunta/convite leve, sem tentar vender direto)' },
   { key: 'tom_cargo',         desc: 'Tom coerente com o cargo do contato e som humano/natural' },
@@ -2266,7 +2266,8 @@ function buildSenderBlock(user) {
   const type = (user.user_type || 'vendas').toLowerCase();
   if (type === 'marketing') {
     const brand = (user.company_name || '').trim() || (isGenericSenderName(user.name) ? '' : user.name) || 'nossa empresa';
-    const sig = (user.signature_name || '').trim();
+    const sigRaw = (user.signature_name || '').trim();
+    const sig = sigRaw.toLowerCase() === brand.toLowerCase() ? '' : sigRaw; // assinatura igual à marca duplicaria ("Marca — Marca")
     const assinatura = sig ? `"${brand} — ${sig}" (a marca em primeiro lugar; a pessoa apenas complementa)` : `"${brand}" ou "Equipe ${brand}"`;
     return `\n# REMETENTE (quem apresenta/assina — OBRIGATÓRIO)
 Você escreve em nome da EMPRESA "${brand}" (equipe de marketing). Apresente-se SEMPRE como a empresa "${brand}" — NUNCA use um nome de pessoa isolado como remetente. Assine como ${assinatura}.\n`;
@@ -2288,13 +2289,32 @@ function senderLine(user) {
   const type = (user.user_type || 'vendas').toLowerCase();
   if (type === 'marketing') {
     const brand = (user.company_name || '').trim() || (isGenericSenderName(user.name) ? '' : user.name) || 'nossa empresa';
-    const sig = (user.signature_name || '').trim();
+    const sigRaw = (user.signature_name || '').trim();
+    const sig = sigRaw.toLowerCase() === brand.toLowerCase() ? '' : sigRaw; // evita "Marca — Marca"
     const assina = sig ? `"${brand} — ${sig}"` : `"${brand}"`;
     return `Remetente: empresa "${brand}" (perfil marketing — apresente-se como a EMPRESA, nunca como pessoa isolada; assine ${assina})`;
   }
   const full = resolveSalesName(user);
   if (!full) return 'Remetente: pessoa real da equipe comercial — NÃO assine com nome genérico/de sistema ("Administrador", "Suporte") nem assinatura corporativa; encerre de forma natural, sem bloco de assinatura. Sem nome próprio definido: NÃO se apresente pelo nome e NUNCA use placeholder como "[seu nome]" — omita a auto-apresentação.';
   return `Remetente: ${full} (perfil vendas — apresente-se pelo primeiro nome e assine como ${full})`;
+}
+
+// Regra de identificação no PRIMEIRO contato: vendas fala o próprio nome; marketing,
+// o nome da empresa. É uma identificação breve e natural no início da mensagem —
+// diferente da "auto-apresentação genérica" longa proibida pelas regras de naturalidade.
+function firstContactIntroRule(user) {
+  if (!user) return '';
+  const type = (user.user_type || 'vendas').toLowerCase();
+  if (type === 'marketing') {
+    const brand = (user.company_name || '').trim() || (isGenericSenderName(user.name) ? '' : user.name) || 'nossa empresa';
+    return `\n## IDENTIFICAÇÃO NO 1º CONTATO (OBRIGATÓRIO)
+Por ser o primeiro contato, a mensagem DEVE se identificar como a empresa "${brand}" logo no início, de forma breve e natural (ex.: "Oi, aqui é da ${brand}."), antes de entrar no gancho. Identificação breve NÃO é a auto-apresentação genérica proibida — proibida é a apresentação longa tipo "meu nome é X e trabalho na empresa Y que faz Z".\n`;
+  }
+  const full = resolveSalesName(user);
+  if (!full) return ''; // sem nome pessoal utilizável, vale a regra de omitir auto-apresentação
+  const first = full.split(/\s+/)[0];
+  return `\n## IDENTIFICAÇÃO NO 1º CONTATO (OBRIGATÓRIO)
+Por ser o primeiro contato, a mensagem DEVE começar com o vendedor falando o próprio nome, de forma breve e natural (ex.: "Oi, aqui é o ${first}."), antes de entrar no gancho. Identificação breve NÃO é a auto-apresentação genérica proibida — proibida é a apresentação longa tipo "meu nome é ${first} e trabalho na empresa X que faz Y".\n`;
 }
 
 // Camada de humanização anti-detecção de bot (funções puras e testáveis).
@@ -3395,6 +3415,7 @@ ${productContext}
 ${socialProof ? 'Casos de sucesso:\n' + socialProof : ''}
 ${isFirst && hookExamples ? hookExamples : ''}
 ${isFirst ? ANTI_TEMPLATE_RULES : ''}
+${isFirst ? firstContactIntroRule(sender) : ''}
 ${angle.guidance ? '## ÂNGULO DESTA VARIANTE\n' + angle.guidance : ''}
 
 REGRA FACTUAL: só cite números, datas ou nomes próprios se vierem do gancho pesquisado, do contexto do operador ou da BASE DE PRODUTO acima. NUNCA invente estatísticas.
@@ -3795,6 +3816,12 @@ Produto: ${productValue}
 Gancho de pesquisa: ${hook}
 Tom: ${roleInfo.tone} | Foco: ${roleInfo.focus}
 Tarefa: escrever a mensagem do Dia ${day} — canal ${channel} (${desc}).`);
+
+  // 1º contato: exige identificação breve do remetente na abertura (vendas: nome; marketing: empresa).
+  if (Number(day) === 1) {
+    const introRule = firstContactIntroRule(sender);
+    if (introRule) sections.push(introRule.trim());
+  }
 
   // REGRAS APRENDIDAS (persistentes, acionáveis) — separadas de exemplos e críticas pontuais.
   if (rules && (rules.global?.length || rules.channel?.length)) {
