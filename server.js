@@ -1712,7 +1712,8 @@ Não aninhe objetos. Se não encontrar nada específico na web, baseie-se em ten
 
 app.get('/login', (req, res) => {
   if (req.session && req.session.userId) return res.redirect('/');
-  res.sendFile(path.join(__dirname, 'templates', 'login.html'));
+  // Serve o SPA — a rota /login do React (frontend/src/pages/Login.jsx) renderiza a tela de login
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.post('/login', (req, res) => {
