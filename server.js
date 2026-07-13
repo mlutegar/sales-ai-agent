@@ -2210,10 +2210,25 @@ app.post('/api/companies/:id/message', (req, res) => {
   const r = db.prepare(
     "INSERT INTO messages (contact_id, company_id, channel, day, msg_type, content, ai_original, status, approved, created_at, prompt_used, product) VALUES (?,?,'whatsapp',1,'text',?,?,?,?,datetime('now'),?,?)"
   ).run(contact.id, req.params.id, content, content, status, approved, prompt_used, product);
+  // (Opção 2) Mensagem escrita pelo humano e enviada direto = abordagem enviada.
+  // Rascunho ('pending') NÃO conta aqui — contará no Aprovar.
+  if (status === 'sent') registerCallEvent(db, req.params.id, contact.id);
   db.close();
   broadcastInboxUpdate();
   res.json({ ok: true, id: r.lastInsertRowid, status });
 });
+
+// Registra uma abordagem ENVIADA ao lead no histórico da empresa (call_events).
+// Momento do registro = aprovação/envio pelo humano (nunca na geração do rascunho):
+// rascunho descartado ou esquecido NÃO conta. O tipo (cold/warm/frozen) é o do
+// contato no momento do envio.
+function registerCallEvent(db, companyId, contactId) {
+  if (!companyId) return;
+  const ct = contactId ? db.prepare('SELECT call_type FROM contacts WHERE id=?').get(contactId) : null;
+  const callType = normalizeCallType(ct?.call_type);
+  db.prepare("INSERT INTO call_events (company_id, contact_id, call_type, created_at) VALUES (?,?,?,datetime('now'))")
+    .run(companyId, contactId || null, callType);
+}
 
 // Prompt de geração de mensagem de WhatsApp de vendas, estruturado para APROVEITAR
 // o aprendizado: regras duras (o que o revisor reprovou) + checagem final anti-violação.
@@ -3448,9 +3463,8 @@ CTA progressivo: convide para "conversa de 15 minutos" ou "demo rápida". NÃO t
 
   const db4 = getDb();
   db4.prepare("UPDATE companies SET status='sequence_created' WHERE id=?").run(req.params.id);
-  // Registra a abordagem disparada (histórico/contagem de cold/warm/frozen por empresa).
-  db4.prepare("INSERT INTO call_events (company_id, contact_id, call_type, created_at) VALUES (?,?,?,datetime('now'))")
-     .run(req.params.id, contact.id, callType);
+  // (Opção 2 aprovada) NÃO registra call_event aqui: a abordagem só conta quando
+  // o humano APROVA/ENVIA a mensagem (registerCallEvent no approve/envio direto).
   db4.close();
   // (#1) Sinaliza (sem bloquear) quando a abordagem disparada é COLD numa empresa
   // que já tinha relacionamento prévio.
@@ -4479,6 +4493,12 @@ app.post('/api/messages/:id/approve', async (req, res) => {
   }
 
   db.prepare("UPDATE messages SET approved=1,status='approved' WHERE id=?").run(req.params.id);
+  // (Opção 2) Abordagem conta AQUI: aprovação humana = mensagem vai ao lead.
+  // Guarda contra clique/chamada repetida (só a transição 0→1 registra) e ignora
+  // confirmações de reunião (não são abordagem de prospecção).
+  if (!msg.approved && msg.msg_type !== 'meeting_confirm') {
+    registerCallEvent(db, msg.company_id, msg.contact_id);
+  }
   db.close();
   // (#9) Auditoria: quem aprovou/enviou qual mensagem e quando.
   audit(req, 'message_approved', `Msg ${req.params.id} aprovada (${msg.channel})`, { company_id: msg.company_id, contact_id: msg.contact_id, message_id: Number(req.params.id) });

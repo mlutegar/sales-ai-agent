@@ -41,7 +41,7 @@ export default function Dashboard({ toast }) {
     ? (scoredCompanies.reduce((sum, c) => sum + c.interest_score, 0) / scoredCompanies.length).toFixed(1)
     : '—'
 
-  // Abordagens disparadas (cold/warm/frozen) — soma por empresa
+  // Abordagens enviadas (cold/warm/frozen) — soma por empresa
   const callTotals = companies.reduce((acc, c) => {
     acc.cold += c.cold_calls || 0
     acc.warm += c.warm_calls || 0
@@ -99,10 +99,10 @@ export default function Dashboard({ toast }) {
             </div>
           </div>
           
-          {/* Abordagens disparadas por tipo (cold/warm/frozen) */}
+          {/* Abordagens enviadas por tipo (cold/warm/frozen) */}
           <div className="col-12">
             <div className="card p-3">
-              <h6 className="fw-bold mb-3"><i className="bi bi-telephone-outbound me-1"></i>Abordagens disparadas por tipo</h6>
+              <h6 className="fw-bold mb-3"><i className="bi bi-telephone-outbound me-1"></i>Abordagens enviadas por tipo</h6>
               <div className="d-flex gap-2 flex-wrap">
                 {[
                   { key: 'cold', label: '❄️ Cold', color: '#0e7490' },

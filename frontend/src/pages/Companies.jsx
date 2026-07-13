@@ -953,7 +953,7 @@ function CallHistoryPanel({ company }) {
   return (
     <div className="mb-2 p-2 border rounded bg-white">
       <div className="d-flex align-items-center gap-2 flex-wrap">
-        <span className="fw-bold small"><i className="bi bi-clock-history me-1"></i>Abordagens disparadas</span>
+        <span className="fw-bold small"><i className="bi bi-clock-history me-1"></i>Abordagens enviadas</span>
         {['cold', 'warm', 'frozen'].map((t) => {
           const m = callMeta(t);
           return (
@@ -970,7 +970,7 @@ function CallHistoryPanel({ company }) {
         <div className="mt-2">
           {loading && <div className="small text-muted">Carregando…</div>}
           {!loading && history && history.length === 0 && (
-            <div className="small text-muted">Nenhuma abordagem disparada ainda.</div>
+            <div className="small text-muted">Nenhuma abordagem enviada ainda.</div>
           )}
           {!loading && history && history.length > 0 && (
             <ul className="list-unstyled small mb-0" style={{ maxHeight: 180, overflowY: 'auto' }}>
