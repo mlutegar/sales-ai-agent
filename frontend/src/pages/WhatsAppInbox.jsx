@@ -165,7 +165,10 @@ const AR_LABELS = {
 
 function timeAgo(dateStr) {
   if (!dateStr) return ''
-  const d = new Date(dateStr)
+  // O banco grava em UTC ("YYYY-MM-DD HH:MM:SS"); sem o 'Z' o navegador lê como
+  // hora local e o tempo de espera fica errado (ex.: -3h no Brasil).
+  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(dateStr) ? dateStr.replace(' ', 'T') + 'Z' : dateStr
+  const d = new Date(iso)
   if (isNaN(d.getTime())) return ''
   const diff = Date.now() - d.getTime()
   const m = Math.floor(diff / 60000)
@@ -174,6 +177,31 @@ function timeAgo(dateStr) {
   const h = Math.floor(m / 60)
   if (h < 24) return `${h}h`
   return `${Math.floor(h / 24)}d`
+}
+
+// Estado de acompanhamento da conversa (abas do inbox), do ponto de vista do OPERADOR:
+//  meeting     = lead quer reunião (aguarda ação humana)
+//  awaiting_me = lead respondeu → aguardando a SUA resposta
+//  responded   = você já respondeu → bola com o lead (que já participou da conversa)
+//  first_sent  = 1º contato enviado; lead nunca respondeu ainda
+//  draft       = último item é rascunho ainda não aprovado/enviado
+function convState(c) {
+  if ((c.meeting_pending || 0) > 0) return 'meeting'
+  if ((c.unread || 0) > 0 || c.last_status === 'received') return 'awaiting_me'
+  // 'approved' conta como enviada: no fluxo real o Aprovar já dispara o envio
+  // (o "Enviada" é só o registro final do operador).
+  if (c.last_status === 'sent' || c.last_status === 'approved') {
+    return (c.received_count || 0) > 0 ? 'responded' : 'first_sent'
+  }
+  return 'draft'
+}
+
+const CONV_STATE_META = {
+  awaiting_me: { hint: (t) => `💬 aguarda sua resposta há ${t}`,        color: '#15803d' },
+  responded:   { hint: (t) => `✅ você respondeu há ${t} — com o lead`, color: '#0e7490' },
+  first_sent:  { hint: (t) => `📨 1º contato há ${t} — sem retorno`,    color: '#b45309' },
+  meeting:     { hint: ()  => '📅 quer reunião — aguarda você',         color: '#1d4ed8' },
+  draft:       { hint: ()  => '📝 rascunho aguardando aprovação',       color: '#6b7280' },
 }
 
 // ── Painel de contexto do lead (ao lado da conversa) ───────────────────────────
@@ -1047,6 +1075,7 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
   const [selected,   setSelected]   = useState(initialCompanyId ?? null)
   const [loading,    setLoading]    = useState(true)
   const [search,     setSearch]     = useState('')
+  const [tab,        setTab]        = useState('all')   // filtro de acompanhamento
   const [listCollapsed, setListCollapsed] = useState(() => {
     try { return localStorage.getItem('wa_list_collapsed') === '1' } catch { return false }
   })
@@ -1101,8 +1130,20 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
   }
 
   const filtered = inbox.filter(c =>
-    !search || c.company_name?.toLowerCase().includes(search.toLowerCase())
+    (!search || c.company_name?.toLowerCase().includes(search.toLowerCase())) &&
+    (tab === 'all' || convState(c) === tab)
   )
+
+  // Contadores por estado (sempre sobre a lista completa, ignorando a busca)
+  const tabCounts = inbox.reduce((acc, c) => { acc[convState(c)] = (acc[convState(c)] || 0) + 1; return acc }, {})
+  const TABS = [
+    { key: 'all',         label: 'Todas',          count: inbox.length },
+    { key: 'awaiting_me', label: '💬 Aguardando',   count: tabCounts.awaiting_me || 0 },
+    { key: 'responded',   label: '✅ Respondidas',  count: tabCounts.responded || 0 },
+    { key: 'first_sent',  label: '📨 1º contato',   count: tabCounts.first_sent || 0 },
+    { key: 'meeting',     label: '📅 Reunião',      count: tabCounts.meeting || 0 },
+    { key: 'draft',       label: '📝 Rascunhos',    count: tabCounts.draft || 0 },
+  ]
 
   // Altura total disponível menos navbar e statcards (~160px)
   return (
@@ -1137,6 +1178,24 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
             onChange={e => setSearch(e.target.value)}
             style={{ borderRadius: 20, fontSize: '.8rem' }}
           />
+          {/* Abas de acompanhamento: de quem estamos aguardando o quê */}
+          <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' }}>
+            {TABS.map(t => (
+              <button
+                key={t.key}
+                onClick={() => setTab(t.key)}
+                title={t.key === 'awaiting_me' ? 'O lead respondeu — aguardando a SUA resposta' : t.key === 'responded' ? 'Você já respondeu — aguardando o lead voltar' : t.key === 'first_sent' ? 'Primeira mensagem enviada/aprovada — o lead ainda não respondeu nada' : t.key === 'meeting' ? 'Lead quer reunião — aguardando confirmação humana' : t.key === 'draft' ? 'Rascunho gerado aguardando sua aprovação' : 'Todas as conversas'}
+                style={{
+                  border: 'none', borderRadius: 12, padding: '2px 8px', cursor: 'pointer',
+                  fontSize: '.68rem', fontWeight: 600,
+                  background: tab === t.key ? '#fff' : 'rgba(255,255,255,.18)',
+                  color: tab === t.key ? '#075e54' : '#fff',
+                }}
+              >
+                {t.label} {t.count > 0 ? `(${t.count})` : ''}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* lista */}
@@ -1206,10 +1265,19 @@ export default function WhatsAppInbox({ toast, initialCompanyId, initialContactI
                     </div>
                   </div>
                 </div>
-                <div style={{ paddingLeft: 42 }}>
+                <div style={{ paddingLeft: 42, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
                   <span style={{ fontSize: '.65rem', color: arCfg.color, fontWeight: 500 }}>
                     ● {arCfg.label}
                   </span>
+                  {(() => {
+                    const st = convState(c)
+                    const meta = CONV_STATE_META[st]
+                    return (
+                      <span style={{ fontSize: '.64rem', color: meta.color, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                        {meta.hint(timeAgo(c.last_at))}
+                      </span>
+                    )
+                  })()}
                 </div>
               </div>
             )

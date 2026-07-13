@@ -5126,7 +5126,16 @@ app.get('/api/whatsapp/inbox', (req, res) => {
       (SELECT COUNT(*) FROM messages
          WHERE company_id=co.id AND channel='whatsapp' AND status='received'
            AND id > COALESCE((SELECT MAX(id) FROM messages WHERE company_id=co.id AND channel='whatsapp' AND status!='received'),0)
-      ) AS unread
+      ) AS unread,
+      -- Pedido de reunião ainda não tratado pelo humano (notificação não lida)
+      (SELECT COUNT(*) FROM notifications n
+         WHERE n.company_id=co.id AND n.read=0
+           AND n.type IN ('meeting_request','meeting_suggested','meeting_conflict')
+      ) AS meeting_pending,
+      -- O lead já respondeu ALGUMA VEZ nesta conversa? (distingue "1º contato" de "respondida")
+      (SELECT COUNT(*) FROM messages
+         WHERE company_id=co.id AND channel='whatsapp' AND status='received'
+      ) AS received_count
     FROM companies co
     JOIN (
       SELECT company_id, MAX(id) AS max_id
