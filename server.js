@@ -2326,6 +2326,7 @@ const WA_SYSTEM = 'Você é um SDR brasileiro especialista em prospecção por W
 
 function buildWhatsappUserPrompt({ company, contact, observation, rules, negExamples, threadHistory, previous, product, docsContext, sender, humanBlock }) {
   const senderBlock = buildSenderBlock(sender);
+  const liBlock = linkedinProfileBlock(contact); // só perfis validados por humano
   const who = `${contact?.name || 'o contato'}${contact?.role ? ` (${contact.role})` : ''}${company ? ` — empresa ${company.name}${company.sector ? `, setor ${company.sector}` : ''}` : ''}`;
 
   // Bloco de REGRAS APRENDIDAS estruturado (v2), separando global x canal.
@@ -2361,7 +2362,7 @@ A mensagem acima foi reprovada. Corrija EXATAMENTE isto: "${observation}".
 Mude só o necessário para atender a correção — mantenha o mesmo assunto/produto e objetivo (a não ser que a correção seja justamente sobre trocar o assunto).`
   : `# O que fazer
 NÃO houve reprovação. Gere uma VARIAÇÃO diferente da mensagem acima: mesmo assunto, mesmo produto/oferta e mesmo objetivo — mudando apenas a abordagem e a redação (abertura, ângulo, tom, estrutura). NÃO troque o tema nem remova o produto/assunto que a mensagem atual menciona.`}
-${senderBlock}${contact?.context ? `\n# Sobre a pessoa (personalize)\n${contact.context}\n` : ''}${rulesBlock}${histBlock}${negBlock}${docsBlock}${humanBlock || ''}
+${senderBlock}${contact?.context ? `\n# Sobre a pessoa (personalize)\n${contact.context}\n` : ''}${liBlock ? `\n# Perfil do contato (LinkedIn validado — use para personalizar; não copie literalmente)\n${liBlock}\n` : ''}${rulesBlock}${histBlock}${negBlock}${docsBlock}${humanBlock || ''}
 # Regras
 - Mantenha o assunto/produto da mensagem atual.
 - Não pareça IA nem template; soe como um humano no WhatsApp.
@@ -3113,6 +3114,9 @@ app.post('/api/companies/:id/research', async (req, res) => {
   const roleInfo = ROLE_PROFILES[contact?.role] || ROLE_PROFILES.other;
   const callType = normalizeCallType(contact?.call_type);
   const manualContext = (contact?.context || '').trim();
+  // Perfil de LinkedIn VALIDADO por humano → entra no gancho de todos os tipos de call.
+  const liBlock = linkedinProfileBlock(contact);
+  const liSection = liBlock ? `\nPerfil do contato (LinkedIn validado — use para personalizar; não copie literalmente):\n${liBlock}\n` : '';
   const productValue = req.body.product_value || 'solução de automação de vendas com IA';
   const golden = db.prepare('SELECT content FROM golden_cases ORDER BY score DESC LIMIT 2').all();
   const goldenCtx = golden.map(g => g.content).join('\n');
@@ -3146,7 +3150,7 @@ Produto sendo vendido: ${productValue}
 Perfil do cargo: foco em ${roleInfo.focus}, tom ${roleInfo.tone}
 Contexto do lead (fornecido pelo operador):
 ${manualContext}
-${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
+${liSection}${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
 ${learned ? '\nREGRAS OBRIGATÓRIAS aprendidas com o revisor humano (o hook DEVE cumprir todas):\n' + learned + '\n' : ''}
 
 Gere um JSON PLANO e CONCISO com estas chaves:
@@ -3167,7 +3171,7 @@ Contato: ${contact.name} (${contact.role})
 Produto sendo vendido: ${productValue}
 Contexto/histórico já existente com este lead:
 ${priorCtx || '(sem contexto prévio registrado — retome de forma leve, sem inventar fatos)'}
-${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
+${liSection}${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
 ${learned ? '\nREGRAS OBRIGATÓRIAS aprendidas com o revisor humano (o hook DEVE cumprir todas):\n' + learned + '\n' : ''}
 
 Gere um JSON PLANO e CONCISO com estas chaves:
@@ -3185,7 +3189,7 @@ Produto sendo vendido: ${productValue}
 Perfil do cargo: foco em ${roleInfo.focus}, tom ${roleInfo.tone}
 ${senderBlock}
 ${manualContext ? 'Contexto pessoal do lead (informado pelo operador — use para deixar o gancho mais pessoal e menos "de IA"):\n' + manualContext : ''}
-${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
+${liSection}${goldenCtx ? 'Exemplos de sucesso:\n' + goldenCtx : ''}
 ${learned ? '\nREGRAS OBRIGATÓRIAS aprendidas com o revisor humano — o "hook" DEVE cumprir TODAS, sem exceção. Uma regra do tipo "não falar sobre X" significa que o tema X não pode aparecer no hook de forma nenhuma (nem indireta, nem sinônimo):\n' + learned + '\n' : ''}
 
 Com base SOMENTE no que você encontrar na web, gere um JSON PLANO e CONCISO com exatamente estas chaves:
@@ -4133,13 +4137,15 @@ app.post('/api/companies/:id/simulator/bot-reply', async (req, res) => {
     db3.close();
   }
 
+  // Perfil validado do contato também personaliza a resposta do bot.
+  const liReply = linkedinProfileBlock(contact);
   const draftPrompt = `Escreva a PRÓXIMA mensagem do VENDEDOR (bot) via WhatsApp, dando continuidade natural à conversa acima.
 Regras:
 - Responda ao que o cliente disse por último; avance a conversa
 - NÃO repita pontos, argumentos ou perguntas que você (vendedor) já fez antes
 - Curta (máx 80 palavras), objetiva, tom consultivo e profissional
 - Se fizer sentido, convide para uma conversa de 15 minutos
-- Escreva APENAS o texto da mensagem${scheduleNote}`;
+- Escreva APENAS o texto da mensagem${liReply ? `\n\n## PERFIL DO CONTATO (LinkedIn validado — use para personalizar; não copie literalmente)\n${liReply}` : ''}${scheduleNote}`;
   const draft_reply = await callClaude('Você é SDR especialista em respostas rápidas para prospects.', draftPrompt, 200, priorTurns);
   if (isAiError(draft_reply)) return res.status(502).json({ error: 'IA indisponível ao gerar resposta do bot', detail: draft_reply });
 
@@ -5479,9 +5485,10 @@ async function generateFollowupDraft(contactId, channel = 'whatsapp') {
   db.close();
 
   const roleInfo = ROLE_PROFILES[contact?.role] || ROLE_PROFILES.other;
+  const liFollowup = linkedinProfileBlock(contact); // perfil validado → personaliza o follow-up
   const prompt = `Escreva uma mensagem de FOLLOW-UP curta e educada via ${channel} para reengajar o contato
 ${contact.name} (${company?.name || 'empresa'}), que não respondeu à última abordagem.
-Tom: ${roleInfo.tone}. Foco: ${roleInfo.focus}.
+Tom: ${roleInfo.tone}. Foco: ${roleInfo.focus}.${liFollowup ? `\nPerfil do contato (LinkedIn validado — use para personalizar; não copie literalmente):\n${liFollowup}` : ''}
 Regras:
 - NÃO soe insistente nem repita a mensagem anterior literalmente
 - Traga um novo ângulo de valor ou uma pergunta leve que facilite a resposta
